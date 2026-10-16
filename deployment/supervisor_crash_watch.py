@@ -271,6 +271,7 @@ class Watcher:
         self.lock = threading.RLock()
         self.misses: dict[str, int] = {}
         self.armed: dict[str, float] = {}  # name -> start time it first passed a probe
+        self.alerted: dict[str, float] = {}
 
     def probe_once(self, probes: dict) -> None:
         proxy = self.proxy()
@@ -291,9 +292,13 @@ class Watcher:
                 self.armed[name] = start
                 continue
             if self.armed.get(name) != start:
-                # Slow starters (Conversation loads models ~50 s) only count once healthy, or after a deadline.
-                if self.clock() - start < STARTUP_DEADLINE_S:
-                    continue
+                # Never answered since start: a slow starter or a wrong probe, so alert once, never restart.
+                if self.clock() - start >= STARTUP_DEADLINE_S and self.alerted.get(name) != start:
+                    self.alerted[name] = start
+                    msg = f"{name} has not passed its heartbeat in {STARTUP_DEADLINE_S}s since start; check it"
+                    log(msg)
+                    notify(msg)
+                continue
             n = self.misses[name] = self.misses.get(name, 0) + 1
             log(f"{name} missed heartbeat ({n}/{MISSES_TO_RESTART})")
             if n >= MISSES_TO_RESTART:
