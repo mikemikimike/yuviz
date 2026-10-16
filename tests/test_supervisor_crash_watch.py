@@ -138,3 +138,25 @@ def test_fatal_opens_the_circuit_and_the_trial_starts_it(tmp_path):
     assert timers[-1][0] == 300 and sup.stops == 0
     timers[-1][1]()
     assert sup.starts == 1 and w.policy.state("gw").half_open_since == 100.0
+
+
+def test_an_early_close_check_reschedules_instead_of_giving_up(tmp_path):
+    sup, clock = _FakeSupervisor("FATAL"), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    w.on_event("PROCESS_STATE_FATAL", "gw", "")
+    timers[-1][1]()  # trial start at t=100
+    clock[0] = 699.99  # the timer fired a hair early
+    timers[-1][1]()
+    assert w.policy.state("gw").half_open_since == 100.0
+    clock[0] = 701.0
+    timers[-1][1]()
+    assert w.policy.state("gw").half_open_since is None and w.policy.state("gw").opens == 0
+
+
+def test_a_hand_start_resets_the_breaker(tmp_path):
+    sup, clock = _FakeSupervisor("FATAL"), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    w.on_event("PROCESS_STATE_FATAL", "gw", "")
+    sup.statename = "RUNNING"  # someone ran `supervisorctl start`
+    timers[-1][1]()
+    assert sup.starts == 0 and w.policy.state("gw").opens == 0

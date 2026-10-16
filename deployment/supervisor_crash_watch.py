@@ -221,16 +221,25 @@ class Watcher:
                 start_service(proxy, name)
                 if trial:
                     s.half_open_since = self.clock()
-                    self.schedule(self.policy.window_s, lambda: self.check_closed(name))
+                    self.schedule(self.policy.window_s + 1, lambda: self.check_closed(name))
+            else:
+                s.opens, s.crashes, s.half_open_since = 0, [], None  # a human took over
             self.save()
         log(f"{name}: {'trial start (half-open)' if trial else 'restarted after backoff'}" if ours
             else f"{name}: changed by hand since ({info['statename']}); leaving it alone")
 
     def check_closed(self, name: str) -> None:
         with self.lock:
-            if self.policy.close_if_survived(name, self.clock()):
-                self.save()
-                log(f"{name}: survived {self.policy.window_s:.0f}s after trial; circuit closed")
+            s = self.policy.state(name)
+            if s.half_open_since is None:
+                return
+            remaining = s.half_open_since + self.policy.window_s - self.clock()
+            if remaining > 0:  # timers can fire a hair early
+                self.schedule(remaining + 1, lambda: self.check_closed(name))
+                return
+            self.policy.close_if_survived(name, self.clock())
+            self.save()
+        log(f"{name}: survived {self.policy.window_s:.0f}s after trial; circuit closed")
 
 
 def main() -> None:
