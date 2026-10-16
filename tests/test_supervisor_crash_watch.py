@@ -165,10 +165,20 @@ def test_a_hand_start_resets_the_breaker(tmp_path):
 def test_notify_prefers_terminal_notifier_and_opens_the_log(monkeypatch):
     calls = []
     monkeypatch.setattr(cw.sys, "platform", "darwin")
-    monkeypatch.setattr(cw.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    rc = [0]
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return cw.subprocess.CompletedProcess(cmd, rc[0])
+
+    monkeypatch.setattr(cw.subprocess, "run", run)
     monkeypatch.setattr(cw.shutil, "which", lambda name: "/opt/homebrew/bin/terminal-notifier")
     cw.notify("gw keeps failing")
-    assert calls[-1][0].endswith("terminal-notifier") and cw.LOG_FILE.as_uri() in calls[-1]
+    assert len(calls) == 1 and calls[-1][0].endswith("terminal-notifier") and cw.LOG_FILE.as_uri() in calls[-1]
+
+    rc[0] = 3  # notifications not allowed for terminal-notifier
+    cw.notify("gw keeps failing")
+    assert calls[-1][0] == "osascript"
 
     monkeypatch.setattr(cw.shutil, "which", lambda name: None)
     monkeypatch.setattr(cw.os.path, "exists", lambda p: False)
