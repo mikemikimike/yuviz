@@ -338,7 +338,7 @@ tail -f ~/.yuviz/logs/gateway.log
 - **Stop it with Ctrl-C, not by closing the tab.** Closing the tab sends SIGHUP, which supervisord treats as "reload and restart every service".
 - **Check for live calls before restarting** FreeSWITCH, the Gateway or the Conversation Services. `restart` doesn't check.
 - **After editing the config,** `supervisorctl -c deployment/supervisord.conf update` restarts only the services whose section changed.
-- **Logs:** each service writes its own log to `~/.yuviz/logs/<service>.log`. `<service>.supervisor.log` holds only errors from starting it.
+- **Logs:** each service writes its own log to `~/.yuviz/logs/<service>.log`. `<service>.supervisor.log` holds only errors from starting it. The `log-rotate` listener checks hourly and rotates any log over 20 MB, keeping 3 (`.1`–`.3`).
 - **Crash loops stop instead of flapping:**
   - **Crashes during startup:** a service that dies within its first few seconds is retried 3 times, then marked FATAL.
   - **Crashes after startup:** the `crash-watch` listener backs off. The first crash restarts at once, and the next ones wait 2, 4 and 8 s.
