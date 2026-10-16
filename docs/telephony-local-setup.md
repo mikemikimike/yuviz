@@ -339,6 +339,11 @@ tail -f ~/.yuviz/logs/gateway.log
 - **Check for live calls before restarting** FreeSWITCH, the Gateway or the Conversation Services. `restart` doesn't check.
 - **After editing the config,** `supervisorctl -c deployment/supervisord.conf update` restarts only the services whose section changed.
 - **Logs:** each service writes its own log to `~/.yuviz/logs/<service>.log`. `<service>.supervisor.log` holds only errors from starting it.
+- **Crash loops stop instead of flapping:**
+  - **Crashes during startup:** a service that dies within its first few seconds is retried 3 times, then marked FATAL.
+  - **Crashes after startup:** supervisord would restart these forever, so the `crash-watch` listener steps in. After 3 unexpected exits within 10 minutes it stops the service, logs the reason to `~/.yuviz/logs/crash-watch.log` and shows a macOS notification.
+
+  Either way, fix the cause, then run `supervisorctl -c deployment/supervisord.conf start <service>`.
 
 ## Softphone
 
