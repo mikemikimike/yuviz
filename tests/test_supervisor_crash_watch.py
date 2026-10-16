@@ -160,3 +160,17 @@ def test_a_hand_start_resets_the_breaker(tmp_path):
     sup.statename = "RUNNING"  # someone ran `supervisorctl start`
     timers[-1][1]()
     assert sup.starts == 0 and w.policy.state("gw").opens == 0
+
+
+def test_notify_prefers_terminal_notifier_and_opens_the_log(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cw.sys, "platform", "darwin")
+    monkeypatch.setattr(cw.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    monkeypatch.setattr(cw.shutil, "which", lambda name: "/opt/homebrew/bin/terminal-notifier")
+    cw.notify("gw keeps failing")
+    assert calls[-1][0].endswith("terminal-notifier") and cw.LOG_FILE.as_uri() in calls[-1]
+
+    monkeypatch.setattr(cw.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cw.os.path, "exists", lambda p: False)
+    cw.notify("gw keeps failing")
+    assert calls[-1][0] == "osascript"

@@ -5,6 +5,7 @@ import argparse
 import http.client
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -105,10 +106,19 @@ def log(msg: str) -> None:
     sys.stderr.flush()
 
 
+LOG_FILE = Path.home() / ".yuviz" / "logs" / "crash-watch.log"
+
+
 def notify(msg: str) -> None:
-    if sys.platform == "darwin":
-        subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "yuviz crash-watch"'],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+    if sys.platform != "darwin":
+        return
+    notifier = shutil.which("terminal-notifier") or next(
+        (p for p in ("/opt/homebrew/bin/terminal-notifier", "/usr/local/bin/terminal-notifier") if os.path.exists(p)), None)
+    if notifier:  # clicking opens the log
+        cmd = [notifier, "-title", "yuviz crash-watch", "-message", msg, "-open", LOG_FILE.as_uri(), "-group", "yuviz-crash-watch"]
+    else:  # osascript notifications are credited to Script Editor
+        cmd = ["osascript", "-e", f'display notification "{msg}" with title "yuviz crash-watch"']
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
 
 
 def stop_service(proxy, name: str, settle_s: float = 60.0) -> float | None:
