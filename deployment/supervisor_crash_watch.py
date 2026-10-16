@@ -1,7 +1,4 @@
-"""supervisord event listener: stops a service that keeps crashing after it started, which startretries never catches.
-
-Standard library only; stdout is the supervisord protocol channel, so diagnostics go to stderr.
-"""
+"""Stops a service that keeps crashing after startup. stdout is the supervisord protocol; log to stderr."""
 import argparse
 import http.client
 import os
@@ -22,7 +19,6 @@ class CrashCounter:
         self._exits: dict[str, deque[float]] = defaultdict(deque)
 
     def record(self, name: str, now: float) -> int:
-        """Records an unexpected exit and returns how many fall inside the window."""
         exits = self._exits[name]
         exits.append(now)
         while exits and now - exits[0] > self.window_s:
@@ -74,7 +70,7 @@ def notify(msg: str) -> None:
 
 
 def stop_service(proxy, name: str, settle_s: float = 15.0) -> bool:
-    """The exited process is mid-restart; wait for a stoppable state, then stop it without waiting."""
+    # supervisord is mid-restart; wait for a stoppable state.
     deadline = time.monotonic() + settle_s
     while time.monotonic() < deadline:
         state = proxy.supervisor.getProcessInfo(name)["statename"]

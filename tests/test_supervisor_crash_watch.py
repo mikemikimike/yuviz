@@ -12,8 +12,8 @@ def test_counts_only_exits_inside_the_window():
     c = cw.CrashCounter(max_crashes=3, window_s=600)
     assert c.record("gateway", 0) == 1
     assert c.record("gateway", 100) == 2
-    assert c.record("gateway", 700) == 2  # the exit at t=0 fell out of the window
-    assert c.record("gateway", 750) == 2  # so did t=100
+    assert c.record("gateway", 700) == 2  # t=0 expired
+    assert c.record("gateway", 750) == 2  # t=100 expired
     assert c.record("gateway", 760) == 3
 
 
