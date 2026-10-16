@@ -343,7 +343,7 @@ tail -f ~/.yuviz/logs/gateway.log
   - **Crashes during startup:** a service that dies within its first few seconds is retried 3 times, then marked FATAL.
   - **Crashes after startup:** the `crash-watch` listener backs off. The first crash restarts at once, and the next ones wait 2, 4 and 8 s.
   - **Circuit breaker:** after 5 crashes within 10 minutes, or a FATAL, the circuit opens. The service is stopped and gets one trial start after 5 minutes, then 10, 20 and so on, up to 1 hour. If it stays up for 10 minutes, the circuit closes.
-  - **Where to look:** `~/.yuviz/logs/crash-watch.log`, plus a macOS notification when the circuit opens. Install `terminal-notifier` (`brew install terminal-notifier`) so clicking it opens that log. Without it, the notification is credited to Script Editor.
+  - **Where to look:** `~/.yuviz/logs/crash-watch.log`, plus a macOS notification when the circuit opens. Install `terminal-notifier` so clicking it opens that log: `brew install terminal-notifier`, then launch it once with `open "$(brew --prefix terminal-notifier)/terminal-notifier.app"` so macOS registers it, and allow its notifications. Without it, the notification is credited to Script Editor.
   - **Safe to restart:** state is saved in `~/.yuviz/crash-watch.json`, so a restart of crash-watch resumes pending restarts. A service you stop by hand is never restarted.
 
 ## Softphone
