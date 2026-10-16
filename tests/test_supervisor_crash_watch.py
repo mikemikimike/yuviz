@@ -211,16 +211,18 @@ def test_hang_is_restarted_after_three_misses_once_armed(tmp_path):
     assert sup.starts == 1
 
 
-def test_a_slow_starter_is_not_killed_before_it_first_passes(tmp_path):
+def test_a_service_that_never_passed_is_alerted_once_and_never_restarted(tmp_path, monkeypatch):
     sup, clock = _ProbeSupervisor(start=100.0), [110.0]
     w, _ = _watcher(tmp_path, sup, clock)
+    alerts = []
+    monkeypatch.setattr(cw, "notify", alerts.append)
     for _ in range(10):
-        w.probe_once({"conv": lambda: False})
-    assert sup.stops == 0
-    clock[0] = 100.0 + cw.STARTUP_DEADLINE_S + 1  # never became healthy
-    for _ in range(3):
-        w.probe_once({"conv": lambda: False})
-    assert sup.stops == 1
+        w.probe_once({"gw": lambda: False})  # slow starter, or a wrong probe
+    assert sup.stops == 0 and alerts == []
+    clock[0] = 100.0 + cw.STARTUP_DEADLINE_S + 1
+    for _ in range(10):
+        w.probe_once({"gw": lambda: False})
+    assert sup.stops == 0 and len(alerts) == 1
 
 
 def test_unknown_and_stopped_services_are_not_counted(tmp_path):
