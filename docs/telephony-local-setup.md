@@ -341,9 +341,10 @@ tail -f ~/.yuviz/logs/gateway.log
 - **Logs:** each service writes its own log to `~/.yuviz/logs/<service>.log`. `<service>.supervisor.log` holds only errors from starting it.
 - **Crash loops stop instead of flapping:**
   - **Crashes during startup:** a service that dies within its first few seconds is retried 3 times, then marked FATAL.
-  - **Crashes after startup:** supervisord would restart these forever, so the `crash-watch` listener steps in. After 3 unexpected exits within 10 minutes it stops the service, logs the reason to `~/.yuviz/logs/crash-watch.log` and shows a macOS notification.
-
-  Either way, fix the cause, then run `supervisorctl -c deployment/supervisord.conf start <service>`.
+  - **Crashes after startup:** the `crash-watch` listener backs off. The first crash restarts at once, and the next ones wait 2, 4 and 8 s.
+  - **Circuit breaker:** after 5 crashes within 10 minutes, or a FATAL, the circuit opens. The service is stopped and gets one trial start after 5 minutes, then 10, 20 and so on, up to 1 hour. If it stays up for 10 minutes, the circuit closes.
+  - **Where to look:** `~/.yuviz/logs/crash-watch.log`, plus a macOS notification when the circuit opens.
+  - **Safe to restart:** state is saved in `~/.yuviz/crash-watch.json`, so a restart of crash-watch resumes pending restarts. A service you stop by hand is never restarted.
 
 ## Softphone
 
