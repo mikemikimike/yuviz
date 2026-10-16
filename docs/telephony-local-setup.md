@@ -334,6 +334,7 @@ deployment/svc restart gateway      # refused while calls are live; --force over
 tail -f ~/.yuviz/logs/gateway.log
 ```
 
+- **Or start it at login:** `deployment/autostart.sh install` (opt-in; macOS LaunchAgent, `ProcessType=Interactive`, restarted if it dies). Stop the terminal-tab supervisord first. `deployment/autostart.sh uninstall` removes it and stops every service.
 - **Run it in a normal foreground tab.** Every service inherits supervisord's CPU priority, so starting it with `&` or from a background launchd job slows call audio.
 - **Stop it with Ctrl-C, not by closing the tab.** Closing the tab sends SIGHUP, which supervisord treats as "reload and restart every service".
 - **Use `deployment/svc`, not bare `supervisorctl`.** It takes the same commands, but refuses to stop or restart a call-path service (Kamailio, FreeSWITCH, Gateway, Envoy, Conversation, Webcall, Telephony), or run `update`/`reload`/`all`, while any call is live. It counts SIP channels on FreeSWITCH plus open `calls` rows, which covers Vobiz/Cloudonix and browser calls. If it can't count, it refuses too. `--force` cuts the calls off.
