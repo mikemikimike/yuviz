@@ -52,7 +52,20 @@ _env_put() {
 
 # Creates .env from .env.example, adds keys added to the example since, and
 # fills any blank platform secret. Never touches a value already set.
+# Serialised: concurrent starts (supervisord runs 15 at once) would each generate a different secret.
 _env_init() {
+  local lock="$REPO/.env.lock" waited=0 rc
+  until mkdir "$lock" 2>/dev/null; do
+    waited=$((waited + 1))
+    [ "$waited" -ge 100 ] && { rmdir "$lock" 2>/dev/null; waited=0; }
+    sleep 0.1
+  done
+  _env_init_locked; rc=$?
+  rmdir "$lock" 2>/dev/null
+  return $rc
+}
+
+_env_init_locked() {
   [ -f "$REPO/.env" ] || { (umask 077; cp "$REPO/.env.example" "$REPO/.env"); echo "✓ created .env from .env.example"; }
   local line key
   while IFS= read -r line; do

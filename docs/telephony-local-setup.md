@@ -338,6 +338,7 @@ tail -f ~/.yuviz/logs/gateway.log
 - **Stop it with Ctrl-C, not by closing the tab.** Closing the tab sends SIGHUP, which supervisord treats as "reload and restart every service".
 - **Check for live calls before restarting** FreeSWITCH, the Gateway or the Conversation Services. `restart` doesn't check.
 - **After editing the config,** `supervisorctl -c deployment/supervisord.conf update` restarts only the services whose section changed.
+- **Network sync** (`install_network_sync`, `SIP_IP=auto`) works alongside it: `update_kamailio_ip.sh` restarts Kamailio, FreeSWITCH, the Gateway and Campaigns through `supervisorctl` while supervisord runs them.
 - **Logs:** each service writes its own log to `~/.yuviz/logs/<service>.log`. `<service>.supervisor.log` holds only errors from starting it. The `log-rotate` listener checks hourly and rotates any log over 20 MB, keeping 3 (`.1`–`.3`).
 - **Crash loops stop instead of flapping:**
   - **Crashes during startup:** a service that dies within its first few seconds is retried 3 times, then marked FATAL.
