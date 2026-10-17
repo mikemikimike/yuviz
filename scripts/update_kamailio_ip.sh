@@ -123,13 +123,13 @@ elif ! kamailio -c -f "$KAMAILIO_DIR/kamailio.cfg" -Y "$KAMAILIO_DIR/run" >/dev/
   echo "    kamailio -c -f $KAMAILIO_DIR/kamailio.cfg -Y $KAMAILIO_DIR/run" >&2
   ok=0
 elif _supervised kamailio; then
-  # Its start reruns this script, which finishes the remaining steps; running them here too would race it.
+  # Its start reruns this script, which finds $LOCK held and starts Kamailio; this run does steps 3-5.
   if _sv restart kamailio >/dev/null; then
-    echo "  kamailio: restarted by supervisord on $IP; the rest of this sync runs in its start (log $YUVIZ_LOGS/kamailio.log)"
-    exit 0
+    echo "  kamailio: restarted by supervisord on $IP"
+  else
+    echo "  WARNING: supervisorctl restart kamailio failed; see supervisorctl status kamailio" >&2
+    ok=0
   fi
-  echo "  WARNING: supervisorctl restart kamailio failed; it is left alone." >&2
-  ok=0
 else
   _stop 10 "${kam_pids[@]}"
   (cd "$REPO" && nohup bash -c '. scripts/lib/sip.sh; _kamailio_start' >>"$YUVIZ_LOGS/kamailio.log" 2>&1 &)
@@ -180,7 +180,7 @@ else
     echo "  freeswitch: already on $IP"
   else
     if _supervised freeswitch; then
-      _sv restart freeswitch >/dev/null || true
+      _sv restart freeswitch >/dev/null || { echo "  WARNING: supervisorctl restart freeswitch failed" >&2; ok=0; }
     else
       _fs 'fsctl shutdown' >/dev/null
       _stop 20 $(pgrep -u "$(id -u)" -x freeswitch || true)
@@ -221,7 +221,12 @@ _restart_stale() {
   done
   [[ ${#stale[@]} -gt 0 ]] || return 0
   if _supervised "$label"; then
-    _sv restart "$label" >/dev/null && echo "  $label: restarted by supervisord for SIP_PROXY_HOST=$IP"
+    if _sv restart "$label" >/dev/null; then
+      echo "  $label: restarted by supervisord for SIP_PROXY_HOST=$IP"
+    else
+      echo "  WARNING: supervisorctl restart $label failed; it still has the old SIP_PROXY_HOST" >&2
+      ok=0
+    fi
     return 0
   fi
   _stop 40 "${stale[@]}"

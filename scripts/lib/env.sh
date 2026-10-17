@@ -93,13 +93,14 @@ _env_init_locked() {
 }
 
 # Exports every non-blank .env value, except variables already set in the
-# shell (so a one-off override still works).
+# shell (so a one-off override still works). Under supervisord (YUVIZ_ENV_FILE_WINS=1) a non-blank .env value wins.
 _load_env() {
   local line key value
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|'#'*) continue ;; esac
     key=${line%%=*}; value=${line#*=}
-    [ -n "$value" ] && [ -z "$(printenv "$key")" ] && export "$key=$value"
+    [ -n "$value" ] || continue
+    if [ "${YUVIZ_ENV_FILE_WINS:-}" = 1 ] || [ -z "$(printenv "$key")" ]; then export "$key=$value"; fi
   done < "$REPO/.env"
   export POSTGRES_DSN="${POSTGRES_DSN:-postgresql://$USER@localhost:5432/voiceai}"
   export LISTEN_HOST="${LISTEN_HOST:-127.0.0.1}"

@@ -318,7 +318,7 @@ A few gotchas with `start_local.sh`:
 
 ### Or: one tab with supervisord (macOS)
 
-`deployment/supervisord.conf` runs every service above, plus Ollama, Knowledge, Campaigns, Toolexec, Telephony, Webcall and the Admin UI, from one terminal tab. It restarts any service that crashes. It calls the same `start_*` helpers, so settings still come from `.env`. MySQL, PostgreSQL and Redis stay under `brew services` (`start_mysql`, `start_data`).
+`deployment/supervisord.conf` runs every service above, plus Ollama, Knowledge, Campaigns, Toolexec, Telephony, Webcall and the Admin UI, from one terminal tab. It restarts any service that crashes. It calls the same `start_*` helpers, so settings still come from `.env`, and a `.env` edit takes effect on the next `restart` even if the tab you started supervisord from had exported an older value. A key left blank in `.env` still comes from that tab. MySQL, PostgreSQL and Redis stay under `brew services` (`start_mysql`, `start_data`).
 
 ```bash
 brew install supervisor
