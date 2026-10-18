@@ -196,13 +196,18 @@ def probe_esl(host: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
-def probe_sip(host: str, port: int, timeout: float = 3.0) -> bool:
-    """SIP OPTIONS; any SIP reply means Kamailio is processing requests."""
+def probe_sip(host: str, port: int, timeout: float = 3.0) -> bool | None:
+    """SIP OPTIONS; any SIP reply means Kamailio is processing requests. None if network is down (bind fails)."""
     tag, call_id = uuid.uuid4().hex[:8], uuid.uuid4().hex
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(timeout)
-            sock.bind((host, 0))
+            try:
+                sock.bind((host, 0))
+            except OSError as e:
+                if e.errno in (49, 97):  # EADDRNOTAVAIL: transient, e.g. after network drop
+                    return None
+                raise
             lport = sock.getsockname()[1]
             msg = (f"OPTIONS sip:{host}:{port} SIP/2.0\r\nVia: SIP/2.0/UDP {host}:{lport};branch=z9hG4bK{tag}\r\n"
                    f"Max-Forwards: 70\r\nFrom: <sip:crash-watch@{host}>;tag={tag}\r\nTo: <sip:{host}:{port}>\r\n"
