@@ -23,6 +23,7 @@ FATAL = "FATAL"
 PROBE_INTERVAL_S = 10
 MISSES_TO_RESTART = 3
 STARTUP_DEADLINE_S = 300
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 @dataclass
@@ -156,9 +157,9 @@ def start_service(proxy, name: str) -> None:
 
 
 def probe_http(url: str, timeout: float = 3.0) -> bool:
-    """Any HTTP response proves the event loop answered."""
+    """Any HTTP response proves the event loop answered. No proxy."""
     try:
-        urllib.request.urlopen(url, timeout=timeout).close()
+        _OPENER.open(url, timeout=timeout).close()
         return True
     except urllib.error.HTTPError:
         return True
@@ -167,9 +168,9 @@ def probe_http(url: str, timeout: float = 3.0) -> bool:
 
 
 def probe_envoy_host(addr: str, admin: str = "http://127.0.0.1:9901", timeout: float = 3.0) -> bool | None:
-    """Envoy's own gRPC health check for one upstream; None when Envoy can't say."""
+    """Envoy's own gRPC health check for one upstream; None when Envoy can't say. No proxy."""
     try:
-        with urllib.request.urlopen(f"{admin}/clusters", timeout=timeout) as r:
+        with _OPENER.open(f"{admin}/clusters", timeout=timeout) as r:
             text = r.read().decode(errors="replace")
     except OSError:
         return None
@@ -246,7 +247,7 @@ def default_probes() -> dict:
     host = dotenv("LISTEN_HOST", "127.0.0.1")
     host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
     esl = (dotenv("FREESWITCH_ESL_HOST", "127.0.0.1"), int(dotenv("FREESWITCH_ESL_PORT", "8022")))
-    sip = kamailio_listen(Path.home() / ".yuviz" / "kamailio" / "kamailio.cfg")
+    cfg = Path.home() / ".yuviz" / "kamailio" / "kamailio.cfg"
     probes = {
         "config": lambda: probe_http(f"http://{host}:8000/health"),
         "knowledge": lambda: probe_http(f"http://{host}:8100/health"),
@@ -256,13 +257,12 @@ def default_probes() -> dict:
         "webcall": lambda: probe_http(f"http://{host}:8300/health"),
         "ollama": lambda: probe_http("http://127.0.0.1:11434/api/version"),
         "envoy": lambda: probe_http("http://127.0.0.1:9901/ready"),
-        "admin-ui": lambda: probe_http(f"http://{host}:3000/login", timeout=15),  # dev server compiles on demand
+        "admin-ui": lambda: probe_http(f"http://{host}:3000/login", timeout=15),
         "conversation-1": lambda: probe_envoy_host("127.0.0.1:50051"),
         "conversation-2": lambda: probe_envoy_host("127.0.0.1:50052"),
         "freeswitch": lambda: probe_esl(*esl),
+        "kamailio": lambda: (lambda a: probe_sip(*a) if a else None)(kamailio_listen(cfg)),
     }
-    if sip:
-        probes["kamailio"] = lambda: probe_sip(*sip)
     return probes
 
 
@@ -309,7 +309,7 @@ class Watcher:
             if n >= MISSES_TO_RESTART:
                 self.misses[name] = 0
                 self.armed.pop(name, None)
-                self.on_hang(name)
+                self.on_hang(name, start)
 
     def probe_loop(self, probes: dict, interval_s: float) -> None:
         while True:
@@ -361,19 +361,23 @@ class Watcher:
                 return
         self._recover(name, action, delay, fatal=eventname == "PROCESS_STATE_FATAL", what="crashed again")
 
-    def on_hang(self, name: str) -> None:
+    def on_hang(self, name: str, start_at: float) -> None:
         """A hung process never exits, so it is stopped here and counted as a crash."""
         with self.lock:
             action, delay = self.policy.on_exit(name, self.clock())
-        self._recover(name, "delay" if action == "restart" else action, delay, fatal=False, what="hung (no heartbeat)")
+        self._recover(name, "delay" if action == "restart" else action, delay, fatal=False, what="hung (no heartbeat)", start=start_at)
 
-    def _recover(self, name: str, action: str, delay: float, *, fatal: bool, what: str) -> None:
+    def _recover(self, name: str, action: str, delay: float, *, fatal: bool, what: str, start: float | None = None) -> None:
         with self.lock:
             s = self.policy.state(name)
             s.pending_at, s.pending_trial = self.clock() + delay, action == "open"
             s.stop_token = FATAL if fatal else None
-            self.save()  # intent first: a restart of this listener finds it
+            self.save()
         if not fatal:
+            if start is not None:
+                info = self.proxy().supervisor.getProcessInfo(name)
+                if info["statename"] != "RUNNING" or float(info["start"]) != start:
+                    return
             token = stop_service(self.proxy(), name)
             with self.lock:
                 s.stop_token = token

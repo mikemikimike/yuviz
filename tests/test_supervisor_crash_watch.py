@@ -227,14 +227,15 @@ def test_a_service_that_never_passed_is_alerted_once_and_never_restarted(tmp_pat
 
 def test_unknown_and_stopped_services_are_not_counted(tmp_path):
     sup, clock = _ProbeSupervisor(start=50.0), [100.0]
-    w, _ = _watcher(tmp_path, sup, clock)
+    w, timers = _watcher(tmp_path, sup, clock)
     w.probe_once({"conv": lambda: True})
     for _ in range(5):
-        w.probe_once({"conv": lambda: None})  # Envoy down: can't tell
+        w.probe_once({"conv": lambda: None})
     sup.statename = "STOPPED"
+    timers.clear()
     for _ in range(5):
         w.probe_once({"conv": lambda: False})
-    assert sup.stops == 0
+    assert sup.stops == 0 and timers == [] and w.misses.get("conv", 0) == 0
 
 
 def test_probe_http_counts_any_response(tmp_path):
