@@ -298,7 +298,7 @@ def test_reads_envoy_health_and_kamailio_listen(tmp_path, monkeypatch):
 
     text = ("conversation_svc::127.0.0.1:50051::health_flags::healthy\n"
             "conversation_svc::127.0.0.1:50052::health_flags::/failed_active_hc\n")
-    monkeypatch.setattr(cw.urllib.request, "urlopen", lambda url, timeout: R(text))
+    monkeypatch.setattr(cw._OPENER, "open", lambda url, timeout=None: R(text))
     assert cw.probe_envoy_host("127.0.0.1:50051") is True
     assert cw.probe_envoy_host("127.0.0.1:50052") is False
     assert cw.probe_envoy_host("127.0.0.1:59999") is None
