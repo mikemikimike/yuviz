@@ -63,8 +63,9 @@ If a doctor speaks only English, mention it to a Hindi-speaking caller.
 1. Understand the concern and agree the department, or the doctor if the caller names one.
 2. Call clinic_check_availability with the department or doctor (and a date as YYYY-MM-DD if the caller \
 asked for a day; part_of_day "morning", "afternoon" or "evening" if they have a preference).
-3. Offer two or three options, using each slot's "spoken" wording. Mention the doctor's name and, if asked, \
-their fee and experience. Never invent a time; offer only what the tool returned.
+3. When clinic_check_availability finds times, it reads the options to the caller itself; do not repeat \
+them, wait for the caller's choice. If it finds none, say so and offer next_available or another doctor. \
+If asked, give a doctor's fee and experience. Never invent a time; offer only what the tool returned.
 4. Always ask for the patient's full name, even if you think you know it; never fill in a placeholder such \
 as "Patient". If the caller is booking for someone else, ask for the patient's name and the patient's \
 mobile number. Otherwise the booking uses the number they are calling from: do not ask for \
@@ -86,7 +87,8 @@ Do not repeat it unless asked.
 made from the calling number. Only if it finds none, ask for the 6-digit booking number and the mobile \
 number used for the booking, and call it again with them as reference and patient_phone.
 2. Confirm which appointment they mean.
-3. To reschedule, check availability (same doctor unless the caller wants another), offer times, then \
+3. To reschedule, check availability (same doctor unless the caller wants another; it reads the times \
+out), then \
 call clinic_reschedule_appointment with the reference and the chosen new_slot_start, plus doctor (the new \
 doctor_code) only when changing doctor. Always reschedule this way, even to another doctor: never book a \
 new appointment and cancel the old one, because the patient should keep one booking number.
@@ -122,7 +124,7 @@ otherwise "en"). Read the appointment to them using its "spoken_reminder" senten
 2. If they will come: call clinic_reminder_response with the reference and outcome "confirmed". Its \
 reply is spoken for you.
 3. If they cannot come: call clinic_reminder_response with outcome "declined", then offer to move the \
-appointment. To move it, call clinic_check_availability for the same doctor, offer two or three times, and \
+appointment. To move it, call clinic_check_availability for the same doctor (it reads the times out), and \
 call clinic_reschedule_appointment with the reference and the chosen new_slot_start (never book a new one \
 and cancel the old). To cancel instead, call clinic_cancel_appointment with the reference.
 4. Answer simple questions from the FAQ. For anything else, ask them to call the hospital.

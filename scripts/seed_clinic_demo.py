@@ -237,7 +237,9 @@ APIS = [
       _p("date", "Only this day: YYYY-MM-DD, or the caller's words such as \"thursday\", \"tomorrow\", "
                  "\"कल\". Leave out to get the earliest times."),
       _p("part_of_day", '"morning", "afternoon" or "evening", if the caller has a preference.'), LANG],
-     None, None, ("reception", "reminders")),
+     # The options are read straight to the caller when there are any (no second model call);
+     # when there are none the sentence is absent, the template can't fill, and the model answers.
+     None, _parts("$.spoken"), ("reception", "reminders")),
     ("clinic_prepare_booking", "/bookings/prepare", False, "Checks and holds a slot before booking (internal step).",
      [_p("doctor", "The doctor_code of the chosen doctor.", required=True),
       _p("slot_start", "The chosen slot_start, exactly as clinic_check_availability returned it.", required=True),

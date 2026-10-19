@@ -270,3 +270,23 @@ async def test_placeholder_names_are_refused(run, name):
 def test_real_names_are_not_placeholders():
     for name in ("Rahul Sharma", "Patil", "Mr. Verma", "चंदन कुमार", "Testa"):
         assert not booking.is_placeholder_name(name), name
+
+
+async def test_availability_comes_with_a_sentence_to_speak(run):
+    result = await run(booking.availability, doctor=None, department="cardiology", date="tomorrow", part_of_day=None,
+                       language="en", holder_phone=None)
+    assert result["spoken"].startswith("Dr. ") and "tomorrow at " in result["spoken"]
+    assert result["spoken"].endswith("are available. Which time suits you?")
+    assert result["spoken"].count("tomorrow") == 2                # once per doctor, not per time
+    one = await run(booking.availability, doctor="CARD-02", department=None, date="tomorrow", part_of_day=None,
+                    language="hi", holder_phone=None)
+    assert one["spoken"].startswith("Dr. Vikram Rao कल ") or one["spoken"].startswith("Dr. Vikram Rao")
+    assert one["spoken"].count(" या ") == 2 and one["spoken"].endswith("आपके लिए कौन सा समय ठीक रहेगा?")
+
+
+async def test_no_sentence_when_there_is_nothing_to_offer(run):
+    far = await run(booking.availability, doctor="CARD-01", department=None, date="2099-01-01", part_of_day=None,
+                    language="en", holder_phone=None)
+    nobody = await run(booking.availability, doctor="Dr. Nobody Here", department=None, date=None, part_of_day=None,
+                       language="en", holder_phone=None)
+    assert "spoken" not in far and "spoken" not in nobody          # the model handles these

@@ -349,7 +349,9 @@ async def availability(
     offers.sort(key=lambda o: (o[0] is None, o[0] or clinic.now))
     doctors = [entry for _, entry in offers[:_MAX_DOCTORS_OFFERED]]
     any_slots = any(d["slots"] for d in doctors)
+    spoken = _offer_sentence(clinic, doctors, language, single_doctor=bool(doctor)) if any_slots else None
     return {
+        **({"spoken": spoken} if spoken else {}),
         "ok": True,
         "today": clinic.today.isoformat(),
         **({"requested_day": day.isoformat(), "requested_day_spoken": speech.spoken_date(day, clinic.today, language)}
@@ -363,6 +365,31 @@ async def availability(
             "Offer next_available if present, or another doctor in the department."
         ),
     }
+
+
+def _times_phrase(clinic: Clinic, starts: list[datetime.datetime], language: str) -> str:
+    """'tomorrow at 5 PM or 5:15 PM' — the day said once when the times share it."""
+    joiner = " या " if language == "hi" else " or "
+    if len({s.date() for s in starts}) == 1:
+        day = speech.spoken_date(starts[0].date(), clinic.today, language)
+        times = joiner.join(speech.spoken_time(s, language) for s in starts)
+        return f"{day} {times}" if language == "hi" else f"{day} at {times}"
+    return joiner.join(clinic.when(s, language) for s in starts)
+
+
+def _offer_sentence(clinic: Clinic, doctors: list[dict], language: str, *, single_doctor: bool) -> str:
+    """The options read straight to the caller (the tool's success template), so a tool turn
+    needs no second model call: up to two doctors with two times each, or three for one doctor."""
+    per_doctor = 3 if single_doctor else 2
+    parts = []
+    for entry in [d for d in doctors if d["slots"]][: 1 if single_doctor else 2]:
+        starts = [datetime.datetime.fromisoformat(s["slot_start"]) for s in entry["slots"][:per_doctor]]
+        parts.append((entry["name"], _times_phrase(clinic, starts, language)))
+    if language == "hi":
+        offers = " और ".join(f"{name} {times}" for name, times in parts)
+        return f"{offers} उपलब्ध हैं। आपके लिए कौन सा समय ठीक रहेगा?"
+    offers = ", and ".join(f"{name} {times}" for name, times in parts)
+    return f"{offers} {'is' if len(parts) == 1 else 'are'} available. Which time suits you?"
 
 
 # ── shared checks ────────────────────────────────────────────────────────
