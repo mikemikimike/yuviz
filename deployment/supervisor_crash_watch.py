@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import http.client
 import json
 import os
@@ -206,7 +207,7 @@ def probe_sip(host: str, port: int, timeout: float = 3.0) -> bool | None:
             try:
                 sock.bind((host, 0))
             except OSError as e:
-                if e.errno in (49, 97):  # EADDRNOTAVAIL: transient, e.g. after network drop
+                if e.errno == errno.EADDRNOTAVAIL:
                     return None
                 raise
             lport = sock.getsockname()[1]
@@ -363,21 +364,20 @@ class Watcher:
 
     def on_hang(self, name: str, start_at: float) -> None:
         """A hung process never exits, so it is stopped here and counted as a crash."""
+        info = self.proxy().supervisor.getProcessInfo(name)
+        if info["statename"] != "RUNNING" or float(info["start"]) != start_at:
+            return
         with self.lock:
             action, delay = self.policy.on_exit(name, self.clock())
-        self._recover(name, "delay" if action == "restart" else action, delay, fatal=False, what="hung (no heartbeat)", start=start_at)
+        self._recover(name, "delay" if action == "restart" else action, delay, fatal=False, what="hung (no heartbeat)")
 
-    def _recover(self, name: str, action: str, delay: float, *, fatal: bool, what: str, start: float | None = None) -> None:
+    def _recover(self, name: str, action: str, delay: float, *, fatal: bool, what: str) -> None:
         with self.lock:
             s = self.policy.state(name)
             s.pending_at, s.pending_trial = self.clock() + delay, action == "open"
             s.stop_token = FATAL if fatal else None
             self.save()
         if not fatal:
-            if start is not None:
-                info = self.proxy().supervisor.getProcessInfo(name)
-                if info["statename"] != "RUNNING" or float(info["start"]) != start:
-                    return
             token = stop_service(self.proxy(), name)
             with self.lock:
                 s.stop_token = token

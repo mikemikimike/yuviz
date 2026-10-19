@@ -225,7 +225,7 @@ def test_a_service_that_never_passed_is_alerted_once_and_never_restarted(tmp_pat
     assert sup.stops == 0 and len(alerts) == 1
 
 
-def test_unknown_and_stopped_services_are_not_counted(tmp_path):
+def test_unknown_and_stopped_services_are_not_counted(tmp_path, capsys):
     sup, clock = _ProbeSupervisor(start=50.0), [100.0]
     w, timers = _watcher(tmp_path, sup, clock)
     w.probe_once({"conv": lambda: True})
@@ -233,9 +233,33 @@ def test_unknown_and_stopped_services_are_not_counted(tmp_path):
         w.probe_once({"conv": lambda: None})
     sup.statename = "STOPPED"
     timers.clear()
+    capsys.readouterr()
     for _ in range(5):
         w.probe_once({"conv": lambda: False})
-    assert sup.stops == 0 and timers == [] and w.misses.get("conv", 0) == 0
+    assert sup.stops == 0 and timers == [] and "missed heartbeat" not in capsys.readouterr().err
+
+
+def test_probe_sip_treats_lost_address_as_unknown(monkeypatch):
+    import errno
+
+    class NoAddress:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def settimeout(self, timeout):
+            pass
+
+        def bind(self, addr):
+            raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+
+    monkeypatch.setattr(cw.socket, "socket", NoAddress)
+    assert cw.probe_sip("192.168.0.9", 5060) is None
 
 
 def test_probe_http_counts_any_response(tmp_path):

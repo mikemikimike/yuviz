@@ -318,7 +318,7 @@ A few gotchas with `start_local.sh`:
 
 ### Or: one tab with supervisord (macOS)
 
-`deployment/supervisord.conf` runs every service above, plus Ollama, Knowledge, Campaigns, Toolexec, Telephony, Webcall and the Admin UI, from one terminal tab. It restarts any service that crashes. It calls the same `start_*` helpers, so settings still come from `.env`. MySQL, PostgreSQL and Redis stay under `brew services` (`start_mysql`, `start_data`).
+`deployment/supervisord.conf` runs every service above, plus Ollama, Knowledge, Campaigns, Toolexec, Telephony, Webcall and the Admin UI, from one terminal tab. It restarts any service that crashes. It calls the same `start_*` helpers, so settings still come from `.env`, and a `.env` edit takes effect on the next `restart` even if the tab you started supervisord from had exported an older value. A key left blank in `.env` still comes from that tab. MySQL, PostgreSQL and Redis stay under `brew services` (`start_mysql`, `start_data`).
 
 ```bash
 brew install supervisor
@@ -338,6 +338,7 @@ tail -f ~/.yuviz/logs/gateway.log
 - **Stop it with Ctrl-C, not by closing the tab.** Closing the tab sends SIGHUP, which supervisord treats as "reload and restart every service".
 - **Check for live calls before restarting** FreeSWITCH, the Gateway or the Conversation Services. `restart` doesn't check.
 - **After editing the config,** `supervisorctl -c deployment/supervisord.conf update` restarts only the services whose section changed.
+- **Network sync** (`install_network_sync`, `SIP_IP=auto`) works alongside it: `update_kamailio_ip.sh` restarts Kamailio, FreeSWITCH, the Gateway and Campaigns through `supervisorctl` while supervisord runs them.
 - **Logs:** each service writes its own log to `~/.yuviz/logs/<service>.log`. `<service>.supervisor.log` holds only errors from starting it. The `log-rotate` listener checks hourly and rotates any log over 20 MB, keeping 3 (`.1`–`.3`).
 - **Crash loops stop instead of flapping:**
   - **Crashes during startup:** a service that dies within its first few seconds is retried 3 times, then marked FATAL.
