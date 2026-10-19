@@ -2749,3 +2749,98 @@ async def test_no_error_fallback_when_the_turn_moves_to_an_end_or_transfer_node(
     responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
 
     assert _FALLBACK_LLM_ERROR not in _reply_text(responses)
+
+
+# ── Filler only when the caller would otherwise wait (VOICEAI_FILLER_DELAY_MS) ──
+
+class _PacedToolOrchestrator(_FakeToolOrchestrator):
+    """Yields its events with a pause before each one marked with a float delay."""
+
+    async def run_turn(self, *args, **kwargs):
+        for e in self._events:
+            if isinstance(e, float):
+                await asyncio.sleep(e)
+            else:
+                yield e
+
+
+def _spoken(tts) -> list[str]:
+    return [call.args[0] for call in tts.synthesize.await_args_list]
+
+
+@pytest.mark.asyncio
+async def test_fast_answers_get_no_filler(monkeypatch):
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "200")
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _PacedToolOrchestrator([
+        ToolCallStartedEvent(tool_name="execute_api"), 0.02, ToolTokenEvent(text="Dr. Rao is free at 10."),
+    ])
+    handler = _make_handler(_make_stt("book me"), _make_llm(["x"]), tts, system_prompt="s",
+                            tool_orchestrator=orchestrator)
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    spoken = _spoken(tts)
+    assert _FIRST_TURN_FILLER not in spoken
+    assert not any(t in _TOOL_CALL_FILLERS for t in spoken)
+    assert spoken == ["Dr. Rao is free at 10."]
+
+
+@pytest.mark.asyncio
+async def test_slow_tool_gets_one_filler_before_the_answer(monkeypatch):
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "50")
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _PacedToolOrchestrator([
+        ToolTokenEvent(text="Let me look. "), ToolCallStartedEvent(tool_name="execute_api"), 0.25,
+        ToolTokenEvent(text="Dr. Rao is free at 10."),
+    ])
+    handler = _make_handler(_make_stt("book me"), _make_llm(["x"]), tts, system_prompt="s",
+                            tool_orchestrator=orchestrator)
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    spoken = _spoken(tts)
+    fillers = [i for i, t in enumerate(spoken) if t in _TOOL_CALL_FILLERS]
+    assert len(fillers) == 1
+    assert spoken.index("Dr. Rao is free at 10.") > fillers[0]
+    assert _FIRST_TURN_FILLER not in spoken   # the reply began before the first-turn wait ran out
+
+
+@pytest.mark.asyncio
+async def test_slow_first_reply_gets_the_first_turn_filler(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "50")
+
+    async def _slow(messages):
+        await asyncio.sleep(0.25)
+        yield "Hello there."
+
+    llm = MagicMock()
+    llm.generate = _slow
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(_make_stt("hi"), llm, tts, system_prompt="s")
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    assert _spoken(tts) == [_FIRST_TURN_FILLER, "Hello there."]
+
+
+@pytest.mark.asyncio
+async def test_marker_only_reply_after_a_filler_still_says_goodbye(monkeypatch):
+    """A filler is not a reply: a turn whose only output was the end-call marker still gets
+    the fallback goodbye, which the servicer needs to send EndCall."""
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "50")
+
+    async def _slow(messages):
+        await asyncio.sleep(0.2)
+        yield _END_CALL_MARKER
+
+    llm = MagicMock()
+    llm.generate = _slow
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(_make_stt("bye"), llm, tts)
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    assert any(r.end_call for r in responses)
+    tts.synthesize.assert_any_call(_FALLBACK_GOODBYE, 16_000)

@@ -253,6 +253,77 @@ _MAX_DURATION_GOODBYE = t("max_duration_goodbye", "en")
 _FALLBACK_LLM_ERROR = t("fallback_llm_error", "en")
 
 _TOOL_CALL_FILLER_MIN_GAP_S = 4.0
+# A filler ("one moment") is spoken only when the caller would otherwise hear silence for this
+# long: armed when a tool call starts, and at the start of the call's first reply, it is dropped
+# as soon as anything else arrives to be said. A fast answer therefore never gets one.
+_FILLER_DELAY_MS_DEFAULT = 1200
+_FIRST_TURN = "__first_turn__"
+
+
+def _filler_delay_s() -> float:
+    """VOICEAI_FILLER_DELAY_MS (default 1200). 0 = the old behaviour: always, immediately."""
+    try:
+        return max(0, int(os.environ.get("VOICEAI_FILLER_DELAY_MS", _FILLER_DELAY_MS_DEFAULT))) / 1000
+    except ValueError:
+        return _FILLER_DELAY_MS_DEFAULT / 1000
+
+
+class _FillerText(str):
+    """The (empty) text paired with filler audio: '' in transcripts and history, but
+    recognisable, so a filler never counts as the agent having replied."""
+
+
+_FILLER = _FillerText("")
+
+
+class _FillerDue:
+    """Yielded by _with_filler_timer when an armed wait ran out with nothing to say."""
+
+    __slots__ = ("tool_name",)
+
+    def __init__(self, tool_name: str) -> None:
+        self.tool_name = tool_name
+
+
+async def _with_filler_timer(source: AsyncGenerator, delay_s: float, *, arm_first: bool) -> AsyncGenerator:
+    """Passes `source` through, adding a _FillerDue when an armed wait (the first reply, or
+    after a ToolCallStartedEvent) lasts `delay_s` with nothing new from `source`. The next item
+    is awaited in a task, so it keeps arriving while the filler is spoken."""
+    it = source.__aiter__()
+    armed: str | None = _FIRST_TURN if arm_first else None
+    pending: asyncio.Future | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(it.__anext__())
+            if armed is not None:
+                # 0 = the old behaviour: the filler goes first, without racing what comes next.
+                done = set() if delay_s <= 0 else (await asyncio.wait({pending}, timeout=delay_s))[0]
+                if not done:
+                    yield _FillerDue(armed)
+                    armed = None
+                    continue
+            try:
+                item = await pending
+            except StopAsyncIteration:
+                pending = None
+                return
+            pending = None
+            armed = item.tool_name if isinstance(item, ToolCallStartedEvent) else None
+            yield item
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            try:
+                await pending
+            except BaseException:
+                pass
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
 # Hard ceiling on retrieved text handed to the LLM, in the knowledge service's own token unit (words).
 # The agent's token budget is enforced server-side (prompt-mode documents get at most half of it); this
 # ceiling is the backstop for what a word count cannot bound and for a service with a larger budget.
@@ -797,11 +868,10 @@ class PipelineConversationHandler:
         self._refresh_node_prompt(history, session_id)
         history.append(ChatMessage(role="user", content=stt_result.text))
 
-        if is_first_turn and not self._session(session_id).first_turn_filler_spoken:
+        # The first reply's filler is armed here and spoken only if the reply is slow (_with_filler_timer).
+        first_turn_filler = is_first_turn and not self._session(session_id).first_turn_filler_spoken
+        if first_turn_filler:
             self._session(session_id).first_turn_filler_spoken = True
-            first_turn_filler = t("first_turn_filler", self._spoken_language(session_id))
-            async for chunk in self._synthesize_sentence_stream(first_turn_filler, session_id):
-                yield HandlerResponse(tts_payloads=[chunk])
 
         # Knowledge retrieval is the `search_knowledge` local tool, called only when needed.
         messages_for_llm = history
@@ -817,7 +887,7 @@ class PipelineConversationHandler:
         try:
             async for chunk, tts_audio, marker_seen in self._llm_to_tts(
                 messages_for_llm, cancel_event, session_id, directives, tool_calls_made,
-                store=history,
+                store=history, first_turn_filler=first_turn_filler,
             ):
                 now = time.monotonic()
                 if first_token_at is None:
@@ -826,8 +896,9 @@ class PipelineConversationHandler:
                 end_call = marker_seen
                 if tts_audio:
                     if first_audio_at is None:
-                        first_audio_at = now
-                    any_audio = True
+                        first_audio_at = now   # a filler is the first thing the caller hears, so it counts here
+                    if not isinstance(chunk, _FillerText):
+                        any_audio = True
                     yield HandlerResponse(tts_payloads=[tts_audio])
                 if cancel_event.is_set():
                     break
@@ -1297,6 +1368,7 @@ class PipelineConversationHandler:
         store:        list[ChatMessage] | None = None,
         carry_taint:  bool = False,
         silent_turn_text: str = "fallback_llm_error",
+        first_turn_filler: bool = False,
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """Stream LLM tokens and synthesize per sentence, yielding (raw_token, tts_bytes, end_call).
         Directives are stripped before TTS and appended to `directives` in place.
@@ -1309,8 +1381,9 @@ class PipelineConversationHandler:
         end_call = False
         spoke = False  # any reply speech this turn; a filler does not count
         try:
-            async for item in self._token_stream(
-                history, session_id, cancel_event, tool_calls_made, store, carry_taint,
+            async for item in _with_filler_timer(
+                self._token_stream(history, session_id, cancel_event, tool_calls_made, store, carry_taint),
+                _filler_delay_s(), arm_first=first_turn_filler,
             ):
                 if cancel_event.is_set():
                     self._workflow.pending_speech = None
@@ -1327,6 +1400,14 @@ class PipelineConversationHandler:
                             first = False
                     continue
                 if isinstance(item, ToolCallStartedEvent):
+                    continue  # the filler, if any, comes as a _FillerDue when the wait runs long
+                if isinstance(item, _FillerDue):
+                    if item.tool_name == _FIRST_TURN:
+                        phrase = t("first_turn_filler", self._spoken_language(session_id))
+                        async for chunk in self._synthesize_sentence_stream(phrase, session_id):
+                            yield _FILLER, chunk, end_call
+                        log.info("First-turn filler spoken phrase=%r session=%s", phrase, session_id)
+                        continue
                     now = time.monotonic()
                     state = self._session(session_id)
                     last_spoken = state.tool_call_filler_last_spoken
@@ -1350,7 +1431,7 @@ class PipelineConversationHandler:
                                     "Tool-call filler spoken tool=%s phrase=%r session=%s",
                                     item.tool_name, phrase, session_id,
                                 )
-                            yield "", chunk, end_call
+                            yield _FILLER, chunk, end_call
                     continue
                 token = item
                 result = DirectiveParser.parse(stream_buf.feed(token))
