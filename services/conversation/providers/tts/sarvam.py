@@ -11,14 +11,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import logging
 import math
+import time
 import wave
 from collections import OrderedDict
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 import numpy as np
+import websockets
 
 from libs.config_sdk.languages import normalize_language
 
@@ -46,6 +50,15 @@ _PINNED_MAX_ENTRIES = 512
 _PINNED_MAX_CHARS = 600
 # The pipeline's output rate (PipelineConfig.sample_rate); what prewarm synthesizes at.
 _PREWARM_RATE = 16_000
+# Streaming: the first audio of a sentence arrives in ~0.2 s over the WebSocket API, against
+# ~1.2 s for the whole clip over REST. Connections are pooled per (language, rate); Sarvam
+# closes one after about a minute idle, so an idle one is retired well before that.
+_WS_URL = "wss://api.sarvam.ai/text-to-speech/ws"
+_WS_IDLE_MAX_S = 40.0
+_WS_POOL_MAX = 8
+_WS_CONNECT_TIMEOUT_S = 3.0
+_WS_FIRST_AUDIO_TIMEOUT_S = 4.0
+_WS_CHUNK_TIMEOUT_S = 4.0
 
 
 def _nearest_supported_rate(requested: int) -> int:
@@ -87,6 +100,7 @@ class SarvamTTS:
         timeout_s: float = 15.0,
         pace:      float = 1.0,
         language:  str | None = None,
+        streaming: bool = True,
     ) -> None:
         self._speaker = speaker
         self._model = model
@@ -97,6 +111,11 @@ class SarvamTTS:
             headers={"api-subscription-key": api_key},
             timeout=timeout_s,
         )
+        self._api_key = api_key
+        self._streaming = streaming
+        # (language_code, rate) -> idle (connection, last used at) pairs
+        self._ws_idle: dict[tuple[str, int], list[tuple[Any, float]]] = {}
+        self._ws_connect = websockets.connect   # swappable in tests
         self._cache: OrderedDict[tuple[str, str, int], bytes] = OrderedDict()
         self._pinned: dict[tuple[str, str, int], bytes] = {}
         self._prewarmed: set[str] = set()
@@ -160,7 +179,23 @@ class SarvamTTS:
             phrases = {phrase for phrase, _seconds in tool_fillers(language)}
             phrases.add(t("first_turn_filler", language))
             todo[language] = sorted(phrases)
-        await self.pin_phrases(todo)
+        await asyncio.gather(self.pin_phrases(todo), *(self._warm_socket(lang) for lang in languages))
+
+    async def _warm_socket(self, language: str) -> None:
+        """Runs at each call's start (during the greeting): one open, configured connection per
+        language, so the first reply doesn't pay the ~250 ms connect."""
+        if not self._streaming:
+            return
+        code = self._language_code(language)
+        idle = self._ws_idle.get((code, _PREWARM_RATE), [])
+        if any(time.monotonic() - last < _WS_IDLE_MAX_S for _conn, last in idle):
+            return
+        try:
+            conn = await self._ws_acquire(code, _PREWARM_RATE)
+        except Exception as exc:
+            log.info("SarvamTTS socket warm-up failed (%s); first sentence will connect", exc)
+            return
+        self._ws_release(conn, code, _PREWARM_RATE)
 
     async def _request(self, text: str, sample_rate: int, language_code: str) -> bytes:
         request_rate = _nearest_supported_rate(sample_rate)
@@ -189,9 +224,110 @@ class SarvamTTS:
         return pcm if rate == sample_rate else self._resample(pcm, rate, sample_rate)
 
     async def synthesize_stream(self, text: str, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE):
-        audio = await self.synthesize(text, sample_rate, language=language)
-        if audio:
-            yield audio
+        """Cached and pinned phrases come whole; anything else streams over a pooled WebSocket,
+        audio yielded as it arrives. A streaming failure before any audio falls back to REST."""
+        if not text.strip():
+            return
+        language_code = self._language_code(language)
+        key = (text, language_code, sample_rate)
+        cached = self._pinned.get(key) or self._cache.get(key)
+        if cached is not None or not self._streaming or sample_rate not in _SUPPORTED_RATES:
+            audio = cached if cached is not None else await self.synthesize(text, sample_rate, language=language)
+            if audio:
+                yield audio
+            return
+        produced = False
+        pieces: list[bytes] = []
+        stream = self._stream_ws(text[:_MAX_CHARS], language_code, sample_rate)
+        try:
+            async for chunk in stream:
+                produced = True
+                pieces.append(chunk)
+                yield chunk
+        except Exception as exc:
+            if produced:
+                # Part of the sentence is already playing; replaying it from REST would repeat it.
+                log.warning("SarvamTTS stream broke mid-sentence: %s", exc)
+                return
+            log.warning("SarvamTTS stream failed, falling back to REST: %s", exc)
+            audio = await self.synthesize(text, sample_rate, language=language)
+            if audio:
+                yield audio
+            return
+        finally:
+            # A caller who stops listening (barge-in) closes this generator, not the inner one:
+            # close it here so its connection is dropped now, not whenever it is collected.
+            await stream.aclose()
+        if pieces and len(text) <= _CACHE_MAX_CHARS:
+            self._cache[key] = b"".join(pieces)
+            if len(self._cache) > _CACHE_ENTRIES:
+                self._cache.popitem(last=False)
+
+    async def _ws_acquire(self, language_code: str, sample_rate: int) -> Any:
+        idle = self._ws_idle.setdefault((language_code, sample_rate), [])
+        now = time.monotonic()
+        while idle:
+            conn, last_used = idle.pop()
+            if now - last_used < _WS_IDLE_MAX_S:
+                return conn
+            await self._ws_close(conn)
+        query = urlencode({"model": self._model, "send_completion_event": "true"})
+        conn = await asyncio.wait_for(
+            self._ws_connect(f"{_WS_URL}?{query}", additional_headers={"Api-Subscription-Key": self._api_key}),
+            _WS_CONNECT_TIMEOUT_S,
+        )
+        config = {"speaker": self._speaker, "language_code": language_code, "speech_sample_rate": sample_rate,
+                  "output_audio_codec": "linear16", "min_buffer_size": 30, "max_chunk_length": 150}
+        if self._pace != 1.0:
+            config["pace"] = self._pace
+        await conn.send(json.dumps({"type": "config", "data": config}))
+        return conn
+
+    def _ws_release(self, conn: Any, language_code: str, sample_rate: int) -> None:
+        idle = self._ws_idle.setdefault((language_code, sample_rate), [])
+        if len(idle) < _WS_POOL_MAX:
+            idle.append((conn, time.monotonic()))
+        else:
+            asyncio.ensure_future(self._ws_close(conn))
+
+    @staticmethod
+    async def _ws_close(conn: Any) -> None:
+        try:
+            await conn.close()
+        except Exception:
+            pass
+
+    async def _stream_ws(self, text: str, language_code: str, sample_rate: int):
+        """One sentence over one pooled connection. The connection goes back to the pool only
+        after the 'final' event; if the caller stops early (barge-in) or anything fails, it is
+        closed, because audio for the abandoned sentence may still be in flight on it."""
+        conn = await self._ws_acquire(language_code, sample_rate)
+        reusable = False
+        carry = b""
+        try:
+            await conn.send(json.dumps({"type": "text", "data": {"text": text}}))
+            await conn.send(json.dumps({"type": "flush"}))
+            timeout = _WS_FIRST_AUDIO_TIMEOUT_S
+            while True:
+                message = json.loads(await asyncio.wait_for(conn.recv(), timeout))
+                kind = message.get("type")
+                if kind == "audio":
+                    pcm = carry + base64.b64decode(message["data"]["audio"])
+                    cut = len(pcm) - (len(pcm) % 2)          # whole 16-bit samples only
+                    carry = pcm[cut:]
+                    if cut:
+                        yield pcm[:cut]
+                    timeout = _WS_CHUNK_TIMEOUT_S
+                elif kind == "event" and (message.get("data") or {}).get("event_type") == "final":
+                    reusable = True
+                    return
+                elif kind == "error":
+                    raise RuntimeError(f"sarvam error: {str(message.get('data'))[:200]}")
+        finally:
+            if reusable:
+                self._ws_release(conn, language_code, sample_rate)
+            else:
+                await self._ws_close(conn)
 
     @staticmethod
     def _resample(pcm: bytes, from_rate: int, to_rate: int) -> bytes:
@@ -203,4 +339,8 @@ class SarvamTTS:
         return np.clip(resampled * 32767, -32768, 32767).astype(np.int16).tobytes()
 
     async def aclose(self) -> None:
+        for idle in self._ws_idle.values():
+            for conn, _last in idle:
+                await self._ws_close(conn)
+        self._ws_idle.clear()
         await self._client.aclose()
