@@ -66,14 +66,17 @@ size_t MediaSession::drain_available() noexcept {
         const VADEvent ev = vad_->process(frame_buf_.data(), got);
 
         if (ev == VADEvent::SpeechStart) {
-            logger_.debug("MediaSession SpeechStart energy={:.1f}dB session={}",
-                          vad_->last_energy_db(), session_id_);
+            logger_.info("speech_start session={} energy_db={:.1f}",
+                         session_id_, vad_->last_energy_db());
             if (callbacks_.on_speech_started)
                 callbacks_.on_speech_started(vad_->last_energy_db());
         } else if (ev == VADEvent::SpeechEnd) {
-            const uint32_t dur = vad_->speech_duration_ms();
-            logger_.debug("MediaSession SpeechEnd duration={}ms session={}",
-                          dur, session_id_);
+            // speech_duration_ms() is 0 once SpeechEnd fired; the closed segment's length is kept.
+            const uint32_t dur = vad_->last_segment_ms();
+            // end_wait_ms: silence waited out before this turn was handed on (the latency
+            // report's end-of-speech wait).
+            logger_.info("speech_end session={} speech_ms={} end_wait_ms={}",
+                         session_id_, dur, vad_->end_hold_ms());
             if (callbacks_.on_speech_ended)
                 callbacks_.on_speech_ended(dur, vad_->last_energy_db());
         }

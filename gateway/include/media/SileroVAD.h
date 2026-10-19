@@ -25,6 +25,8 @@ public:
 
     [[nodiscard]] float    last_energy_db()     const noexcept override { return last_energy_db_; }
     [[nodiscard]] uint32_t speech_duration_ms() const noexcept override;
+    [[nodiscard]] uint32_t last_segment_ms()    const noexcept override { return last_segment_ms_; }
+    [[nodiscard]] uint32_t end_hold_ms()        const noexcept override { return hold_needed_ * kWindowMs; }
 
     void reset() noexcept override;
 
@@ -51,6 +53,7 @@ private:
     uint32_t onset_windows_{0};
     uint32_t silence_windows_{0};
     uint32_t speech_windows_{0};
+    uint32_t last_segment_ms_{0};
     uint32_t onset_needed_{3};
     uint32_t hold_needed_{16};
     uint32_t infer_errors_{0};

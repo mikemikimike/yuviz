@@ -40,6 +40,7 @@ VADEvent EnergyVAD::process(const int16_t* samples, size_t count) noexcept {
     if (last_energy_db_ < cfg_.silence_threshold_db) {
         ++silence_frames_;
         if (silence_frames_ >= hold_frames_) {
+            last_segment_ms_ = speech_frames_ * cfg_.frame_ms;   // silent frames aren't counted here
             in_speech_      = false;
             silence_frames_ = 0;
             speech_frames_  = 0;
@@ -61,6 +62,7 @@ void EnergyVAD::reset() noexcept {
     silence_frames_ = 0;
     speech_frames_  = 0;
     onset_frames_   = 0;
+    last_segment_ms_ = 0;
     last_energy_db_ = -96.0f;
 }
 
