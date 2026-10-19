@@ -38,7 +38,7 @@ async def test_get_tenant_is_cached_on_second_read(test_tenant):
     assert cached["slug"] == slug
 
 
-async def test_update_tenant_bumps_config_version_and_invalidates_cache(test_tenant):
+async def test_update_tenant_bumps_config_version_and_rewrites_cache(test_tenant):
     slug = test_tenant["slug"]
     tenant_id = test_tenant["id"]
 
@@ -50,8 +50,21 @@ async def test_update_tenant_bumps_config_version_and_invalidates_cache(test_ten
     assert updated["vad_hold_ms"] == 500
     assert updated["config_version"] == test_tenant["config_version"] + 1
 
-    # Cache must be invalidated by the write, not just left stale for 60s.
-    assert await cache.get_json(f"tenant:{slug}") is None
+    # The Gateway reads tenant:{slug} and never Postgres: the write leaves the NEW row there,
+    # with no expiry, rather than a gap that puts calls back on gateway defaults.
+    cached = await cache.get_json(f"tenant:{slug}")
+    assert cached["vad_hold_ms"] == 500
+    assert cached["config_version"] == updated["config_version"]
+    assert await cache.get_client().ttl(f"tenant:{slug}") == -1
+
+
+async def test_prewarm_tenants_restores_a_flushed_key(test_tenant):
+    slug = test_tenant["slug"]
+    await cache.invalidate(f"tenant:{slug}")
+    await tenants.prewarm_tenants(overwrite=False)
+    cached = await cache.get_json(f"tenant:{slug}")
+    assert cached is not None and str(cached["id"]) == str(test_tenant["id"])
+    assert await cache.get_client().ttl(f"tenant:{slug}") == -1
 
 
 async def test_update_tenant_rejects_unknown_field(test_tenant):

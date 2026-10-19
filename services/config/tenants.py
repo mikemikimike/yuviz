@@ -1,7 +1,8 @@
-"""Tenant CRUD: cache-aside reads (Redis, 60s TTL), mutations audited in the same transaction."""
+"""Tenant CRUD: cache-aside reads (Redis, no TTL; see _cache_key), mutations audited in the same transaction."""
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -49,6 +50,12 @@ def _cache_key(slug: str) -> str:
     return f"tenant:{slug}"
 
 
+# tenant:{slug} is also what the Gateway reads per call for the tenant's VAD and timer settings,
+# and the Gateway never falls back to Postgres. So it carries no TTL (an expired key silently
+# put every call back on gateway defaults): every write path rewrites or deletes it, and
+# prewarm_tenants() reloads it at startup and after a Redis flush.
+
+
 async def get_tenant(slug: str) -> dict[str, Any] | None:
     cached = await cache.get_json(_cache_key(slug))
     if cached is not None:
@@ -63,7 +70,7 @@ async def get_tenant(slug: str) -> dict[str, Any] | None:
         return None
 
     result = dict(row)
-    await cache.set_json(_cache_key(slug), result)
+    await cache.set_json(_cache_key(slug), result, ttl=None)
     return result
 
 
@@ -172,8 +179,23 @@ async def update_tenant(
             new_value=new,
         )
 
-    await cache.invalidate(_cache_key(old["slug"]))
+    if new["slug"] != old["slug"]:
+        await cache.invalidate(_cache_key(old["slug"]))
+    # Rewritten, not just dropped: the Gateway can't repopulate it, so a gap means defaults.
+    await cache.set_json(_cache_key(new["slug"]), new, ttl=None)
     return new
+
+
+async def prewarm_tenants(*, overwrite: bool) -> int:
+    """Writes tenant:{slug} for every live tenant; returns the count. overwrite=True only at
+    startup, before the API serves writes; otherwise NX keeps a row an update just stored."""
+    pool = await db.get_pool()
+    client = cache.get_client()
+    async with platform_conn(pool, reason="tenants-prewarm") as conn:
+        rows = await conn.fetch("SELECT * FROM tenants WHERE deleted_at IS NULL")
+    for row in rows:
+        await client.set(_cache_key(row["slug"]), json.dumps(dict(row), default=str), nx=not overwrite)
+    return len(rows)
 
 
 class TenantHasActiveResources(Exception):
