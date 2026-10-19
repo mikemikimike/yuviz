@@ -122,3 +122,41 @@ async def test_prewarm_fills_cache_once():
     before = len(texts)
     await tts.synthesize(t("first_turn_filler", "hi"), 16000, language="hi")
     assert len(texts) == before
+
+
+@pytest.mark.asyncio
+async def test_pinned_phrases_survive_lru_churn(monkeypatch):
+    import services.conversation.providers.tts.sarvam as sarvam
+
+    monkeypatch.setattr(sarvam, "_CACHE_ENTRIES", 3)
+    texts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        texts.append(json.loads(request.content)["text"])
+        return httpx.Response(200, json={"audios": [_wav(16000)]})
+
+    tts = _tts(handler)
+    await tts.prewarm(["en"])
+    greeting = "Namaste, thank you for calling Medivista Multispeciality Hospital. " * 3   # > 120 chars
+    await tts.pin_phrases({"en": [greeting]})
+    for i in range(10):                                  # one-off sentences churn the LRU
+        await tts.synthesize(f"Sentence number {i}.", 16000, language="en")
+    before = len(texts)
+    await tts.synthesize("One moment.", 16000, language="en")
+    await tts.synthesize(greeting, 16000, language="en")
+    await tts.pin_phrases({"en": [greeting]})            # already pinned: no request
+    assert len(texts) == before
+
+
+@pytest.mark.asyncio
+async def test_pin_without_language_matches_synthesize_without_language():
+    texts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        texts.append(json.loads(request.content)["language_code"])
+        return httpx.Response(200, json={"audios": [_wav(16000)]})
+
+    tts = _tts(handler, language="en-IN")
+    await tts.pin_phrases({None: ["Welcome to the clinic."]}, 16000)
+    await tts.synthesize("Welcome to the clinic.", 16000)
+    assert texts == ["en-IN"]

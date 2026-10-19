@@ -40,6 +40,10 @@ _MAX_CHARS = 2500
 # round trip costs 0.3-1 s each time; their audio is kept, per voice instance, in a small LRU.
 _CACHE_MAX_CHARS = 120
 _CACHE_ENTRIES = 256
+# Phrases pinned by pin_phrases()/prewarm() (fillers, an agent's greeting) are kept outside the
+# LRU, so a call's worth of one-off sentences can never evict them. Bounded, as a backstop.
+_PINNED_MAX_ENTRIES = 512
+_PINNED_MAX_CHARS = 600
 # The pipeline's output rate (PipelineConfig.sample_rate); what prewarm synthesizes at.
 _PREWARM_RATE = 16_000
 
@@ -94,6 +98,7 @@ class SarvamTTS:
             timeout=timeout_s,
         )
         self._cache: OrderedDict[tuple[str, str, int], bytes] = OrderedDict()
+        self._pinned: dict[tuple[str, str, int], bytes] = {}
         self._prewarmed: set[str] = set()
         log.info("SarvamTTS speaker=%s model=%s pace=%s language=%s", speaker, model, pace, language)
 
@@ -108,6 +113,9 @@ class SarvamTTS:
             return b""
         language_code = self._language_code(language)
         key = (text, language_code, sample_rate)
+        pinned = self._pinned.get(key)
+        if pinned is not None:
+            return pinned
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
@@ -119,11 +127,31 @@ class SarvamTTS:
                 self._cache.popitem(last=False)
         return audio
 
+    async def pin_phrases(self, phrases: dict[str | None, list[str]], sample_rate: int = _PREWARM_RATE) -> None:
+        """Synthesizes each {language: [phrase, ...]} once and keeps it for the life of this
+        voice: what an agent says on every call (its greeting) then plays without a round trip.
+        A None language means this voice's own, as synthesize() without `language=` does."""
+        wanted = []
+        for language, texts in phrases.items():
+            code = self._language_code(INSTANCE_LANGUAGE if language is None else language)
+            for text in texts:
+                key = (text, code, sample_rate)
+                if (text and text.strip() and len(text) <= _PINNED_MAX_CHARS and key not in self._pinned
+                        and len(self._pinned) + len(wanted) < _PINNED_MAX_ENTRIES):
+                    wanted.append((key, language))
+        if not wanted:
+            return
+        audios = await asyncio.gather(*(self._request(k[0], k[2], k[1]) for k, _lang in wanted))
+        for (key, _lang), audio in zip(wanted, audios):
+            if audio:
+                self._pinned[key] = audio
+
     async def prewarm(self, languages: list[str]) -> None:
-        """Synthesizes the tool-call fillers and first-turn filler for each language into the
-        cache, once per voice instance, so a tool call's "one moment" plays without a round trip."""
+        """Pins the tool-call fillers and first-turn filler for each language, once per voice
+        instance, so a tool call's "one moment" plays without a round trip."""
         from ...i18n import t, tool_fillers
 
+        todo = {}
         for language in languages:
             code = self._language_code(language)
             if code in self._prewarmed:
@@ -131,7 +159,8 @@ class SarvamTTS:
             self._prewarmed.add(code)
             phrases = {phrase for phrase, _seconds in tool_fillers(language)}
             phrases.add(t("first_turn_filler", language))
-            await asyncio.gather(*(self.synthesize(p, _PREWARM_RATE, language=language) for p in phrases))
+            todo[language] = sorted(phrases)
+        await self.pin_phrases(todo)
 
     async def _request(self, text: str, sample_rate: int, language_code: str) -> bytes:
         request_rate = _nearest_supported_rate(sample_rate)

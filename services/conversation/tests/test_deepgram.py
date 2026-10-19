@@ -336,3 +336,27 @@ async def test_underscore_language_tag_is_canonicalised_for_rest_and_live():
     stt._ws_connect = _fake_connect
     await stt.feed_stream("s1", b"\x01\x02", 16000, language="en_US")
     assert "language=en-US" in urls[0]
+
+
+async def test_regional_host_from_env(monkeypatch):
+    monkeypatch.setenv("DEEPGRAM_API_HOST", "api.in.deepgram.com")
+    stt = DeepgramSTT(api_key="test-key")
+    seen = []
+
+    async def _fake_connect(url, **kwargs):
+        seen.append(url)
+        return _FakeLiveWs([])
+
+    stt._ws_connect = _fake_connect
+    await stt.feed_stream("s1", b"\x01\x02", 16000)
+    assert seen[0].startswith("wss://api.in.deepgram.com/v1/listen?")
+    assert str(stt._client.base_url) == "https://api.in.deepgram.com"
+    await stt.cancel_stream("s1")
+
+
+@pytest.mark.parametrize("value", ["", "evil.com/x?y=", "http://api.in.deepgram.com", "a b"])
+async def test_invalid_or_empty_host_falls_back_to_global(monkeypatch, value):
+    monkeypatch.setenv("DEEPGRAM_API_HOST", value)
+    stt = DeepgramSTT(api_key="test-key")
+    assert str(stt._client.base_url) == "https://api.deepgram.com"
+    assert stt._live_ws_url == "wss://api.deepgram.com/v1/listen"

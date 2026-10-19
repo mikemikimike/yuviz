@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 from collections import Counter
 from typing import Any
 
@@ -22,8 +24,19 @@ from ..interfaces import INSTANCE_LANGUAGE, SttResult
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_BASE_URL = "https://api.deepgram.com"
-_LIVE_WS_URL = "wss://api.deepgram.com/v1/listen"
+_DEFAULT_HOST = "api.deepgram.com"
+_HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")
+
+
+def deepgram_host() -> str:
+    """DEEPGRAM_API_HOST picks Deepgram's regional endpoint, e.g. api.in.deepgram.com for India
+    (one round trip ~50 ms from Mumbai instead of ~260 ms to the US; it covers nova-3 general,
+    Hindi and multi). An invalid value falls back to the global host rather than a broken URL."""
+    host = os.environ.get("DEEPGRAM_API_HOST", "").strip().lower() or _DEFAULT_HOST
+    if not _HOST_RE.fullmatch(host):
+        log.warning("DEEPGRAM_API_HOST=%r is not a hostname; using %s", host, _DEFAULT_HOST)
+        return _DEFAULT_HOST
+    return host
 
 # Deepgram closes a live connection after ~10-12s without audio; KeepAlive holds it through silence.
 _KEEPALIVE_INTERVAL_S = 8.0
@@ -89,9 +102,12 @@ class DeepgramSTT:
         api_key:   str,
         model:     str = "nova-3",
         language:  str | None = "en",
-        base_url:  str = _DEFAULT_BASE_URL,
+        base_url:  str | None = None,
         timeout_s: float = 10.0,
     ) -> None:
+        host = deepgram_host()
+        base_url = base_url or f"https://{host}"
+        self._live_ws_url = f"wss://{host}/v1/listen"
         self._api_key = api_key
         self._model  = model
         self._language = _canonical_language(language)
@@ -103,7 +119,7 @@ class DeepgramSTT:
         # Swappable for tests. One live connection per session, opened on first chunk.
         self._ws_connect = websockets.connect
         self._streams: dict[str, _LiveStream] = {}
-        log.info("DeepgramSTT model=%s language=%s", model, self._language)
+        log.info("DeepgramSTT model=%s language=%s host=%s", model, self._language, host)
 
     def _effective_language(self, language: Any) -> str:
         return self._language if language is INSTANCE_LANGUAGE else _canonical_language(language)
@@ -159,7 +175,7 @@ class DeepgramSTT:
             "language": language,
         }
         query = "&".join(f"{k}={v}" for k, v in params.items())
-        return f"{_LIVE_WS_URL}?{query}"
+        return f"{self._live_ws_url}?{query}"
 
     async def feed_stream(
         self, session_id: str, chunk: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE,

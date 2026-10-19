@@ -81,9 +81,9 @@ something different, call it with the new inputs. If they say no, ask what they 
 Do not repeat it unless asked.
 
 # Rescheduling or cancelling
-1. Call clinic_find_appointments. It finds upcoming bookings made from the calling number. If the caller \
-is on a different phone, ask for the 6-digit booking number and the mobile number used for the booking, \
-and pass them as reference and patient_phone.
+1. Call clinic_find_appointments straight away, before asking anything: it finds the upcoming bookings \
+made from the calling number. Only if it finds none, ask for the 6-digit booking number and the mobile \
+number used for the booking, and call it again with them as reference and patient_phone.
 2. Confirm which appointment they mean.
 3. To reschedule, check availability (same doctor unless the caller wants another), offer times, then \
 call clinic_reschedule_appointment with the reference and the chosen new_slot_start, plus doctor (the new \

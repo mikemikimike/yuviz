@@ -641,7 +641,9 @@ class PipelineConversationHandler:
         text = self._greeting_text() or ""
         if not text:
             return []
-        return [chunk async for chunk in self._synthesize_sentence_stream(text, session_id)]
+        # The greeting is the same on every call: pinned, so only the first call after a restart
+        # waits for it to be synthesized.
+        return [chunk async for chunk in self._synthesize_sentence_stream(text, session_id, pin=True)]
 
     async def on_audio(self, session_id: str, payload: bytes) -> HandlerResponse:
         # Lets streaming STT transcribe continuously; no-op for batch providers.
@@ -1479,7 +1481,11 @@ class PipelineConversationHandler:
 
         return handler
 
-    async def _synthesize_sentence_stream(self, text: str, session_id: str) -> AsyncGenerator[bytes, None]:
+    async def _synthesize_sentence_stream(
+        self, text: str, session_id: str, *, pin: bool = False,
+    ) -> AsyncGenerator[bytes, None]:
+        """pin: the text recurs on every call (the greeting); a voice that can keep its audio
+        (pin_phrases) synthesizes it once and replays it from then on."""
         # Every text source reaches TTS here, so strip markdown once for all of them.
         text = strip_markdown_chars(text)
         language = self._session_language(session_id) or self._tts_fixed_language
@@ -1493,6 +1499,12 @@ class PipelineConversationHandler:
                 language = written_in
         tts = self._tts_for(language)
         kwargs = {"language": language} if language and getattr(tts, "accepts_language", False) is True else {}
+        pin_phrases = getattr(tts, "pin_phrases", None) if pin else None
+        if pin_phrases is not None:
+            try:
+                await pin_phrases({kwargs.get("language"): [text]}, self._sample_rate)
+            except Exception:
+                log.warning("TTS pin failed session=%s", session_id, exc_info=True)
         try:
             async for chunk in tts.synthesize_stream(text, self._sample_rate, **kwargs):
                 yield chunk
