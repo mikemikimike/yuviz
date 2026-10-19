@@ -91,6 +91,12 @@ class _SessionState:
 # Split after ! or ?, and after . unless it follows a title abbreviation or middle initial.
 # Devanagari danda/double danda and CJK full stops end a sentence with or without a
 # following space (CJK writes none).
+# The first piece of a reply may break at a clause (", " / "; " / " — ") once it holds this many
+# characters: a long first sentence otherwise waits for its full stop before any audio starts.
+# The space after the comma keeps "1,000" whole; the minimum keeps "Sure," from going alone.
+_FIRST_CLAUSE_MIN_CHARS = 20
+_CLAUSE_RE = re.compile(r"(?<=[,;:—–])\s+")
+
 _SENTENCE_RE = re.compile(
     r'(?<=[!?])\s+'
     r'|(?<!Mr\.)(?<!Ms\.)(?<!Dr\.)(?<!Sr\.)(?<!Jr\.)(?<!St\.)(?<!Mt\.)(?<!vs\.)'
@@ -1384,6 +1390,7 @@ class PipelineConversationHandler:
         # end_call latched so transition speech / filler cannot clear [[END_CALL]].
         end_call = False
         spoke = False  # any reply speech this turn; a filler does not count
+        first_piece_sent = False  # the reply's first sentence or clause has gone to TTS
         try:
             async for item in _with_filler_timer(
                 self._token_stream(history, session_id, cancel_event, tool_calls_made, store, carry_taint),
@@ -1458,8 +1465,19 @@ class PipelineConversationHandler:
                         break
                     sentence, text_buffer = parts[0].strip(), parts[1]
                     if sentence:
+                        first_piece_sent = True
                         async for chunk in self._synthesize_sentence_stream(sentence, session_id):
                             yield "", chunk, end_call
+                # Nothing spoken yet and the first sentence is still open: start on its first clause.
+                if not first_piece_sent:
+                    for match in _CLAUSE_RE.finditer(text_buffer):
+                        clause = text_buffer[:match.start()].strip()
+                        if len(clause) >= _FIRST_CLAUSE_MIN_CHARS:
+                            text_buffer = text_buffer[match.end():]
+                            first_piece_sent = True
+                            async for chunk in self._synthesize_sentence_stream(clause, session_id):
+                                yield "", chunk, end_call
+                            break
         except Exception:
             log.exception("LLM streaming failed session=%s", session_id)
             if not cancel_event.is_set():

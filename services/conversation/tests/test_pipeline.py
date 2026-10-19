@@ -2865,3 +2865,40 @@ async def test_first_turn_filler_and_a_tool_filler_are_not_back_to_back(monkeypa
     spoken = _spoken(tts)
     assert spoken[0] == _FIRST_TURN_FILLER
     assert not any(t in _TOOL_CALL_FILLERS for t in spoken)
+
+
+# ── First clause of a reply goes to TTS without waiting for the full stop ──
+
+async def _spoken_for_tokens(tokens: list[str]) -> list[str]:
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(_make_stt("hi"), _make_llm(tokens), tts, system_prompt="s")
+    handler._session("s1").first_turn_filler_spoken = True
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    return _spoken(tts)
+
+
+@pytest.mark.asyncio
+async def test_long_first_sentence_starts_on_its_first_clause():
+    spoken = await _spoken_for_tokens([
+        # Streamed a few words at a time, as a model does.
+        "For knee pain our", " Orthopaedics department", " is right", ",", " because", " they treat",
+        " joints and bones.", " Dr. Bhatia is free", " tomorrow,", " at 5 PM or 5:15 PM.",
+    ])
+    assert spoken == [
+        "For knee pain our Orthopaedics department is right,",
+        "because they treat joints and bones.",
+        "Dr. Bhatia is free tomorrow, at 5 PM or 5:15 PM.",      # later sentences stay whole
+    ]
+
+
+@pytest.mark.asyncio
+async def test_short_lead_ins_and_numbers_are_not_split():
+    spoken = await _spoken_for_tokens(["Sure, I can book that for you today.", " The fee is 1,000 rupees."])
+    assert spoken == ["Sure, I can book that for you today.", "The fee is 1,000 rupees."]
+
+
+@pytest.mark.asyncio
+async def test_hindi_first_clause():
+    spoken = await _spoken_for_tokens(["घुटनों के दर्द के लिए Orthopaedics सही रहेगा, ", "वहाँ जोड़ों का इलाज होता है।"])
+    assert spoken == ["घुटनों के दर्द के लिए Orthopaedics सही रहेगा,", "वहाँ जोड़ों का इलाज होता है।"]
