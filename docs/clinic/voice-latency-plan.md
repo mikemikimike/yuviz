@@ -55,7 +55,7 @@ Tool-call filler ("One moment.", "एक पल।"), before and after the Sarva
 | 2026-10-17 13:49, before the cache | 13:49:13.158 | 13:49:13.626 (+468 ms) | yes, ~400 ms |
 | 2026-10-19 06:30, with the cache | 06:30:44.663 | 06:30:44.664 (+1 ms) | none |
 
-The filler no longer delays anything. It still plays on every tool call, though tools take ~70 ms, so callers hear about 1 s of "Give me a moment." before most answers (item 8). Today that second of audio overlaps the second model call, so it costs nothing extra; once item 6 removes that call, the ready answer would queue behind the filler. **Ship items 6 and 8 together.**
+The cache removed the filler's synthesis delay, but two fillers still played unconditionally: "One moment." on every tool call (tools take ~70 ms) and "Mm-hmm, one moment." before every caller's first reply. Callers heard about 1 s of filler before most answers, and once item 6 removes the second model call, a ready answer would have queued behind it. Item 8 (moved into Phase 1) fixes both: a filler is spoken only when nothing else arrives to be said within a set wait.
 
 ## 2. What others do
 
@@ -75,16 +75,18 @@ The filler no longer delays anything. It still plays on every tool call, though 
 | 1 | End-of-speech wait 1,000 ms → ~600 ms (tenant `vad_hold_ms`), then tune on real calls | ~400 ms | Setting + test calls |
 | 2 | Deepgram live URL → `wss://api.in.deepgram.com/v1/listen` (make it a setting; `_LIVE_WS_URL` is hard-coded in `services/conversation/providers/stt/deepgram.py`) | ~200–600 ms | Small code change |
 | 3 | Model gpt-4o-mini → gpt-4.1-mini or gpt-5-nano, after running the test-guide scenarios in Hindi and English | ~300–500 ms; removes 2.7 s spikes | Config + quality check |
-| 4 | Add the greeting and other fixed sentences to Sarvam's prewarm | No ~1 s silence at pickup on the first call after a restart | Small |
+| 4 | Keep the greeting and fillers pinned in Sarvam's cache (the greeting, ~230 characters, was over the cache limit, and one-off sentences could evict the fillers) | Greeting plays at once on every call after the first | Small |
+| 8 | **Fillers only when the caller would otherwise wait** (moved up from Phase 2): a tool-call or first-reply filler is armed when the wait starts and spoken only if nothing else arrives within `VOICEAI_FILLER_DELAY_MS` (default 1,200 ms). A filler no longer counts as the agent's reply. | ~1 s less filler audio before most answers; no overlap with fast answers | Done |
 
 ### Phase 2: code, 3–5 days (estimate → ~1.5–1.8 s)
+
+Item 8 (fillers) moved to Phase 1, above.
 
 | # | Change | Expected saving |
 |---|---|---|
 | 5 | Sarvam WebSocket streaming text-to-speech, one connection per call, playback from the first clause | ~600–800 ms every turn |
 | 6 | Availability and find answers spoken from the tool's ready-made sentence (success template), skipping the second model call, as booking and cancelling already do | ~0.8–1 s on tool turns |
 | 7 | At call start, look up the caller's upcoming appointments and give them to the model, so "reschedule my appointment" needs no lookup call | One tool round trip on reschedule/cancel calls |
-| 8 | Skip the filler when a tool usually takes under ~400 ms (the latency store already records this); keep it for slow tools. The cache already removed its synthesis delay. | ~1 s less audio before most tool answers; fewer overlaps with the caller |
 | 9 | Per-stage timing in logs, including the end-of-speech wait and the moment the caller hears audio, at p50 and p95 | Lets every later change be measured |
 
 ### Phase 3: larger, 1–2 weeks each, after Phase 2 is measured (target ~0.9–1.2 s)
