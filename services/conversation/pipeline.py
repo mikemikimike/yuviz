@@ -439,6 +439,7 @@ class PipelineConversationHandler:
         metrics:       IMetrics | None = None,
         tool_orchestrator: ToolCallOrchestrator | None = None,
         has_booking_tool: bool = False,
+        confirm_caller_number: bool | None = None,
         initial_variables: dict[str, Any] | None = None,
         latency_store: ToolLatencyStore | None = None,
         filler_selector: FillerSelector | None = None,
@@ -475,7 +476,8 @@ class PipelineConversationHandler:
         # Date / caller-number / directive tokens appended after each node's prompt.
         self._prompt_suffix = (
             _build_current_date_context()
-            + (_build_caller_number_context(self._caller_number) if has_booking_tool else "")
+            + (_build_caller_number_context(self._caller_number)
+               if (has_booking_tool if confirm_caller_number is None else confirm_caller_number) else "")
             + _build_end_call_instruction(
                 runtime_config.conversation.end_call_prompt,
                 scripted=self._farewell_message is not None,
@@ -731,6 +733,8 @@ class PipelineConversationHandler:
         duration_ms: int,
         energy_db:   float,
     ) -> AsyncGenerator[HandlerResponse, None]:
+        log.info("speech_ended session=%s duration_ms=%d audio_bytes=%d energy_db=%.1f",
+                 session_id, duration_ms, len(audio), energy_db)
         # Fresh per-turn event, replaced before any await: a cancel targets the prior response only.
         cancel_event = asyncio.Event()
         self._session(session_id).cancelled = cancel_event
@@ -747,7 +751,7 @@ class PipelineConversationHandler:
             int(lang_state.SHORT_MIN_S * self._sample_rate) * 2 if self._multilingual else min_bytes
         )
         if len(audio) < floor_bytes:
-            log.debug(
+            log.info(
                 "Skipping short utterance (%d bytes < %d) session=%s",
                 len(audio), floor_bytes, session_id,
             )
@@ -780,7 +784,7 @@ class PipelineConversationHandler:
         stt_ms = (time.monotonic() - stt_t0) * 1000
 
         if not stt_result.text or cancel_event.is_set():
-            log.debug("STT empty or cancelled session=%s", session_id)
+            log.info("STT empty or cancelled session=%s cancelled=%s", session_id, cancel_event.is_set())
             return
 
         if tracker is not None:
@@ -1403,6 +1407,8 @@ class PipelineConversationHandler:
                     continue  # the filler, if any, comes as a _FillerDue when the wait runs long
                 if isinstance(item, _FillerDue):
                     if item.tool_name == _FIRST_TURN:
+                        # Counts toward the gap, so a tool call right after doesn't add a second filler.
+                        self._session(session_id).tool_call_filler_last_spoken = time.monotonic()
                         phrase = t("first_turn_filler", self._spoken_language(session_id))
                         async for chunk in self._synthesize_sentence_stream(phrase, session_id):
                             yield _FILLER, chunk, end_call

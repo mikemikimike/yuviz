@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 
+import pytest
+
 from libs.tenancy import tenant_conn
 from services.clinic import booking
 
@@ -252,3 +254,19 @@ async def test_reschedule_to_another_doctor_keeps_booking_number(run, pool):
     refused = await run(booking.reschedule, reference=ref, new_slot_start=tomorrow_at(15, 0), caller_phone=caller,
                         patient_phone=None, language="en", doctor_code=booking.NOTHING)
     assert not refused["ok"]
+
+
+@pytest.mark.parametrize("name", ["Patient", "the patient", "मरीज़", "Caller.", "  ", "N/A"])
+async def test_placeholder_names_are_refused(run, name):
+    prep = await run(booking.prepare_booking, doctor="CARD-01", slot_start=tomorrow_at(16, 15), patient_name=name,
+                     patient_phone=None, caller_phone="+919811100009", language="en")
+    assert not prep["ok"] and prep["confirm_text"] == "What is the patient's full name?"
+    done = await run(booking.book, doctor_code="CARD-01", slot_start=tomorrow_at(16, 15), patient_name=name,
+                     patient_phone="+919811100009", caller_phone="+919811100009", reason=None, patient_age=None,
+                     language="hi")
+    assert not done["ok"] and done["spoken"] == "मरीज़ का पूरा नाम क्या है?"
+
+
+def test_real_names_are_not_placeholders():
+    for name in ("Rahul Sharma", "Patil", "Mr. Verma", "चंदन कुमार", "Testa"):
+        assert not booking.is_placeholder_name(name), name

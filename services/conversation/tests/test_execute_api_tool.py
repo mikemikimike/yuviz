@@ -844,7 +844,7 @@ async def test_the_resolver_surfaces_which_offered_apis_are_read_only_across_the
         )
 
         resolver = ToolPolicyResolver(pool=pool, registry=ToolRegistry())
-        _defn, _sensitive, read_only = await resolver._specialize_execute_api(
+        _defn, _sensitive, read_only, _writes_use_call_number = await resolver._specialize_execute_api(
             ToolRegistry().resolve("execute_api"), str(agent["id"]), tenant["slug"],
         )
 
@@ -865,3 +865,62 @@ async def test_a_row_without_the_side_effecting_column_is_treated_as_a_write():
     [policy] = [p for p in await resolver.enabled_tools("agent1", "t1") if p.definition.name == "execute_api"]
 
     assert policy.read_only_apis == frozenset()
+
+
+async def test_the_resolver_knows_when_every_write_takes_the_number_from_the_call():
+    """writes_use_call_number: true only when each offered write API (through its chain) has a
+    caller_id param, so the model never handles the caller's number and needn't read it back."""
+    pool = await _pg_pool()
+    try:
+        tenant = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *", "CID Test", f"cid-{uuid_hex()}",
+        )
+        agent = await pool.fetchrow(
+            "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'clinic', 'Clinic') RETURNING *", tenant["id"],
+        )
+
+        async def api(name: str, side_effecting: bool, *, caller_id: bool = False, enable: bool = True):
+            row = await pool.fetchrow(
+                "INSERT INTO custom_apis (tenant_id, name, description, endpoint_url, method, side_effecting) "
+                "VALUES ($1, $2, 'd', 'https://example.com/x', 'POST', $3) RETURNING *",
+                tenant["id"], name, side_effecting,
+            )
+            if caller_id:
+                await pool.execute(
+                    "INSERT INTO custom_api_params (custom_api_id, name, location, json_type, source, sensitive) "
+                    "VALUES ($1, 'caller_phone', 'body', 'string', 'caller_id', true)", row["id"],
+                )
+            if enable:
+                await pool.execute(
+                    "INSERT INTO agent_custom_apis (agent_id, custom_api_id, enabled) VALUES ($1, $2, true)",
+                    agent["id"], row["id"],
+                )
+            return row
+
+        async def flag() -> bool:
+            resolver = ToolPolicyResolver(pool=pool, registry=ToolRegistry())
+            result = await resolver._specialize_execute_api(
+                ToolRegistry().resolve("execute_api"), str(agent["id"]), tenant["slug"],
+            )
+            return result[3]
+
+        await api("availability", False)
+        assert await flag() is False                     # no writes at all: nothing to say
+        prepare = await api("prepare_booking", False, caller_id=True, enable=False)
+        book = await api("book", True)
+        await pool.execute(
+            "INSERT INTO custom_api_params (custom_api_id, name, location, json_type, source, upstream_api_id, "
+            "upstream_json_path) VALUES ($1, 'slot', 'body', 'string', 'upstream', $2, '$.slot')",
+            book["id"], prepare["id"],
+        )
+        await api("cancel", True, caller_id=True)
+        assert await flag() is True                      # caller_id reached through the chain counts
+        await api("send_sms_to_any_number", True)
+        assert await flag() is False                     # one write without it keeps the read-back
+    finally:
+        await pool.execute("DELETE FROM agent_custom_apis WHERE agent_id = $1", agent["id"])
+        await pool.execute("DELETE FROM custom_api_params WHERE custom_api_id IN (SELECT id FROM custom_apis WHERE tenant_id = $1)", tenant["id"])
+        await pool.execute("DELETE FROM custom_apis WHERE tenant_id = $1", tenant["id"])
+        await pool.execute("DELETE FROM agents WHERE tenant_id = $1", tenant["id"])
+        await pool.execute("DELETE FROM tenants WHERE id = $1", tenant["id"])
+        await pool.close()

@@ -2192,6 +2192,7 @@ async def test_tool_call_filler_burst_within_one_turn_speaks_only_once():
         ToolTokenEvent(text="Done."),
     ])
     handler = _make_handler(stt, llm, tts, system_prompt="You are a scheduler.", tool_orchestrator=orchestrator)
+    handler._session("s1").first_turn_filler_spoken = True   # tool fillers only, not the first-turn one
 
     async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
         pass
@@ -2213,6 +2214,7 @@ async def test_tool_call_filler_rotates_across_separate_tool_calls(monkeypatch):
     llm = _make_llm(["unused"])
     tts = _make_tts(b"\x00" * 640)
     handler = _make_handler(stt, llm, tts, system_prompt="You are a scheduler.")
+    handler._session("s1").first_turn_filler_spoken = True   # tool fillers only, not the first-turn one
 
     handler._tool_orchestrator = _FakeToolOrchestrator([ToolCallStartedEvent(tool_name="book_appointment")])
     async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
@@ -2844,3 +2846,22 @@ async def test_marker_only_reply_after_a_filler_still_says_goodbye(monkeypatch):
     responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
     assert any(r.end_call for r in responses)
     tts.synthesize.assert_any_call(_FALLBACK_GOODBYE, 16_000)
+
+
+@pytest.mark.asyncio
+async def test_first_turn_filler_and_a_tool_filler_are_not_back_to_back(monkeypatch):
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "50")
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _PacedToolOrchestrator([
+        0.12, ToolCallStartedEvent(tool_name="execute_api"), 0.12, ToolTokenEvent(text="Found it."),
+    ])
+    handler = _make_handler(_make_stt("cancel it"), _make_llm(["x"]), tts, system_prompt="s",
+                            tool_orchestrator=orchestrator)
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    spoken = _spoken(tts)
+    assert spoken[0] == _FIRST_TURN_FILLER
+    assert not any(t in _TOOL_CALL_FILLERS for t in spoken)

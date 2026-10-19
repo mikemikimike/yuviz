@@ -16,6 +16,7 @@ import datetime
 import logging
 import re
 import secrets
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -459,8 +460,8 @@ async def prepare_booking(
     caller = phones.normalize_phone(caller_phone)
     patient = phones.normalize_phone(patient_phone) or caller
     name = (patient_name or "").strip()
-    if not name:
-        return _refusal("मरीज़ का पूरा नाम क्या है?" if language == "hi" else "What is the patient's full name?", **nothing)
+    if is_placeholder_name(name):
+        return _refusal(_ask_name(language), **nothing)
     if patient is None:
         return _refusal("बुकिंग के लिए 10 अंकों का मोबाइल नंबर बताइए।" if language == "hi"
                         else "Could you give me a 10-digit mobile number for the booking?", **nothing)
@@ -521,6 +522,34 @@ async def prepare_booking(
     }
 
 
+# Words a model fills in when it never asked for the name. A booking under "Patient" is
+# useless to the front desk, so these are refused and the caller is asked instead.
+_PLACEHOLDER_NAMES = frozenset({
+    "patient", "the patient", "caller", "customer", "user", "unknown", "name", "patient name",
+    "full name", "na", "n a", "none", "test", "sir", "madam", "mr", "mrs", "ms",
+    "मरीज़", "मरीज", "रोगी", "ग्राहक", "नाम",
+})
+
+
+def _name_key(text: str) -> str:
+    """Case, punctuation and nukta/diacritic spelling variants folded away (ज़ = ज + ़)."""
+    decomposed = unicodedata.normalize("NFKD", (text or "").casefold())
+    stripped = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+    return " ".join(re.sub(r"[^\w\s]", " ", stripped).split())
+
+
+_PLACEHOLDER_KEYS = frozenset(_name_key(n) for n in _PLACEHOLDER_NAMES)
+
+
+def is_placeholder_name(name: str) -> bool:
+    key = _name_key(name)
+    return not key or key in _PLACEHOLDER_KEYS
+
+
+def _ask_name(language: str) -> str:
+    return "मरीज़ का पूरा नाम क्या है?" if language == "hi" else "What is the patient's full name?"
+
+
 def _new_reference() -> str:
     return str(secrets.randbelow(900_000) + 100_000)
 
@@ -536,6 +565,8 @@ async def book(
     matches = await find_doctors(conn, clinic, doctor=doctor_code) if doctor_code and doctor_code != NOTHING else []
     doc = matches[0] if len(matches) == 1 and matches[0]["code"].lower() == doctor_code.lower() else None
     name = (patient_name or "").strip()
+    if is_placeholder_name(name):
+        return {"ok": False, "spoken": _ask_name(language)}
     if doc is None or start is None or patient is None or not name:
         return {"ok": False, "spoken": ("वह बुकिंग नहीं हो सकी। चलिए कोई दूसरा समय देखते हैं।" if language == "hi"
                                         else "I couldn't make that booking. Let's look at another time.")}
