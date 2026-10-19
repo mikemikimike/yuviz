@@ -101,6 +101,19 @@ Item 8 (fillers) moved to Phase 1, above.
 
 The clinic APIs take about 70 ms in total, so caching their results would save little and risks offering a slot someone has just booked. The worthwhile API-side changes are #6 (no second model call after a tool) and #7 (prefetching the caller's bookings).
 
+## Results so far (live calls on 0120 510 8340, medians per turn)
+
+| | 2026-10-17 (before) | 2026-10-19 Phase 1 | 2026-10-19 Phase 2 |
+|---|---|---|---|
+| Speech-to-text final | 885 ms | 152 ms | 155 ms |
+| Model first token | 1,488 ms | 1,128 ms | 1,065 ms |
+| Text-to-speech first audio | ~1,100 ms | ~1,100 ms | ~280 ms |
+| Measured voice-to-voice | 2,756 ms | 2,095 ms | 1,506 ms |
+| End-of-speech wait (gateway) | ~1,000 ms | ~600 ms | ~600 ms |
+| **Caller waits** | **~3.8 s** | **~2.7 s** | **~2.1 s** |
+
+Shipped: items 1–4 and 8 (Phase 1), 5 and 6 (Phase 2), plus fixes found on live calls: the gateway was ignoring tenant voice settings (Redis entry expired after 60 s), a redundant caller-ID read-back turn, placeholder patient names, and back-to-back fillers. Deferred: item 7 (needs a per-agent "lookup at call start" setting, i.e. a schema change) and item 9's end-of-speech timing (needs a gateway rebuild). Biggest remaining costs: the model (~1.1 s, with spikes to 2.4 s) and the 600 ms end-of-speech wait, both Phase 3.
+
 ## 4. Recommendation
 
 1. Do Phase 1 now, starting with #1 and #2: together about 0.6–1.0 s for almost no risk.
