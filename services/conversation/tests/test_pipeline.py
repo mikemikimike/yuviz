@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -257,35 +258,280 @@ async def test_pipeline_produces_stt_then_tts():
     assert tts_responses, "expected TTS chunks"
 
 
+def _make_slow_llm(delay_s: float, tokens: list[str] | None = None, started: list | None = None) -> MagicMock:
+    """An LLM whose first token takes delay_s; `started` records when generation began."""
+    tokens = tokens or ["Real", " response", "."]
+
+    async def _gen(messages):
+        if started is not None:
+            started.append(time.monotonic())
+        await asyncio.sleep(delay_s)
+        for tok in tokens:
+            yield tok
+
+    llm = MagicMock()
+    llm.generate = _gen
+    return llm
+
+
+def _timed_tts(pcm: bytes = b"\x00" * 320):
+    """A TTS that records (text, when) for every synthesis."""
+    tts = MagicMock()
+    log: list[tuple[str, float]] = []
+
+    async def _stream(text, sample_rate):
+        log.append((text, time.monotonic()))
+        yield pcm
+
+    tts.synthesize_stream = _stream
+    tts.log = log
+    return tts
+
+
 @pytest.mark.asyncio
-async def test_first_turn_filler_spoken_before_the_real_response():
-    stt = _make_stt("hi there")
-    llm = _make_llm(["Real", " response", "."])
-    tts = _make_tts()
+async def test_a_model_that_answers_within_the_delay_needs_no_filler(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.5)
+    tts = _timed_tts()
+    handler = _make_handler(_make_stt("hi there"), _make_llm(["Real", " response", "."]), tts, system_prompt="Be helpful.")
 
-    handler = _make_handler(stt, llm, tts, system_prompt="Be helpful.")
     async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
         pass
 
-    spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
-    assert spoken_texts[0] == _FIRST_TURN_FILLER
-    assert spoken_texts.count(_FIRST_TURN_FILLER) == 1
+    assert _FIRST_TURN_FILLER not in [text for text, _ in tts.log]
 
 
 @pytest.mark.asyncio
-async def test_first_turn_filler_not_repeated_on_later_turns():
-    stt = _make_stt("hi there")
-    llm = _make_llm(["Real", " response", "."])
-    tts = _make_tts()
+async def test_a_slow_model_gets_a_filler_before_its_answer_and_is_not_held_up_by_it(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.05)
+    started: list[float] = []
+    tts = _timed_tts()
+    handler = _make_handler(
+        _make_stt("hi there"), _make_slow_llm(0.3, started=started), tts, system_prompt="Be helpful.",
+    )
 
-    handler = _make_handler(stt, llm, tts, system_prompt="Be helpful.")
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+
+    texts = [text for text, _ in tts.log]
+    assert texts[0] == _FIRST_TURN_FILLER and texts.count(_FIRST_TURN_FILLER) == 1
+    assert "Real response." in texts[1:]
+    filler_at = tts.log[0][1]
+    # The model call began before the filler was even synthesized: nothing waited for the filler.
+    assert started[0] < filler_at
+    # And the filler was not delayed behind the model: it came well before the model's first token.
+    assert filler_at - started[0] < 0.2
+
+
+@pytest.mark.asyncio
+async def test_the_filler_waits_for_the_delay_and_not_longer(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.15)
+    started: list[float] = []
+    tts = _timed_tts()
+    handler = _make_handler(_make_stt("hi"), _make_slow_llm(0.5, started=started), tts)
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+
+    waited = tts.log[0][1] - started[0]
+    assert 0.12 <= waited < 0.3
+
+
+@pytest.mark.asyncio
+async def test_first_turn_filler_not_repeated_on_later_turns(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.02)
+    tts = _timed_tts()
+    handler = _make_handler(_make_stt("hi there"), _make_slow_llm(0.1), tts, system_prompt="Be helpful.")
+
     async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
         pass
     async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
         pass
 
-    spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
-    assert spoken_texts.count(_FIRST_TURN_FILLER) == 1
+    assert [text for text, _ in tts.log].count(_FIRST_TURN_FILLER) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_fast_first_turn_does_not_use_up_the_filler_for_a_later_slow_one(monkeypatch):
+    """The filler is for the first turn only, whether or not it was needed."""
+    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.2)
+    tts = _timed_tts()
+    delays = iter([0.0, 0.5])
+
+    async def _gen(messages):
+        await asyncio.sleep(next(delays))
+        yield "Fine."
+
+    llm = MagicMock()
+    llm.generate = _gen
+    handler = _make_handler(_make_stt("hi"), llm, tts)
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+
+    assert _FIRST_TURN_FILLER not in [text for text, _ in tts.log]
+
+
+@pytest.mark.asyncio
+async def test_the_filler_does_not_count_as_the_first_audio_of_the_answer(monkeypatch):
+    """voice_to_voice must still measure the real answer, not the filler."""
+    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.02)
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("hi"), _make_slow_llm(0.3), _timed_tts(), transcripts=transcripts,
+    )
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+
+    latency = transcripts.record_turn.call_args.kwargs["latency"]
+    assert latency.voice_to_voice_ms >= 300     # the model's own time, not the ~20 ms to the filler
+
+
+@pytest.mark.asyncio
+async def test_the_filler_audio_is_synthesized_once_per_voice_and_replayed_on_the_next_call(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.02)
+    tts = _timed_tts()          # one TTS instance shared by two calls, as the provider cache does
+
+    async def _call(session):
+        handler = _make_handler(_make_stt("hi"), _make_slow_llm(0.1), tts)
+        return [r async for r in handler.on_speech_ended(session, _silence(), 200, -20.0)]
+
+    first = await _call("s1")
+    second = await _call("s2")
+
+    assert [text for text, _ in tts.log].count(_FIRST_TURN_FILLER) == 1
+    # The second call still played a filler; it just did not synthesize it.
+    assert sum(1 for r in second if r.tts_payloads) == sum(1 for r in first if r.tts_payloads)
+
+
+@pytest.mark.asyncio
+async def test_a_greeting_is_synthesized_once_per_voice(monkeypatch):
+    tts = _timed_tts()
+    first = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome to Acme.")
+    second = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome to Acme.")
+
+    one = await first.greeting("s1")
+    two = await second.greeting("s2")
+
+    assert one == two and one
+    assert [text for text, _ in tts.log].count("Welcome to Acme.") == 1
+
+
+@pytest.mark.asyncio
+async def test_cached_audio_is_keyed_by_text_so_another_phrase_is_still_synthesized():
+    tts = _timed_tts()
+    handler = _make_handler(_make_stt(), _make_llm(), tts)
+
+    for text in ("Welcome to Acme.", "Welcome to Zeta.", "Welcome to Acme."):
+        async for _ in handler._synthesize_sentence_stream(text, "s1", cache=True):
+            pass
+
+    assert [text for text, _ in tts.log] == ["Welcome to Acme.", "Welcome to Zeta."]
+
+
+@pytest.mark.asyncio
+async def test_uncached_synthesis_is_never_replayed():
+    """Model sentences are not fixed phrases: they must always be synthesized."""
+    tts = _timed_tts()
+    handler = _make_handler(_make_stt(), _make_llm(), tts)
+
+    for _ in range(2):
+        async for _chunk in handler._synthesize_sentence_stream("Sure thing.", "s1"):
+            pass
+
+    assert [text for text, _ in tts.log] == ["Sure thing.", "Sure thing."]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_synthesis_is_never_cached():
+    calls = {"n": 0}
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("voice service down")
+        yield b"\x01\x00"
+        return
+
+    tts.synthesize_stream = _stream
+    first = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome.")
+    second = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome.")
+
+    assert await first.greeting("s1") == []
+    assert await second.greeting("s2") == [b"\x01\x00"]
+
+
+@pytest.mark.asyncio
+async def test_the_greeting_opens_the_speech_to_text_connection_in_the_background():
+    stt = _make_stt()
+    opened: list[tuple] = []
+
+    async def _prewarm(session_id, sample_rate, **kwargs):
+        opened.append((session_id, sample_rate))
+
+    stt.prewarm_stream = _prewarm
+    handler = _make_handler(stt, _make_llm(), _timed_tts(), greeting="Hi.")
+
+    await handler.greeting("s1")
+    await asyncio.sleep(0.01)
+
+    assert opened == [("s1", 16_000)]
+
+
+@pytest.mark.asyncio
+async def test_a_speech_to_text_provider_without_prewarm_is_simply_skipped():
+    handler = _make_handler(_make_stt(), _make_llm(), _timed_tts(), greeting="Hi.")
+
+    assert await handler.greeting("s1")          # no AttributeError, no un-awaited coroutine
+
+
+@pytest.mark.asyncio
+async def test_filler_phrases_are_prepared_after_the_greeting():
+    tts = _timed_tts()
+    handler = _make_handler(_make_stt(), _make_llm(), tts, greeting="Hi.")
+
+    await handler.greeting("s1")
+    await asyncio.sleep(0.05)
+
+    texts = [text for text, _ in tts.log]
+    assert _FIRST_TURN_FILLER in texts
+    assert set(texts) & _TOOL_CALL_FILLERS          # at least one tool filler too
+    assert texts[0] == "Hi."                        # the greeting always goes first
+
+
+@pytest.mark.asyncio
+async def test_a_caller_who_interrupts_while_the_model_thinks_stops_the_model_call(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 5.0)
+    state = {"started": False, "closed": False}
+
+    async def _gen(messages):
+        state["started"] = True
+        try:
+            await asyncio.sleep(30)
+            yield "never"
+        finally:
+            state["closed"] = True
+
+    llm = MagicMock()
+    llm.generate = _gen
+    handler = _make_handler(_make_stt("hi"), llm, _timed_tts())
+
+    stream = handler.on_speech_ended("s1", _silence(), 200, -20.0)
+    first = await stream.__anext__()                       # the transcript
+    assert first.stt_text == "hi"
+    pending = asyncio.ensure_future(stream.__anext__())
+    await asyncio.sleep(0.05)
+    assert state["started"]
+    pending.cancel()
+    with pytest.raises((asyncio.CancelledError, StopAsyncIteration)):
+        await pending
+    await stream.aclose()
+    await asyncio.sleep(0.05)
+
+    assert state["closed"]                                 # the model call was stopped, not left running
 
 
 @pytest.mark.asyncio
@@ -2749,3 +2995,40 @@ async def test_no_error_fallback_when_the_turn_moves_to_an_end_or_transfer_node(
     responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
 
     assert _FALLBACK_LLM_ERROR not in _reply_text(responses)
+
+
+@pytest.mark.asyncio
+async def test_a_speech_to_text_prewarm_that_rejects_its_arguments_does_not_break_the_greeting():
+    stt = _make_stt()
+
+    async def _prewarm(session_id):                       # does not accept the sample rate
+        return None
+
+    stt.prewarm_stream = _prewarm
+    handler = _make_handler(stt, _make_llm(), _timed_tts(), greeting="Hi.")
+
+    assert await handler.greeting("s1")
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_turn_while_it_waits_is_not_swallowed(monkeypatch):
+    """A cancellation aimed at the turn must propagate; stopping the model call must not hide it."""
+    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 5.0)
+
+    async def _gen(messages):
+        await asyncio.sleep(30)
+        yield "never"
+
+    llm = MagicMock()
+    llm.generate = _gen
+    handler = _make_handler(_make_stt("hi"), llm, _timed_tts())
+
+    async def _run():
+        async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+            pass
+
+    task = asyncio.ensure_future(_run())
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

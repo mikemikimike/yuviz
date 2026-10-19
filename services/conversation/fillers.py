@@ -20,6 +20,12 @@ _DEFAULT_TARGET_S = 1.6
 _FALLBACK_FILLER = "One moment."
 
 
+def tool_filler_phrases(language: str | None = None) -> list[str]:
+    """Every tool filler phrase for a language, so their audio can be prepared before a call needs one."""
+    pool = tool_fillers(language) if language else _TOOL_FILLERS
+    return [phrase for phrase, _seconds in pool]
+
+
 class FillerSelector:
     def select_tool_filler(
         self, tool_name: str, last_phrase: str | None, average_ms: float | None,

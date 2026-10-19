@@ -3,6 +3,7 @@ and end-to-end from Config SDK resolution to the language the providers receive.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from .. import language as lang_state
 from ..language import (
     LanguageTracker, UtteranceLanguage, fixed_language_instruction, reply_language_instruction, utterance_language,
 )
+from .. import pipeline as pipeline_module
 from ..pipeline import PipelineConversationHandler, _SENTENCE_RE
 from ..provider_bundle import ProviderBundle
 from ..providers.interfaces import INSTANCE_LANGUAGE, SttResult
@@ -418,11 +420,21 @@ async def test_greeting_without_map_uses_workflow_greeting():
     assert tts.calls == [("Hello!", "hi")]
 
 
-async def test_first_turn_filler_follows_session_language():
+class _SlowLLM(_LLM):
+    """First token after 0.2 s, so the delayed first-turn filler is due."""
+
+    async def generate(self, messages):
+        self.system_prompts.append(messages[0].content)
+        await asyncio.sleep(0.2)
+        yield "Okay."
+
+
+async def test_first_turn_filler_follows_session_language(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.02)
     rc = await _runtime({"language": "en", "supported_languages": ("en", "hi")})
     tts = _RecordingTTS()
     stt = _RecordingSTT([SttResult(text="नमस्ते जी", language="hi", language_confidence=1.0)])
-    h = _handler(rc, stt, _LLM(), tts)
+    h = _handler(rc, stt, _SlowLLM(), tts)
     await _turn(h, "s1")
     assert tts.calls[0] == ("जी, एक पल।", "hi")
 

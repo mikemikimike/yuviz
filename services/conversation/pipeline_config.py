@@ -53,6 +53,27 @@ def _env_int(key: str, default: int) -> int:
     return int(val) if val else default
 
 
+def env_ms(key: str, default_ms: float) -> float:
+    """A millisecond setting from the environment, as milliseconds. Blank or unusable values fall back to the
+    default, because .env.example documents these as blank and a typo must not stop the service importing."""
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip():
+        return float(default_ms)
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(default_ms)
+    return value if value >= 0 else float(default_ms)
+
+
+def env_count(key: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.environ.get(key)
+    try:
+        return max(minimum, int(raw)) if raw and raw.strip() else default
+    except ValueError:
+        return default
+
+
 @dataclass
 class SttConfig:
     model_size:   str        = "small.en"  # "tiny"|"base"|"small"|"medium"|"large-v3", or ".en" variant
