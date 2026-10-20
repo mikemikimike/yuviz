@@ -1596,10 +1596,13 @@ class PipelineConversationHandler:
         key = (language, self._sample_rate, text)
         if cache:
             hit = phrase_audio.lookup(tts, key)
+            if hit is None and (pending := phrase_audio.in_flight(tts, key)) is not None:
+                hit = await asyncio.shield(pending)    # None: that attempt failed, so synthesize it here
             if hit is not None:
                 for chunk in hit:
                     yield chunk
                 return
+        flight = phrase_audio.begin(tts, key) if cache else None
         collected: list[bytes] = []
         complete = False
         try:
@@ -1610,8 +1613,9 @@ class PipelineConversationHandler:
             complete = True
         except Exception:
             log.exception("TTS streaming failed text=%r session=%s", text, session_id)
-        if cache and complete:
-            phrase_audio.store(tts, key, collected)
+        finally:
+            if cache:
+                phrase_audio.finish(tts, key, flight, collected if complete else None)
 
     def _session(self, session_id: str) -> _SessionState:
         state = self._sessions.get(session_id)

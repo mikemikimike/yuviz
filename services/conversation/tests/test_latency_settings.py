@@ -93,3 +93,16 @@ async def test_deepgram_endpointing_comes_from_extra():
 async def test_an_unusable_endpointing_value_is_rejected_with_a_clear_message(bad):
     with pytest.raises(ValueError, match="extra.endpointing_ms"):
         await apm._make_deepgram(_cfg({"endpointing_ms": bad}), "key")
+
+
+def test_env_helpers_share_one_parser_but_keep_their_own_failure_rules(monkeypatch):
+    from ..pipeline_config import _env_float, _env_int, env_count, env_ms
+
+    monkeypatch.setenv("X_NUM", "  ")
+    assert _env_float("X_NUM", 1.5) == 1.5 and _env_int("X_NUM", 3) == 3 and env_count("X_NUM", 7) == 7
+    monkeypatch.setenv("X_NUM", "oops")
+    with pytest.raises(ValueError):
+        _env_int("X_NUM", 3)                  # established settings still fail loudly on a typo
+    assert env_ms("X_NUM", 400) == 400.0 and env_count("X_NUM", 7) == 7
+    monkeypatch.setenv("X_NUM", "-5")
+    assert env_ms("X_NUM", 400) == 400.0 and env_count("X_NUM", 7) == 1

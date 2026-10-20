@@ -8,6 +8,7 @@ a new instance, which starts empty, so a stale voice is never replayed.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import weakref
 from collections import OrderedDict
@@ -20,6 +21,8 @@ from .pipeline_config import env_count
 MAX_PHRASES_PER_TTS = env_count("VOICEAI_PHRASE_CACHE_ENTRIES", 64)
 
 _caches: "weakref.WeakKeyDictionary[Any, OrderedDict[tuple, list[bytes]]]" = weakref.WeakKeyDictionary()
+# Phrases being synthesized right now, so concurrent calls on a cold cache share one request.
+_in_flight: "weakref.WeakKeyDictionary[Any, dict[tuple, asyncio.Future]]" = weakref.WeakKeyDictionary()
 _lock = threading.Lock()
 
 PhraseKey = tuple  # (language or None, sample_rate, text)
@@ -53,6 +56,35 @@ def store(tts: Any, key: PhraseKey, chunks: list[bytes]) -> None:
             cache.popitem(last=False)
 
 
-def size(tts: Any) -> int:
+def in_flight(tts: Any, key: PhraseKey) -> "asyncio.Future | None":
+    """Another caller's synthesis of this phrase, still running; it resolves to the chunks, or None if it failed."""
     with _lock:
-        return len(_caches.get(tts, ()))
+        try:
+            return _in_flight.get(tts, {}).get(key)
+        except TypeError:
+            return None
+
+
+def begin(tts: Any, key: PhraseKey) -> "asyncio.Future | None":
+    """Claim this phrase's synthesis; pass the result to finish(). None when the instance can't be tracked."""
+    future = asyncio.get_running_loop().create_future()
+    with _lock:
+        try:
+            _in_flight.setdefault(tts, {})[key] = future
+        except TypeError:
+            return None
+    return future
+
+
+def finish(tts: Any, key: PhraseKey, future: "asyncio.Future | None", chunks: list[bytes] | None) -> None:
+    """Store a complete synthesis (None when it failed or was cut short) and wake whoever waited on it."""
+    if chunks is not None:
+        store(tts, key, chunks)
+    if future is None:
+        return
+    with _lock:
+        flights = _in_flight.get(tts)
+        if flights is not None and flights.get(key) is future:
+            del flights[key]
+    if not future.done():
+        future.set_result(list(chunks) if chunks and any(chunks) else None)

@@ -3333,3 +3333,26 @@ async def test_prewarms_still_running_when_the_call_ends_are_cancelled():
     await asyncio.sleep(0)
 
     assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_on_a_cold_cache_synthesize_a_phrase_once():
+    tts = MagicMock()
+    requests: list[str] = []
+
+    async def _stream(text, sample_rate):
+        requests.append(text)
+        await asyncio.sleep(0.05)       # still in flight when the second call asks
+        yield b"\x01" * 320
+
+    tts.synthesize_stream = _stream
+    first = _make_handler(_make_stt(), _make_llm(), tts)
+    second = _make_handler(_make_stt(), _make_llm(), tts)
+
+    async def _speak(handler, session):
+        return [c async for c in handler._synthesize_sentence_stream("One moment.", session, cache=True)]
+
+    a, b = await asyncio.gather(_speak(first, "s1"), _speak(second, "s2"))
+
+    assert requests == ["One moment."]
+    assert a == b == [b"\x01" * 320]

@@ -37,7 +37,7 @@ def test_empty_audio_is_not_stored_because_it_would_replay_silence():
     phrase_audio.store(tts, (None, 16000, "Hello."), [])
     phrase_audio.store(tts, (None, 16000, "Hi."), [b"", b""])
 
-    assert phrase_audio.size(tts) == 0
+    assert len(phrase_audio._caches.get(tts, ())) == 0
 
 
 def test_the_oldest_phrase_is_dropped_past_the_bound(monkeypatch):
@@ -74,7 +74,7 @@ def test_the_cache_dies_with_the_tts_instance():
     import gc
     tts = _Tts()
     phrase_audio.store(tts, (None, 16000, "Hi."), [b"\x01"])
-    assert phrase_audio.size(tts) == 1
+    assert len(phrase_audio._caches.get(tts, ())) == 1
     del tts
     gc.collect()
 
@@ -88,3 +88,25 @@ def test_a_tts_that_cannot_be_weakly_referenced_is_simply_not_cached():
     tts = Slotted()
     phrase_audio.store(tts, (None, 16000, "Hi."), [b"\x01"])
     assert phrase_audio.lookup(tts, (None, 16000, "Hi.")) is None
+
+
+async def test_a_second_caller_waits_for_the_synthesis_already_running():
+    tts = _Tts()
+    key = (None, 16000, "One moment.")
+    flight = phrase_audio.begin(tts, key)
+    assert phrase_audio.in_flight(tts, key) is flight
+    phrase_audio.finish(tts, key, flight, [b"\x01"])
+
+    assert await flight == [b"\x01"]
+    assert phrase_audio.in_flight(tts, key) is None
+    assert phrase_audio.lookup(tts, key) == [b"\x01"]
+
+
+async def test_a_failed_synthesis_wakes_waiters_with_nothing_and_caches_nothing():
+    tts = _Tts()
+    key = (None, 16000, "One moment.")
+    flight = phrase_audio.begin(tts, key)
+    phrase_audio.finish(tts, key, flight, None)
+
+    assert await flight is None
+    assert phrase_audio.lookup(tts, key) is None
