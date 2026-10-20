@@ -22,13 +22,15 @@ done
 [ ${#args[@]} -gt 0 ] || args=(status)
 cmd="${args[0]}"
 
-# SIP calls on FreeSWITCH; prints nothing when FreeSWITCH is down (then it carries no calls).
+# SIP calls on FreeSWITCH; fails when fs_cli is missing or ESL can't be asked.
 fs_calls() {
-  local fs_cli
+  local fs_cli out
   fs_cli="$(_fs_prefix 2>/dev/null || true)/bin/fs_cli"
-  [ -x "$fs_cli" ] || return 0
-  "$fs_cli" -H "${FREESWITCH_ESL_HOST:-127.0.0.1}" -P "${FREESWITCH_ESL_PORT:-8022}" -p "${FREESWITCH_ESL_PASSWORD:-}" \
-    -x "show calls count" 2>/dev/null | grep -oE '^[0-9]+ total' | cut -d' ' -f1 || true
+  [ -x "$fs_cli" ] || return 1
+  out=$("$fs_cli" -H "${FREESWITCH_ESL_HOST:-127.0.0.1}" -P "${FREESWITCH_ESL_PORT:-8022}" -p "${FREESWITCH_ESL_PASSWORD:-}" \
+    -x "show calls count" 2>/dev/null) || return 1
+  out=$(printf '%s\n' "$out" | grep -oE '^[0-9]+ total' | cut -d' ' -f1)
+  [ -n "$out" ] && echo "$out"
 }
 
 # Every path (SIP, Vobiz/Cloudonix, browser) records a calls row; stale ones are reconciled.
@@ -48,10 +50,13 @@ touches_call_path() {
 }
 
 if [ "$force" = 0 ] && [[ " stop restart signal remove $ALL_COMMANDS " == *" $cmd "* ]] && touches_call_path; then
-  sip=$(fs_calls)
-  if [ -z "$sip" ] && supervisorctl -c "$CONF" status freeswitch 2>/dev/null | grep -q RUNNING; then
-    echo "Refusing to $cmd: FreeSWITCH is running but its calls could not be counted (check FREESWITCH_ESL_*). Re-run with --force to go ahead anyway." >&2
-    exit 1
+  if ! sip=$(fs_calls); then
+    # Not countable: fine only when FreeSWITCH isn't running, so it carries no calls.
+    if pgrep -x freeswitch >/dev/null 2>&1; then
+      echo "Refusing to $cmd: FreeSWITCH is running but its calls could not be counted (check FREESWITCH_ESL_*). Re-run with --force to go ahead anyway." >&2
+      exit 1
+    fi
+    sip=0
   fi
   db=$(db_calls) || db=""
   if [ -z "$db" ]; then

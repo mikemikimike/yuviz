@@ -13,15 +13,19 @@ def run(tmp_path):
     bin_dir.mkdir()
     (bin_dir / "supervisorctl").write_text('#!/bin/sh\necho "supervisorctl $*"\n')
 
-    def _run(*args, open_calls="0", fs_running=False):
-        status = "freeswitch RUNNING" if fs_running else "freeswitch STOPPED"
-        (bin_dir / "supervisorctl").write_text(
-            f'#!/bin/sh\ncase "$*" in *"status freeswitch"*) echo "{status}" ;; *) echo "supervisorctl $*" ;; esac\n')
+    def _run(*args, open_calls="0", fs_running=False, fs_cli=None):
+        (bin_dir / "pgrep").write_text(f"#!/bin/sh\nexit {0 if fs_running else 1}\n")
+        fs_bin = tmp_path / "fs" / "bin"
+        fs_bin.mkdir(parents=True, exist_ok=True)
+        (fs_bin / "freeswitch").write_text("#!/bin/sh\n")
+        (fs_bin / "fs_cli").write_text(fs_cli or "#!/bin/sh\nexit 1\n")
+        for f in fs_bin.iterdir():
+            f.chmod(0o755)
         psql = "#!/bin/sh\nexit 2\n" if open_calls is None else f"#!/bin/sh\necho {open_calls}\n"
         (bin_dir / "psql").write_text(psql)
         for f in bin_dir.iterdir():
             f.chmod(0o755)
-        env = {**os.environ, "PATH": f"{bin_dir}:/usr/bin:/bin", "FS_PREFIX": str(tmp_path / "no-freeswitch")}
+        env = {**os.environ, "PATH": f"{bin_dir}:/usr/bin:/bin", "FS_PREFIX": str(tmp_path / "fs")}
         return subprocess.run([str(SVC), *args], env=env, capture_output=True, text=True, timeout=30)
 
     return _run
@@ -59,6 +63,11 @@ def test_unknown_call_count_refuses(run):
     assert r.returncode == 1 and "could not count live calls" in r.stderr
 
 
-def test_running_freeswitch_with_an_uncountable_call_total_refuses(run):
-    r = run("restart", "gateway", open_calls="0", fs_running=True)
+def test_running_freeswitch_whose_calls_cannot_be_counted_refuses(run):
+    r = run("restart", "gateway", open_calls="0", fs_running=True)  # fs_cli exits 1, e.g. a wrong ESL password
     assert r.returncode == 1 and "could not be counted" in r.stderr
+
+
+def test_sip_calls_on_freeswitch_refuse_even_with_no_calls_rows(run):
+    r = run("restart", "gateway", open_calls="0", fs_running=True, fs_cli='#!/bin/sh\necho "2 total."\n')
+    assert r.returncode == 1 and "2 SIP call(s)" in r.stderr

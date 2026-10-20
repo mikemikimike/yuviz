@@ -30,6 +30,8 @@ plist() {
   <key>RunAtLoad</key><true/>
   <!-- Restarted if it dies, but a clean shutdown (deployment/svc shutdown) stays down. -->
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <!-- Longer than every stopwaitsecs added up, so launchd never SIGKILLs supervisord mid-stop and orphans services. -->
+  <key>ExitTimeOut</key><integer>360</integer>
   <!-- An untyped job is throttled by macOS, which slows call audio. -->
   <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$HOME/.yuviz/logs/supervisord.launchd.log</string>

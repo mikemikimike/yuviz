@@ -17,6 +17,7 @@ def test_launch_agent_is_interactive_restarts_on_crash_and_carries_a_path(tmp_pa
     plist = plistlib.loads(out)
     assert plist["ProcessType"] == "Interactive"  # an untyped job is throttled
     assert plist["KeepAlive"] == {"SuccessfulExit": False} and plist["RunAtLoad"] is True  # svc shutdown stays down
+    assert plist["ExitTimeOut"] >= 300  # launchd must not SIGKILL supervisord mid-stop
     assert plist["ProgramArguments"][0] == str(tmp_path / "supervisord")
     assert plist["ProgramArguments"][-1].endswith("deployment/supervisord.conf")
     assert "/venv/bin:" in plist["EnvironmentVariables"]["PATH"]

@@ -463,8 +463,20 @@ def test_a_hang_is_stopped_then_killed_at_once(tmp_path, monkeypatch):
 
 def test_a_crash_is_stopped_gracefully_without_a_kill(tmp_path, monkeypatch):
     killed = []
+    monkeypatch.setattr(cw.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(cw.os, "killpg", lambda pid, sig: killed.append(pid))
-    sup, clock = _FakeSupervisor(), [100.0]
+
+    class Slow(_FakeSupervisor):
+        def getProcessInfo(self, name):
+            return {**super().getProcessInfo(name), "pid": 4242}
+
+        def stopProcess(self, name, wait):
+            self.stops += 1
+            self.statename = "STOPPING"
+            return True
+
+    sup, clock = Slow(), [100.0]
+    monkeypatch.setattr(cw.time, "sleep", lambda s: setattr(sup, "statename", "STOPPED"))
     w, _ = _watcher(tmp_path, sup, clock)
     w.on_event("PROCESS_STATE_EXITED", "gw", "0")
     sup.statename = "STARTING"
