@@ -9,11 +9,12 @@ from typing import Any
 
 import httpx
 
+from libs.config_sdk.secret_resolver import EnvResolver
 from libs.config_sdk.secrets import decrypt_tenant_secret, is_tenant_bound
 
 log = logging.getLogger(__name__)
 
-_TWILIO_API = os.environ.get("TWILIO_API_BASE", "https://api.twilio.com")
+_TWILIO_API = "https://api.twilio.com"
 _TIMEOUT_S = 10.0
 
 
@@ -24,8 +25,8 @@ class DeliveryFailed(Exception):
         self.retryable = retryable
 
 
-def resolve_secret(tenant_id: str, ref: str | None) -> str:
-    """'enc:t1.' (tenant-bound) or 'env:NAME'. Anything else is refused."""
+async def resolve_secret(tenant_id: str, ref: str | None) -> str:
+    """'enc:t1.' (tenant-bound) or 'env:NAME' (through the shared EnvResolver). Anything else is refused."""
     if not ref:
         raise DeliveryFailed("secret_missing", retryable=False)
     if ref.startswith("enc:"):
@@ -33,7 +34,10 @@ def resolve_secret(tenant_id: str, ref: str | None) -> str:
             raise DeliveryFailed("secret_not_tenant_bound", retryable=False)
         return decrypt_tenant_secret(tenant_id, ref)
     if ref.startswith("env:"):
-        value = os.environ.get(ref[4:])
+        try:
+            value = await EnvResolver().resolve(ref)
+        except KeyError:
+            value = ""
         if not value:
             raise DeliveryFailed("secret_env_unset", retryable=False)
         return value
@@ -46,7 +50,7 @@ async def send_twilio_sms(*, tenant_id: str, settings: dict, to: str, body: str,
     sender = settings.get("twilio_from")
     if not sid or not sender:
         raise DeliveryFailed("twilio_not_configured", retryable=False)
-    token = resolve_secret(tenant_id, settings.get("twilio_auth_token_ref"))
+    token = await resolve_secret(tenant_id, settings.get("twilio_auth_token_ref"))
     url = f"{_TWILIO_API}/2010-04-01/Accounts/{sid}/Messages.json"
     # A messaging-service SID ('MG…') goes in its own field; anything else is a sender number or ID.
     sender_field = "MessagingServiceSid" if sender.startswith("MG") else "From"

@@ -337,9 +337,6 @@ _KNOWLEDGE_TOOL_MAX_TOKENS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_TOKENS", "15
 # Words are no bound for CJK, minified JSON or base64 (no spaces), so characters are capped as well.
 _KNOWLEDGE_TOOL_MAX_CHARS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_CHARS", "6000"))
 
-# Masks turn-1 LLM latency; generic so it fits any first utterance.
-_FIRST_TURN_FILLER = t("first_turn_filler", "en")
-
 # Auto-appended when a transfer is configured, so the destination comes only from config.
 # Condition is per-agent (agents.transfer_prompt); token mechanics are fixed.
 _TRANSFER_CONDITION_DEFAULT = (
@@ -1414,9 +1411,20 @@ class PipelineConversationHandler:
                     continue  # the filler, if any, comes as a _FillerDue when the wait runs long
                 if isinstance(item, _FillerDue):
                     if item.tool_name == _FIRST_TURN:
+                        state = self._session(session_id)
                         # Counts toward the gap, so a tool call right after doesn't add a second filler.
-                        self._session(session_id).tool_call_filler_last_spoken = time.monotonic()
-                        phrase = t("first_turn_filler", self._spoken_language(session_id))
+                        state.tool_call_filler_last_spoken = time.monotonic()
+                        # Sized to the agent's tool latency and in the caller's language (#129); recorded
+                        # so the same turn's tool filler doesn't repeat it.
+                        average_ms = (
+                            self._latency_store.agent_average_ms(self._tenant_id, self._agent_id or "")
+                            if self._latency_store is not None else None
+                        )
+                        phrase = self._filler_selector.select_tool_filler(
+                            "first_turn", state.tool_call_filler_last_phrase, average_ms,
+                            language=self._spoken_language(session_id),
+                        )
+                        state.tool_call_filler_last_phrase = phrase
                         async for chunk in self._synthesize_sentence_stream(phrase, session_id):
                             yield _FILLER, chunk, end_call
                         log.info("First-turn filler spoken phrase=%r session=%s", phrase, session_id)

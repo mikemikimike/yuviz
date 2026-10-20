@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import Any
 
 from libs.tenancy import platform_conn, tenant_conn
@@ -14,7 +13,7 @@ from . import booking, db, integrations
 
 log = logging.getLogger(__name__)
 
-_POLL_S = float(os.environ.get("CLINIC_OUTBOX_POLL_S", "3"))
+_POLL_S = 3.0
 _MAX_ATTEMPTS = 8
 _LEASE_SECONDS = 120
 

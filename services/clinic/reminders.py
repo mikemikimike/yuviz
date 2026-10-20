@@ -23,7 +23,7 @@ from . import booking, db, notifications, reminders_schedule
 
 log = logging.getLogger(__name__)
 
-_POLL_S = float(os.environ.get("CLINIC_REMINDER_POLL_S", "30"))
+_POLL_S = 30.0
 _ANSWER_TIMEOUT_S = 40
 _NAMED_EXTENSION_RE = re.compile(r"[a-z][a-z0-9-]{2,40}")
 
