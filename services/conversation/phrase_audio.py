@@ -28,7 +28,10 @@ PhraseKey = tuple  # (language or None, sample_rate, text)
 def lookup(tts: Any, key: PhraseKey) -> list[bytes] | None:
     """The cached chunks for this phrase on this TTS instance, or None."""
     with _lock:
-        cache = _caches.get(tts)
+        try:
+            cache = _caches.get(tts)
+        except TypeError:
+            return None  # an object that cannot be weakly referenced is never cached
         if cache is None or key not in cache:
             return None
         cache.move_to_end(key)

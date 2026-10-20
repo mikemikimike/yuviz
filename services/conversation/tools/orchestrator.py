@@ -39,8 +39,8 @@ DEFAULT_TOOL_TIMEOUT_MS = 6000
 DEFAULT_MAX_TOOL_ITERATIONS = 2
 # Separate from remote iterations: a cyclic workflow can otherwise spin forever inside one turn.
 DEFAULT_MAX_LOCAL_TOOL_CALLS = 8
-# A tool still running after this long gets a spoken filler (ToolCallStartedEvent -> the pipeline's
-# filler path). Remote tools signal at dispatch instead, sized by their measured latency.
+# Any tool, local or remote, still running after this long gets a spoken filler (ToolCallStartedEvent ->
+# the pipeline's filler path); one that finishes sooner stays silent. The phrase is sized by measured latency.
 SLOW_TOOL_FILLER_AFTER_S = env_ms("VOICEAI_TOOL_FILLER_DELAY_MS", 400) / 1000.0
 _HELD_WRITE_TTL_S = 600.0   # a held write can be confirmed for this long
 _MAX_HELD_WRITES = 16

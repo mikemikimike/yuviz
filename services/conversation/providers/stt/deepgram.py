@@ -12,7 +12,7 @@ import json
 import logging
 import time
 from collections import Counter
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 import websockets
@@ -130,7 +130,6 @@ class DeepgramSTT:
         # One open at a time per session, so a prewarm and the first audio chunk share one connection.
         self._open_locks: dict[str, asyncio.Lock] = {}
         # session_id -> callable(text) fired when Deepgram reports speech_final with text.
-        self._endpoint_listeners: dict[str, Callable[[str], None]] = {}
         log.info("DeepgramSTT model=%s language=%s", model, self._language)
 
     def _effective_language(self, language: Any) -> str:
@@ -219,15 +218,10 @@ class DeepgramSTT:
         except Exception:
             log.exception("DeepgramSTT: prewarm failed session=%s", session_id)
 
-    def set_endpoint_listener(self, session_id: str, listener: Callable[[str], None] | None) -> None:
-        """Call listener(text) whenever Deepgram reports the caller paused (speech_final) with text."""
-        if listener is None:
-            self._endpoint_listeners.pop(session_id, None)
-        else:
-            self._endpoint_listeners[session_id] = listener
-
     async def _ensure_stream(self, session_id: str, sample_rate: int, language: str) -> "_LiveStream | None":
-        lock = self._open_locks.setdefault(session_id, asyncio.Lock())
+        lock = self._open_locks.get(session_id)
+        if lock is None:
+            lock = self._open_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             stream = self._streams.get(session_id)
             if stream is not None and stream.language != language:
@@ -244,6 +238,11 @@ class DeepgramSTT:
                     stream = await self._open_stream(session_id, sample_rate, language)
                 except Exception:
                     log.exception("DeepgramSTT: failed to open live stream session=%s", session_id)
+                    return None
+                if self._open_locks.get(session_id) is not lock:
+                    # The call ended while this connection was opening: nothing will ever evict it.
+                    self._evict_stream(session_id, stream)
+                    await self._close_socket(stream)
                     return None
                 stream.opened_ms = (time.monotonic() - started) * 1000
                 log.info("DeepgramSTT: live stream open session=%s in %.0f ms", session_id, stream.opened_ms)
@@ -303,7 +302,6 @@ class DeepgramSTT:
                         stream.languages.extend(alt.get("languages") or [])
                 if data.get("speech_final") and stream.final_segments:
                     stream.endpoint_seen = True
-                    self._notify_endpoint(session_id, " ".join(stream.final_segments).strip())
                 if data.get("from_finalize"):
                     stream.flush_done.set()
         except websockets.exceptions.ConnectionClosed:
@@ -316,14 +314,6 @@ class DeepgramSTT:
                 del self._streams[session_id]
             stream.flush_done.set()
 
-    def _notify_endpoint(self, session_id: str, text: str) -> None:
-        listener = self._endpoint_listeners.get(session_id)
-        if listener is None or not text:
-            return
-        try:
-            listener(text)
-        except Exception:
-            log.exception("DeepgramSTT: endpoint listener raised session=%s", session_id)
 
     async def finalize_stream(
         self, session_id: str, audio: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE,
@@ -335,13 +325,15 @@ class DeepgramSTT:
             return await self._transcribe_buffered(audio, sample_rate, language)
         stream.flush_done.clear()
         try:
-            if stream.endpoint_seen and not stream.latest_text and stream.final_segments:
-                pass  # Deepgram already closed the utterance by itself; nothing is left to flush
-            else:
+            # Deepgram already closed the utterance by itself when there is nothing left to flush.
+            if not (stream.endpoint_seen and not stream.latest_text and stream.final_segments):
                 await stream.ws.send(json.dumps({"type": "Finalize"}))
                 await asyncio.wait_for(stream.flush_done.wait(), timeout=_FINALIZE_TIMEOUT_S)
         except asyncio.TimeoutError:
-            log.warning("DeepgramSTT: no flush acknowledgement within %.1fs session=%s", _FINALIZE_TIMEOUT_S, session_id)
+            log.warning("DeepgramSTT: no flush acknowledgement within %.1fs session=%s; reconnecting for the next utterance",
+                        _FINALIZE_TIMEOUT_S, session_id)
+            self._evict_stream(session_id, stream)
+            await self._close_socket(stream)
         except Exception:
             log.exception("DeepgramSTT: finalize_stream failed session=%s", session_id)
             self._evict_stream(session_id, stream)
@@ -367,8 +359,13 @@ class DeepgramSTT:
             return SttResult(text="")
         return await self.transcribe(audio, sample_rate, language=language)
 
+    async def _close_socket(self, stream: "_LiveStream") -> None:
+        try:
+            await stream.ws.close()
+        except Exception:
+            pass
+
     async def cancel_stream(self, session_id: str) -> None:
-        self._endpoint_listeners.pop(session_id, None)
         self._open_locks.pop(session_id, None)
         stream = self._streams.pop(session_id, None)
         if stream is None:

@@ -3314,3 +3314,22 @@ async def test_cancelling_the_turn_while_it_waits_is_not_swallowed(monkeypatch):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_prewarms_still_running_when_the_call_ends_are_cancelled():
+    handler = _make_handler(_make_stt("hi"), _make_llm(), _make_tts())
+    started = asyncio.Event()
+
+    async def _slow_prewarm():
+        started.set()
+        await asyncio.sleep(10)
+
+    handler._spawn(_slow_prewarm())
+    await started.wait()
+    (task,) = handler._background_tasks
+
+    await handler.on_session_end("s1", "hangup")
+    await asyncio.sleep(0)
+
+    assert task.cancelled()

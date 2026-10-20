@@ -535,47 +535,6 @@ async def test_endpointing_is_sent_only_when_configured():
     await tuned.cancel_stream("s1")
 
 
-async def test_speech_final_calls_the_endpoint_listener_with_the_text_so_far():
-    heard = []
-    ws = _FakeLiveWs([])
-
-    async def _connect(url, **kwargs):
-        return ws
-
-    stt = DeepgramSTT(api_key="test-key")
-    stt._ws_connect = _connect
-    stt.set_endpoint_listener("s1", heard.append)
-    await stt.feed_stream("s1", b"\x01", 16000)
-
-    ws.push(_final("what is article fifteen"))
-    await asyncio.sleep(0.01)
-    assert heard == []                                 # a final segment alone is not an endpoint
-    ws.push({**_final("please", 0.9), "speech_final": True})
-    await asyncio.sleep(0.01)
-
-    assert heard == ["what is article fifteen please"]
-    stt.set_endpoint_listener("s1", None)
-    await stt.cancel_stream("s1")
-
-
-async def test_a_speech_final_with_no_text_does_not_fire_the_listener():
-    heard = []
-    ws = _FakeLiveWs([])
-
-    async def _connect(url, **kwargs):
-        return ws
-
-    stt = DeepgramSTT(api_key="test-key")
-    stt._ws_connect = _connect
-    stt.set_endpoint_listener("s1", heard.append)
-    await stt.feed_stream("s1", b"\x01", 16000)
-    ws.push({"type": "Results", "is_final": True, "speech_final": True, "channel": {"alternatives": [{"transcript": ""}]}})
-    await asyncio.sleep(0.01)
-
-    assert heard == []
-    await stt.cancel_stream("s1")
-
-
 async def test_a_different_language_reopens_the_connection():
     connects = []
     sockets = []
@@ -654,3 +613,45 @@ async def test_the_skip_does_not_leak_into_the_next_utterance():
     assert result.text == "second"
     assert len([m for m in ws.sent if isinstance(m, str) and json.loads(m)["type"] == "Finalize"]) == 1
     await stt.cancel_stream("s1")
+
+
+async def test_a_late_flush_reply_cannot_leak_into_the_next_utterance(monkeypatch):
+    monkeypatch.setattr("services.conversation.providers.stt.deepgram._FINALIZE_TIMEOUT_S", 0.05)
+    sockets = [_FakeLiveWs([_final("first")], ack_finalize=False), _FakeLiveWs([])]
+    connects = iter(sockets)
+
+    async def _connect(url, **kwargs):
+        return next(connects)
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+    await stt.feed_stream("s1", b"\x01", 16000)
+    await asyncio.sleep(0)
+    assert (await stt.finalize_stream("s1", b"", 16000)).text == "first"
+    assert sockets[0].closed                      # dropped, so its late reply has nowhere to land
+
+    sockets[0].push(_final("late tail"))
+    await stt.feed_stream("s1", b"\x01", 16000)   # a fresh connection for the next utterance
+    sockets[1].push(_final("second"))
+    await asyncio.sleep(0.01)
+    assert (await stt.finalize_stream("s1", b"", 16000)).text == "second"
+    await stt.cancel_stream("s1")
+
+
+async def test_a_prewarm_still_connecting_when_the_call_ends_is_closed():
+    ws = _FakeLiveWs([])
+    gate = asyncio.Event()
+
+    async def _connect(url, **kwargs):
+        await gate.wait()
+        return ws
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+    prewarm = asyncio.create_task(stt.prewarm_stream("s1", 16000))
+    await asyncio.sleep(0)
+    await stt.cancel_stream("s1")                 # the caller hung up before the connection opened
+    gate.set()
+    await prewarm
+
+    assert ws.closed and "s1" not in stt._streams

@@ -1079,6 +1079,9 @@ class PipelineConversationHandler:
         self._guardrail_counter.reset(session_id)
         self._booking_fabrication_counter.reset(session_id)
         self._sessions.pop(session_id, None)
+        # One handler per call: its prewarms (phrase audio, STT, retrieval) are worthless once the call ends.
+        for task in list(self._background_tasks):
+            task.cancel()
         try:
             await self._stt.cancel_stream(session_id)
         except Exception:

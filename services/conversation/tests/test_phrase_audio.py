@@ -79,3 +79,12 @@ def test_the_cache_dies_with_the_tts_instance():
     gc.collect()
 
     assert len(phrase_audio._caches) == 0
+
+
+def test_a_tts_that_cannot_be_weakly_referenced_is_simply_not_cached():
+    class Slotted:
+        __slots__ = ()
+
+    tts = Slotted()
+    phrase_audio.store(tts, (None, 16000, "Hi."), [b"\x01"])
+    assert phrase_audio.lookup(tts, (None, 16000, "Hi.")) is None
