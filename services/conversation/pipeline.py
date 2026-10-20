@@ -32,8 +32,8 @@ from .directives import (
     strip_markdown_chars,
 )
 from . import phrase_audio
-from .fillers import FillerSelector, tool_filler_phrases
-from .i18n import t
+from .fillers import FillerSelector
+from .i18n import t, tool_fillers
 from .guardrails import GuardrailCounter, GuardrailDetector
 from . import language as lang_state
 from .language import LanguageTracker, fixed_language_instruction, reply_language_instruction, script_language, utterance_language
@@ -255,9 +255,6 @@ _STREAM_END = object()
 _KNOWLEDGE_TOOL_MAX_TOKENS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_TOKENS", "1500"))
 # Words are no bound for CJK, minified JSON or base64 (no spaces), so characters are capped as well.
 _KNOWLEDGE_TOOL_MAX_CHARS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_CHARS", "6000"))
-
-# Masks turn-1 LLM latency; generic so it fits any first utterance.
-_FIRST_TURN_FILLER = t("first_turn_filler", "en")
 
 # Auto-appended when a transfer is configured, so the destination comes only from config.
 # Condition is per-agent (agents.transfer_prompt); token mechanics are fixed.
@@ -599,6 +596,19 @@ class PipelineConversationHandler:
             return
         self._spawn(warm)
 
+    def _first_turn_filler(self, session_id: str) -> str:
+        state = self._session(session_id)
+        average_ms = (
+            self._latency_store.agent_average_ms(self._tenant_id, self._agent_id or "")
+            if self._latency_store is not None else None
+        )
+        phrase = self._filler_selector.select_tool_filler(
+            "first_turn", state.tool_call_filler_last_phrase, average_ms,
+            language=self._spoken_language(session_id),
+        )
+        state.tool_call_filler_last_phrase = phrase
+        return phrase
+
     def _filler_languages(self) -> list[str | None]:
         return list(self._supported_languages) if self._multilingual else [None]
 
@@ -608,7 +618,7 @@ class PipelineConversationHandler:
         async def _run() -> None:
             for language in self._filler_languages():
                 spoken = language or self._strings_language
-                phrases = [t("first_turn_filler", spoken), *tool_filler_phrases(spoken if spoken != "en" else None)]
+                phrases = [phrase for phrase, _ms in tool_fillers(spoken)]
                 for phrase in phrases:
                     try:
                         async for _chunk in self._synthesize_sentence_stream(
@@ -882,7 +892,7 @@ class PipelineConversationHandler:
                         item = await asyncio.wait_for(items.get(), timeout=remaining)
                     except asyncio.TimeoutError:
                         filler_pending = False
-                        filler = t("first_turn_filler", self._spoken_language(session_id))
+                        filler = self._first_turn_filler(session_id)
                         async for chunk in self._synthesize_sentence_stream(filler, session_id, cache=True):
                             yield HandlerResponse(tts_payloads=[chunk])
                         continue
