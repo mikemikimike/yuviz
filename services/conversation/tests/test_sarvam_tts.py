@@ -105,7 +105,7 @@ async def test_short_phrases_are_cached_per_language_and_rate():
 
 @pytest.mark.asyncio
 async def test_prewarm_fills_cache_once():
-    from services.conversation.i18n import t, tool_fillers
+    from services.conversation.i18n import tool_fillers
 
     texts = []
 
@@ -116,9 +116,8 @@ async def test_prewarm_fills_cache_once():
     tts = _tts(handler)
     await tts.prewarm(["en", "hi"])
     await tts.prewarm(["en", "hi"])
-    expected = {p for lang in ("en", "hi") for p, _ in tool_fillers(lang)} | {t("first_turn_filler", "en"),
-                                                                            t("first_turn_filler", "hi")}
+    expected = {p for lang in ("en", "hi") for p, _ in tool_fillers(lang)}
     assert sorted(texts) == sorted(expected)
     before = len(texts)
-    await tts.synthesize(t("first_turn_filler", "hi"), 16000, language="hi")
+    await tts.synthesize(tool_fillers("hi")[0][0], 16000, language="hi")
     assert len(texts) == before
