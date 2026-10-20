@@ -24,6 +24,8 @@ FATAL = "FATAL"
 PROBE_INTERVAL_S = 10
 MISSES_TO_RESTART = 3
 STARTUP_DEADLINE_S = 300
+# A wedged Gateway never closes its calls rows, and its calls are already dead, so it restarts regardless.
+LIVE_CALL_EXEMPT = frozenset({"gateway"})
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -442,10 +444,11 @@ class Watcher:
             return
         if info["statename"] != "RUNNING" or float(info["start"]) != start_at:
             return
-        calls = self.live_calls()
-        if calls is None or calls > 0:
-            self._defer(name, start_at, calls)
-            return
+        if name not in LIVE_CALL_EXEMPT:
+            calls = self.live_calls()
+            if calls is None or calls > 0:
+                self._defer(name, start_at, calls)
+                return
         with self.lock:
             self.armed.pop(name, None)
             action, delay = self.policy.on_exit(name, self.clock())
