@@ -80,6 +80,7 @@ class SystemPromptGenerate(BaseModel):
 class AgentCreate(BaseModel):
     slug:           str
     name:           str
+    direction:      Literal["inbound", "outbound", "both"] = "inbound"
     greeting:       str = ""
     system_prompt:  str = ""
     stt_config_id:  str | None = None
@@ -92,6 +93,7 @@ class AgentCreate(BaseModel):
     supported_languages:    list[str] | None = None
     tts_config_by_language: dict[str, str | None] | None = None
     greeting_by_language:   dict[str, str] | None = None
+    language_mode:          Literal["monolingual", "multilingual"] | None = None
 
     @field_validator("workflow")
     @classmethod
@@ -104,6 +106,11 @@ def _no_double_braces(value: str) -> str:
     if "{{" in value or "}}" in value:
         raise ValueError("double curly brackets are not allowed")
     return value
+
+
+class LocalModelDownload(BaseModel):
+    engine: str
+    name:   str
 
 
 class AgentFromTemplate(BaseModel):
@@ -154,6 +161,14 @@ class PromptAccept(BaseModel):
 
 class AgentUpdate(BaseModel):
     name:                 str | None = None
+    direction:            Literal["inbound", "outbound", "both"] | None = None
+
+    @field_validator("direction")
+    @classmethod
+    def _direction_not_null(cls, value: str | None) -> str:
+        if value is None:
+            raise ValueError("direction cannot be null")
+        return value
     greeting:             str | None = None
     system_prompt:        str | None = None
     goodbye_grace_ms:     int | None = None
@@ -208,6 +223,8 @@ class AgentUpdate(BaseModel):
     supported_languages:    list[str] | None = None
     tts_config_by_language: dict[str, str | None] | None = None
     greeting_by_language:   dict[str, str] | None = None
+    # Set once, never cleared; omitted = derived from supported_languages (see _validate_languages).
+    language_mode:          Literal["monolingual", "multilingual"] | None = None
 
     # Runs only when the field is sent: omitted means "unchanged", explicit null is a bad request.
     @field_validator("sentiment_analysis_enabled")
