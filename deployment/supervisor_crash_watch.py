@@ -308,6 +308,8 @@ def default_probes() -> dict:
     host = dotenv("LISTEN_HOST", "127.0.0.1")
     host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
     esl = (dotenv("FREESWITCH_ESL_HOST", "127.0.0.1"), int(dotenv("FREESWITCH_ESL_PORT", "8022")))
+    gw_host = dotenv("GATEWAY_LISTEN_HOST", "127.0.0.1")
+    gw_host = "127.0.0.1" if gw_host in ("0.0.0.0", "::", "") else gw_host
     clusters = _ClusterCache()
     listen = _FileMemo(Path.home() / ".yuviz" / "kamailio" / "kamailio.cfg", kamailio_listen)
     probes = {
@@ -323,6 +325,7 @@ def default_probes() -> dict:
         "conversation-1": lambda: envoy_health(clusters.get(), "127.0.0.1:50051"),
         "conversation-2": lambda: envoy_health(clusters.get(), "127.0.0.1:50052"),
         "freeswitch": lambda: probe_esl(*esl),
+        "gateway": lambda: probe_http(f"http://{gw_host}:8080/health"),
         "kamailio": lambda: (lambda a: probe_sip(*a) if a else None)(listen.get()),
     }
     return probes
