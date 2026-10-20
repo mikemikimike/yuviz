@@ -160,8 +160,8 @@ def start_service(proxy, name: str) -> None:
 def probe_http(url: str, timeout: float = 3.0) -> bool:
     """Any HTTP response proves the event loop answered. No proxy."""
     try:
-        _OPENER.open(url, timeout=timeout).close()
-        return True
+        with _OPENER.open(url, timeout=timeout):
+            return True
     except urllib.error.HTTPError:
         return True
     except (OSError, ValueError):
@@ -214,10 +214,15 @@ def probe_sip(host: str, port: int, timeout: float = 3.0) -> bool | None:
             msg = (f"OPTIONS sip:{host}:{port} SIP/2.0\r\nVia: SIP/2.0/UDP {host}:{lport};branch=z9hG4bK{tag}\r\n"
                    f"Max-Forwards: 70\r\nFrom: <sip:crash-watch@{host}>;tag={tag}\r\nTo: <sip:{host}:{port}>\r\n"
                    f"Call-ID: {call_id}\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n")
-            sock.sendto(msg.encode(), (host, port))
-            return sock.recv(4096).startswith(b"SIP/2.0 ")
+            try:
+                sock.sendto(msg.encode(), (host, port))
+                return sock.recv(4096).startswith(b"SIP/2.0 ")
+            except socket.timeout:
+                return False
+            except OSError:
+                return None
     except OSError:
-        return False
+        return None
 
 
 def kamailio_listen(cfg: Path) -> tuple[str, int] | None:
@@ -237,8 +242,10 @@ def dotenv(key: str, default: str, path: Path = Path(".env")) -> str:
         return os.environ[key]
     try:
         for line in path.read_text().splitlines():
-            if line.startswith(f"{key}=") and line.split("=", 1)[1].strip():
-                return line.split("=", 1)[1].strip()
+            if line.startswith(f"{key}="):
+                value = line.split("=", 1)[1].split(" #", 1)[0].strip().strip("'\"")
+                if value:
+                    return value
     except OSError:
         pass
     return default
@@ -268,12 +275,13 @@ def default_probes() -> dict:
 
 
 class Watcher:
-    def __init__(self, policy: Policy, proxy_factory, state_path: Path, schedule=None, clock=time.time):
+    def __init__(self, policy: Policy, proxy_factory, state_path: Path, schedule=None, clock=time.time, dispatch=None):
         self.policy = policy
         self.proxy = proxy_factory  # one client per call: xmlrpc clients are not thread-safe
         self.state_path = state_path
         self.clock = clock
         self.schedule = schedule or self._timer
+        self.dispatch = dispatch or self._thread
         self.lock = threading.RLock()
         self.misses: dict[str, int] = {}
         self.armed: dict[str, float] = {}  # name -> start time it first passed a probe
@@ -292,6 +300,7 @@ class Watcher:
                 continue
             ok = probe()
             if ok is None:
+                self.misses.pop(name, None)  # "in a row": an unknown round breaks the streak
                 continue  # can't tell, e.g. Envoy itself is down
             if ok:
                 self.misses[name] = 0
@@ -310,7 +319,7 @@ class Watcher:
             if n >= MISSES_TO_RESTART:
                 self.misses[name] = 0
                 self.armed.pop(name, None)
-                self.on_hang(name, start)
+                self.dispatch(self.on_hang, name, start)
 
     def probe_loop(self, probes: dict, interval_s: float) -> None:
         while True:
@@ -319,6 +328,10 @@ class Watcher:
             except Exception as exc:  # noqa: BLE001
                 log(f"heartbeat round failed: {exc!r}")
             time.sleep(interval_s)
+
+    @staticmethod
+    def _thread(fn, *args) -> None:
+        threading.Thread(target=fn, args=args, daemon=True).start()
 
     @staticmethod
     def _timer(delay: float, fn) -> None:
@@ -364,7 +377,10 @@ class Watcher:
 
     def on_hang(self, name: str, start_at: float) -> None:
         """A hung process never exits, so it is stopped here and counted as a crash."""
-        info = self.proxy().supervisor.getProcessInfo(name)
+        try:
+            info = self.proxy().supervisor.getProcessInfo(name)
+        except xmlrpc.client.Fault:
+            return
         if info["statename"] != "RUNNING" or float(info["start"]) != start_at:
             return
         with self.lock:

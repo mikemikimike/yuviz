@@ -82,7 +82,8 @@ class _FakeProxy:
 def _watcher(tmp_path, sup, clock):
     timers = []
     w = cw.Watcher(_policy(), lambda: _FakeProxy(sup), tmp_path / "state.json",
-                   schedule=lambda delay, fn: timers.append((delay, fn)), clock=lambda: clock[0])
+                   schedule=lambda delay, fn: timers.append((delay, fn)), clock=lambda: clock[0],
+                   dispatch=lambda fn, *args: fn(*args))
     return w, timers
 
 
@@ -331,3 +332,42 @@ def test_reads_envoy_health_and_kamailio_listen(tmp_path, monkeypatch):
     cfg.write_text("#!KAMAILIO\nlisten=udp:192.168.0.116:5060\n")
     assert cw.kamailio_listen(cfg) == ("192.168.0.116", 5060)
     assert cw.kamailio_listen(tmp_path / "missing.cfg") is None
+
+
+def test_probe_sip_treats_unreachable_network_as_unknown(monkeypatch):
+    import errno
+
+    class Unreachable:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def settimeout(self, timeout):
+            pass
+
+        def bind(self, addr):
+            pass
+
+        def getsockname(self):
+            return ("192.168.0.9", 40000)
+
+        def sendto(self, data, addr):
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+
+    monkeypatch.setattr(cw.socket, "socket", Unreachable)
+    assert cw.probe_sip("192.168.0.9", 5060) is None
+
+
+def test_unknown_round_breaks_the_miss_streak(tmp_path):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    w.probe_once({"gw": lambda: True})
+    results = iter([False, False, None, False, False])
+    for _ in range(5):
+        w.probe_once({"gw": lambda: next(results)})
+    assert sup.stops == 0 and timers == []

@@ -343,7 +343,7 @@ tail -f ~/.yuviz/logs/gateway.log
 - **Crash loops stop instead of flapping:**
   - **Crashes during startup:** a service that dies within its first few seconds is retried 3 times, then marked FATAL.
   - **Hangs:** a process can stay alive but stop responding, and supervisord can't see that. So `crash-watch` probes every service every 10 s:
-    - **HTTP services:** `/health`
+    - **HTTP services:** `/health` (Admin UI: `/login`, Ollama: `/api/version`, Envoy: `/ready`)
     - **Conversation:** Envoy's gRPC health check
     - **FreeSWITCH:** the ESL greeting
     - **Kamailio:** a SIP `OPTIONS` ping
