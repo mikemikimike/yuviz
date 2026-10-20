@@ -4,7 +4,8 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CONF="$REPO/deployment/supervisord.conf"
-CALL_PATH=" kamailio freeswitch gateway envoy conversation-1 conversation-2 webcall telephony "
+# Live calls also use Toolexec, Knowledge and Ollama mid-turn.
+CALL_PATH=" kamailio freeswitch gateway envoy conversation-1 conversation-2 webcall telephony toolexec knowledge ollama "
 # These act on every service at once.
 ALL_COMMANDS=" reload shutdown update "
 
@@ -32,7 +33,7 @@ fs_calls() {
 
 # Every path (SIP, Vobiz/Cloudonix, browser) records a calls row; stale ones are reconciled.
 db_calls() {
-  psql "$POSTGRES_DSN" -Atc "SELECT count(*) FROM calls WHERE ended_at IS NULL AND started_at > now() - interval '2 hours'" 2>/dev/null
+  psql "$POSTGRES_DSN" -XAtc "SELECT count(*) FROM calls WHERE ended_at IS NULL AND started_at > now() - interval '2 hours'" 2>/dev/null
 }
 
 touches_call_path() {
@@ -40,13 +41,18 @@ touches_call_path() {
   local t
   for t in "${args[@]:1}"; do
     [ "$t" = all ] && return 0
-    [[ "$CALL_PATH" == *" ${t#*:} "* ]] && return 0
+    # Covers name, group:name and name:*.
+    [[ "$CALL_PATH" == *" ${t%%:*} "* || "$CALL_PATH" == *" ${t#*:} "* ]] && return 0
   done
   return 1
 }
 
-if [ "$force" = 0 ] && [[ " stop restart $ALL_COMMANDS " == *" $cmd "* ]] && touches_call_path; then
+if [ "$force" = 0 ] && [[ " stop restart signal remove $ALL_COMMANDS " == *" $cmd "* ]] && touches_call_path; then
   sip=$(fs_calls)
+  if [ -z "$sip" ] && supervisorctl -c "$CONF" status freeswitch 2>/dev/null | grep -q RUNNING; then
+    echo "Refusing to $cmd: FreeSWITCH is running but its calls could not be counted (check FREESWITCH_ESL_*). Re-run with --force to go ahead anyway." >&2
+    exit 1
+  fi
   db=$(db_calls) || db=""
   if [ -z "$db" ]; then
     echo "Refusing to $cmd: could not count live calls (is PostgreSQL up?). Re-run with --force to go ahead anyway." >&2

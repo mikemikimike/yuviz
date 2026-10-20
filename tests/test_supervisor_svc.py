@@ -13,7 +13,10 @@ def run(tmp_path):
     bin_dir.mkdir()
     (bin_dir / "supervisorctl").write_text('#!/bin/sh\necho "supervisorctl $*"\n')
 
-    def _run(*args, open_calls="0"):
+    def _run(*args, open_calls="0", fs_running=False):
+        status = "freeswitch RUNNING" if fs_running else "freeswitch STOPPED"
+        (bin_dir / "supervisorctl").write_text(
+            f'#!/bin/sh\ncase "$*" in *"status freeswitch"*) echo "{status}" ;; *) echo "supervisorctl $*" ;; esac\n')
         psql = "#!/bin/sh\nexit 2\n" if open_calls is None else f"#!/bin/sh\necho {open_calls}\n"
         (bin_dir / "psql").write_text(psql)
         for f in bin_dir.iterdir():
@@ -35,11 +38,13 @@ def test_it_goes_ahead_when_no_calls_are_live(run):
 
 
 def test_services_off_the_call_path_are_not_guarded(run):
-    assert run("restart", "toolexec", open_calls="2").returncode == 0
+    assert run("restart", "admin-ui", open_calls="2").returncode == 0
     assert run("status", open_calls=None).returncode == 0
 
 
-@pytest.mark.parametrize("args", [("restart", "all"), ("stop", "conversation-1"), ("update",), ("stop", "voice:gateway")])
+@pytest.mark.parametrize("args", [("restart", "all"), ("stop", "conversation-1"), ("update",), ("stop", "voice:gateway"),
+                                  ("restart", "gateway:*"), ("signal", "KILL", "freeswitch"), ("remove", "gateway"),
+                                  ("restart", "toolexec")])
 def test_every_way_of_hitting_the_call_path_is_guarded(run, args):
     assert run(*args, open_calls="1").returncode == 1
 
@@ -52,3 +57,8 @@ def test_force_overrides_and_is_not_passed_on(run):
 def test_unknown_call_count_refuses(run):
     r = run("restart", "gateway", open_calls=None)
     assert r.returncode == 1 and "could not count live calls" in r.stderr
+
+
+def test_running_freeswitch_with_an_uncountable_call_total_refuses(run):
+    r = run("restart", "gateway", open_calls="0", fs_running=True)
+    assert r.returncode == 1 and "could not be counted" in r.stderr
