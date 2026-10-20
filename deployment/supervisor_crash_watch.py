@@ -292,6 +292,28 @@ def count_live_calls(dsn: str) -> int | None:
         return None
 
 
+def gateway_port(cfg: Path) -> int:
+    """gateway.websocket.port from gateway.yaml; 8080 (the Gateway's own default) when absent."""
+    ws_indent = None
+    try:
+        for raw in cfg.read_text().splitlines():
+            line = raw.split("#", 1)[0].rstrip()
+            if not line.strip():
+                continue
+            indent = len(line) - len(line.lstrip())
+            if line.strip() == "websocket:":
+                ws_indent = indent
+            elif ws_indent is not None:
+                if indent <= ws_indent:
+                    break
+                key, _, value = line.strip().partition(":")
+                if key == "port":
+                    return int(value.strip())
+    except (OSError, ValueError):
+        pass
+    return 8080
+
+
 def dotenv(key: str, default: str, path: Path = Path(".env")) -> str:
     if os.environ.get(key):
         return os.environ[key]
@@ -312,6 +334,7 @@ def default_probes() -> dict:
     esl = (dotenv("FREESWITCH_ESL_HOST", "127.0.0.1"), int(dotenv("FREESWITCH_ESL_PORT", "8022")))
     gw_host = dotenv("GATEWAY_LISTEN_HOST", "127.0.0.1")
     gw_host = "127.0.0.1" if gw_host in ("0.0.0.0", "::", "") else gw_host
+    gw_port = _FileMemo(Path("config") / "gateway.yaml", gateway_port)
     clusters = _ClusterCache()
     listen = _FileMemo(Path.home() / ".yuviz" / "kamailio" / "kamailio.cfg", kamailio_listen)
     probes = {
@@ -327,7 +350,7 @@ def default_probes() -> dict:
         "conversation-1": lambda: envoy_health(clusters.get(), "127.0.0.1:50051"),
         "conversation-2": lambda: envoy_health(clusters.get(), "127.0.0.1:50052"),
         "freeswitch": lambda: probe_esl(*esl),
-        "gateway": lambda: probe_http(f"http://{gw_host}:8080/health"),
+        "gateway": lambda: probe_http(f"http://{gw_host}:{gw_port.get() or 8080}/health"),
         "kamailio": lambda: (lambda a: probe_sip(*a) if a else None)(listen.get()),
     }
     return probes
