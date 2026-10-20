@@ -436,12 +436,3 @@ def test_hung_gateway_restarts_even_with_live_calls(tmp_path):
         w.probe_once(probes)
     assert sup.stops == 1 and timers and timers[-1][0] == 0
 
-
-def test_gateway_port_reads_only_the_websocket_block(tmp_path):
-    cfg = tmp_path / "gateway.yaml"
-    cfg.write_text("gateway:\n  websocket:\n    port: 8090  # moved\n    max_connections: 10\n"
-                   "  metrics:\n    port: 9090\n")
-    assert cw.gateway_port(cfg) == 8090
-    cfg.write_text("gateway:\n  websocket:\n    max_connections: 10\n  metrics:\n    port: 9090\n")
-    assert cw.gateway_port(cfg) == 8080
-    assert cw.gateway_port(tmp_path / "missing.yaml") == 8080

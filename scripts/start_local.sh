@@ -183,7 +183,7 @@ start_admin_ui() {
 # ── Verify: check all services are healthy ───────────────────────────────────
 verify() {
   echo "=== Port check ==="
-  for port in 3306 5060 5080 5432 6379 11434 8000 8100 8400 8600 8750 50051 50052 10000 8080 3000; do
+  for port in 3306 5060 5080 5432 6379 11434 8000 8100 8400 8600 8750 50051 50052 10000 "${GATEWAY_LISTEN_PORT:-8080}" 3000; do
     nc -z localhost "$port" 2>/dev/null && echo "  :$port  OPEN" || echo "  :$port  CLOSED"
   done
 
