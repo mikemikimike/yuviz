@@ -168,12 +168,30 @@ def probe_http(url: str, timeout: float = 3.0) -> bool:
         return False
 
 
-def probe_envoy_host(addr: str, admin: str = "http://127.0.0.1:9901", timeout: float = 3.0) -> bool | None:
-    """Envoy's own gRPC health check for one upstream; None when Envoy can't say. No proxy."""
+def fetch_clusters(admin: str = "http://127.0.0.1:9901", timeout: float = 3.0) -> str | None:
     try:
         with _OPENER.open(f"{admin}/clusters", timeout=timeout) as r:
-            text = r.read().decode(errors="replace")
+            return r.read().decode(errors="replace")
     except OSError:
+        return None
+
+
+class _ClusterCache:
+    """Both conversation probes run in the same round; one fetch serves both."""
+
+    def __init__(self, ttl_s: float = 2.0, fetch=fetch_clusters):
+        self.ttl_s, self.fetch = ttl_s, fetch
+        self._at, self._text = float("-inf"), None
+
+    def get(self) -> str | None:
+        now = time.monotonic()
+        if now - self._at > self.ttl_s:
+            self._text, self._at = self.fetch(), now
+        return self._text
+
+
+def envoy_health(text: str | None, addr: str) -> bool | None:
+    if text is None:
         return None
     for line in text.splitlines():
         if f"::{addr}::health_flags::" in line:
@@ -182,6 +200,11 @@ def probe_envoy_host(addr: str, admin: str = "http://127.0.0.1:9901", timeout: f
                 return True
             return False if "failed_active_hc" in flags else None
     return None
+
+
+def probe_envoy_host(addr: str, admin: str = "http://127.0.0.1:9901", timeout: float = 3.0) -> bool | None:
+    """Envoy's own gRPC health check for one upstream; None when Envoy can't say. No proxy."""
+    return envoy_health(fetch_clusters(admin, timeout), addr)
 
 
 def probe_esl(host: str, port: int, timeout: float = 3.0) -> bool:
@@ -237,6 +260,36 @@ def kamailio_listen(cfg: Path) -> tuple[str, int] | None:
     return None
 
 
+class _FileMemo:
+    """Re-parses a file only when its mtime changes."""
+
+    def __init__(self, path: Path, parse):
+        self.path, self.parse = path, parse
+        self._mtime, self._value = None, None
+
+    def get(self):
+        try:
+            mtime = self.path.stat().st_mtime_ns
+        except OSError:
+            return None
+        if mtime != self._mtime:
+            self._mtime, self._value = mtime, self.parse(self.path)
+        return self._value
+
+
+LIVE_CALLS_SQL = "SELECT count(*) FROM calls WHERE ended_at IS NULL AND started_at > now() - interval '2 hours'"
+
+
+def count_live_calls(dsn: str) -> int | None:
+    """None when the count can't be read; the caller then aborts the restart."""
+    try:
+        out = subprocess.run(["psql", dsn, "-tAX", "-c", LIVE_CALLS_SQL],
+                             capture_output=True, text=True, timeout=10, check=True)
+        return int(out.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
 def dotenv(key: str, default: str, path: Path = Path(".env")) -> str:
     if os.environ.get(key):
         return os.environ[key]
@@ -255,7 +308,8 @@ def default_probes() -> dict:
     host = dotenv("LISTEN_HOST", "127.0.0.1")
     host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
     esl = (dotenv("FREESWITCH_ESL_HOST", "127.0.0.1"), int(dotenv("FREESWITCH_ESL_PORT", "8022")))
-    cfg = Path.home() / ".yuviz" / "kamailio" / "kamailio.cfg"
+    clusters = _ClusterCache()
+    listen = _FileMemo(Path.home() / ".yuviz" / "kamailio" / "kamailio.cfg", kamailio_listen)
     probes = {
         "config": lambda: probe_http(f"http://{host}:8000/health"),
         "knowledge": lambda: probe_http(f"http://{host}:8100/health"),
@@ -266,17 +320,19 @@ def default_probes() -> dict:
         "ollama": lambda: probe_http("http://127.0.0.1:11434/api/version"),
         "envoy": lambda: probe_http("http://127.0.0.1:9901/ready"),
         "admin-ui": lambda: probe_http(f"http://{host}:3000/login", timeout=15),
-        "conversation-1": lambda: probe_envoy_host("127.0.0.1:50051"),
-        "conversation-2": lambda: probe_envoy_host("127.0.0.1:50052"),
+        "conversation-1": lambda: envoy_health(clusters.get(), "127.0.0.1:50051"),
+        "conversation-2": lambda: envoy_health(clusters.get(), "127.0.0.1:50052"),
         "freeswitch": lambda: probe_esl(*esl),
-        "kamailio": lambda: (lambda a: probe_sip(*a) if a else None)(kamailio_listen(cfg)),
+        "kamailio": lambda: (lambda a: probe_sip(*a) if a else None)(listen.get()),
     }
     return probes
 
 
 class Watcher:
-    def __init__(self, policy: Policy, proxy_factory, state_path: Path, schedule=None, clock=time.time, dispatch=None):
+    def __init__(self, policy: Policy, proxy_factory, state_path: Path, schedule=None, clock=time.time, dispatch=None,
+                 live_calls=lambda: None):
         self.policy = policy
+        self.live_calls = live_calls
         self.proxy = proxy_factory  # one client per call: xmlrpc clients are not thread-safe
         self.state_path = state_path
         self.clock = clock
@@ -286,6 +342,7 @@ class Watcher:
         self.misses: dict[str, int] = {}
         self.armed: dict[str, float] = {}  # name -> start time it first passed a probe
         self.alerted: dict[str, float] = {}
+        self.deferred: dict[str, float] = {}  # name -> start time we already announced a deferred restart for
 
     def probe_once(self, probes: dict) -> None:
         proxy = self.proxy()
@@ -318,7 +375,6 @@ class Watcher:
             log(f"{name} missed heartbeat ({n}/{MISSES_TO_RESTART})")
             if n >= MISSES_TO_RESTART:
                 self.misses[name] = 0
-                self.armed.pop(name, None)
                 self.dispatch(self.on_hang, name, start)
 
     def probe_loop(self, probes: dict, interval_s: float) -> None:
@@ -383,9 +439,24 @@ class Watcher:
             return
         if info["statename"] != "RUNNING" or float(info["start"]) != start_at:
             return
+        calls = self.live_calls()
+        if calls is None or calls > 0:
+            self._defer(name, start_at, calls)
+            return
         with self.lock:
+            self.armed.pop(name, None)
             action, delay = self.policy.on_exit(name, self.clock())
         self._recover(name, "delay" if action == "restart" else action, delay, fatal=False, what="hung (no heartbeat)")
+
+    def _defer(self, name: str, start_at: float, calls: int | None) -> None:
+        why = "live-call count unavailable" if calls is None else f"{calls} live calls"
+        log(f"{name} hung; restart deferred ({why})")
+        with self.lock:
+            if self.deferred.get(name) == start_at:
+                return
+            self.deferred[name] = start_at
+        msg = f"{name} is hung but restart is deferred ({why}); it will retry while it stays hung"
+        notify(msg)
 
     def _recover(self, name: str, action: str, delay: float, *, fatal: bool, what: str) -> None:
         with self.lock:
@@ -458,7 +529,8 @@ def main() -> None:
 
     policy = Policy(args.max_crashes, args.window, args.backoff_cap, args.cooldown, args.cooldown_cap)
     url = os.environ["SUPERVISOR_SERVER_URL"]
-    watcher = Watcher(policy, lambda: rpc_proxy(url), args.state)
+    dsn = dotenv("POSTGRES_DSN", f"postgresql://{os.environ.get('USER', '')}@localhost:5432/voiceai")
+    watcher = Watcher(policy, lambda: rpc_proxy(url), args.state, live_calls=lambda: count_live_calls(dsn))
     watcher.load()
     watcher.resume()
     if not args.no_heartbeat:
