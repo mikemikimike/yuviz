@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import xmlrpc.client
@@ -292,6 +293,14 @@ def count_live_calls(dsn: str) -> int | None:
         return None
 
 
+def url_port(key: str, default: int) -> int:
+    """Port of the .env URL a service's callers use, so the probe follows the service."""
+    try:
+        return urllib.parse.urlparse(dotenv(key, "")).port or default
+    except ValueError:
+        return default
+
+
 def dotenv(key: str, default: str, path: Path = Path(".env")) -> str:
     if os.environ.get(key):
         return os.environ[key]
@@ -316,12 +325,12 @@ def default_probes() -> dict:
     clusters = _ClusterCache()
     listen = _FileMemo(Path.home() / ".yuviz" / "kamailio" / "kamailio.cfg", kamailio_listen)
     probes = {
-        "config": lambda: probe_http(f"http://{host}:8000/health"),
-        "knowledge": lambda: probe_http(f"http://{host}:8100/health"),
-        "campaigns": lambda: probe_http(f"http://{host}:8400/health"),
-        "toolexec": lambda: probe_http(f"http://{host}:8600/health"),
-        "telephony": lambda: probe_http(f"http://{host}:8750/health"),
-        "webcall": lambda: probe_http(f"http://{host}:8300/health"),
+        "config": lambda: probe_http(f"http://{host}:{url_port('CONFIG_SERVICE_URL', 8000)}/health"),
+        "knowledge": lambda: probe_http(f"http://{host}:{url_port('KNOWLEDGE_SERVICE_URL', 8100)}/health"),
+        "campaigns": lambda: probe_http(f"http://{host}:{url_port('CAMPAIGNS_SERVICE_URL', 8400)}/health"),
+        "toolexec": lambda: probe_http(f"http://{host}:{url_port('TOOLEXEC_SERVICE_URL', 8600)}/health"),
+        "telephony": lambda: probe_http(f"http://{host}:{url_port('TELEPHONY_SERVICE_URL', 8750)}/health"),
+        "webcall": lambda: probe_http(f"http://{host}:{url_port('NEXT_PUBLIC_WEBCALL_URL', 8300)}/health"),
         "ollama": lambda: probe_http("http://127.0.0.1:11434/api/version"),
         "envoy": lambda: probe_http("http://127.0.0.1:9901/ready"),
         "admin-ui": lambda: probe_http(f"http://{host}:3000/login", timeout=15),
