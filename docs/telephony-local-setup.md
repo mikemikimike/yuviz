@@ -318,7 +318,7 @@ A few gotchas with `start_local.sh`:
 
 ### Or: one tab with supervisord (macOS)
 
-`deployment/supervisord.conf` runs every service above, plus Ollama, Knowledge, Campaigns, Toolexec, Telephony, DID, Webcall and the Admin UI, from one terminal tab. It restarts any service that crashes. It calls the same `start_*` helpers, so settings still come from `.env`. MySQL, PostgreSQL and Redis stay under `brew services` (`start_mysql`, `start_data`).
+`deployment/supervisord.conf` runs every service above, plus Ollama, Knowledge, Campaigns, Toolexec, Telephony, DID, Webcall and the Admin UI, from one terminal tab. It restarts any service that crashes. It calls the same `start_*` helpers, so settings still come from `.env`, and a `.env` edit takes effect on the next `restart` even if the tab you started supervisord from had exported an older value. A key left blank in `.env` still comes from that tab. MySQL, PostgreSQL and Redis stay under `brew services` (`start_mysql`, `start_data`).
 
 ```bash
 brew install supervisor
@@ -334,21 +334,22 @@ deployment/svc restart gateway      # refused while calls are live; --force over
 tail -f ~/.yuviz/logs/gateway.log
 ```
 
-- **Or start it at login:** `deployment/autostart.sh install` (opt-in; macOS LaunchAgent, `ProcessType=Interactive`, restarted if it dies). Stop the terminal-tab supervisord first. `deployment/autostart.sh uninstall` removes it and stops every service.
 - **Run it in a normal foreground tab.** Every service inherits supervisord's CPU priority, so starting it with `&` or from a background launchd job slows call audio.
 - **Stop it with Ctrl-C, not by closing the tab.** Closing the tab sends SIGHUP, which supervisord treats as "reload and restart every service".
 - **Use `deployment/svc`, not bare `supervisorctl`.** It takes the same commands, but refuses to stop or restart a call-path service (Kamailio, FreeSWITCH, Gateway, Envoy, Conversation, Webcall, Telephony), or run `update`/`reload`/`all`, while any call is live. It counts SIP channels on FreeSWITCH plus open `calls` rows, which covers Vobiz/Cloudonix and browser calls. If it can't count, it refuses too. `--force` cuts the calls off.
 - **After editing the config,** `deployment/svc update` restarts only the services whose section changed.
+- **Or start it at login:** `deployment/autostart.sh install` (opt-in; macOS LaunchAgent, `ProcessType=Interactive`, restarted if it dies). Stop the terminal-tab supervisord first. `deployment/autostart.sh uninstall` removes it and stops every service.
+- **Network sync** (`install_network_sync`, `SIP_IP=auto`) works alongside it: `update_kamailio_ip.sh` restarts Kamailio, FreeSWITCH, the Gateway and Campaigns through `supervisorctl` while supervisord runs them.
 - **Logs:** each service writes its own log to `~/.yuviz/logs/<service>.log`. `<service>.supervisor.log` holds only errors from starting it. The `log-rotate` listener checks hourly and rotates any log over 20 MB, keeping 3 (`.1`–`.3`).
 - **Crash loops stop instead of flapping:**
   - **Crashes during startup:** a service that dies within its first few seconds is retried 3 times, then marked FATAL.
   - **Hangs:** a process can stay alive but stop responding, and supervisord can't see that. So `crash-watch` probes every service every 10 s:
-    - **HTTP services and the Gateway:** `/health` (the Gateway answers on its audio thread)
+    - **HTTP services:** `/health` (Admin UI: `/login`, Ollama: `/api/version`, Envoy: `/ready`)
     - **Conversation:** Envoy's gRPC health check
     - **FreeSWITCH:** the ESL greeting
     - **Kamailio:** a SIP `OPTIONS` ping
 
-    After 3 misses in a row, it restarts the service and counts it as a crash. A service is only restarted after it has answered once and then stopped. One that never answers within 5 minutes of starting (a slow start, or a wrong probe) gets an alert, never a restart, so a bad probe can't take down a healthy service. The Knowledge worker isn't probed; its jobs already use leases.
+    After 3 misses in a row, it restarts the service and counts it as a crash, unless calls are live (`calls` rows open in the last 2 hours) or the count can't be read. Then it defers and retries every 30 s while the service stays hung. The Gateway is the exception: it restarts regardless, since a hung Gateway can't close its calls. A service is only restarted after it has answered once and then stopped. One that never answers within 5 minutes of starting (a slow start, or a wrong probe) gets an alert, never a restart, so a bad probe can't take down a healthy service. The Knowledge worker isn't probed yet.
   - **Crashes after startup:** the `crash-watch` listener backs off. The first crash restarts at once, and the next ones wait 2, 4 and 8 s.
   - **Circuit breaker:** after 5 crashes within 10 minutes, or a FATAL, the circuit opens. The service is stopped and gets one trial start after 5 minutes, then 10, 20 and so on, up to 1 hour. If it stays up for 10 minutes, the circuit closes.
   - **Where to look:** `~/.yuviz/logs/crash-watch.log`, plus a macOS notification when the circuit opens. Install `terminal-notifier` so clicking it opens that log: `brew install terminal-notifier`, then launch it once with `open "$(brew --prefix terminal-notifier)/terminal-notifier.app"` so macOS registers it, and allow its notifications. Without it, the notification is credited to Script Editor.

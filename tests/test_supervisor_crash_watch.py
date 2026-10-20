@@ -82,7 +82,8 @@ class _FakeProxy:
 def _watcher(tmp_path, sup, clock):
     timers = []
     w = cw.Watcher(_policy(), lambda: _FakeProxy(sup), tmp_path / "state.json",
-                   schedule=lambda delay, fn: timers.append((delay, fn)), clock=lambda: clock[0])
+                   schedule=lambda delay, fn: timers.append((delay, fn)), clock=lambda: clock[0],
+                   dispatch=lambda fn, *args: fn(*args), live_calls=lambda: 0)
     return w, timers
 
 
@@ -225,16 +226,41 @@ def test_a_service_that_never_passed_is_alerted_once_and_never_restarted(tmp_pat
     assert sup.stops == 0 and len(alerts) == 1
 
 
-def test_unknown_and_stopped_services_are_not_counted(tmp_path):
+def test_unknown_and_stopped_services_are_not_counted(tmp_path, capsys):
     sup, clock = _ProbeSupervisor(start=50.0), [100.0]
-    w, _ = _watcher(tmp_path, sup, clock)
+    w, timers = _watcher(tmp_path, sup, clock)
     w.probe_once({"conv": lambda: True})
     for _ in range(5):
-        w.probe_once({"conv": lambda: None})  # Envoy down: can't tell
+        w.probe_once({"conv": lambda: None})
     sup.statename = "STOPPED"
+    timers.clear()
+    capsys.readouterr()
     for _ in range(5):
         w.probe_once({"conv": lambda: False})
-    assert sup.stops == 0
+    assert sup.stops == 0 and timers == [] and "missed heartbeat" not in capsys.readouterr().err
+
+
+def test_probe_sip_treats_lost_address_as_unknown(monkeypatch):
+    import errno
+
+    class NoAddress:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def settimeout(self, timeout):
+            pass
+
+        def bind(self, addr):
+            raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+
+    monkeypatch.setattr(cw.socket, "socket", NoAddress)
+    assert cw.probe_sip("192.168.0.9", 5060) is None
 
 
 def test_probe_http_counts_any_response(tmp_path):
@@ -297,7 +323,7 @@ def test_reads_envoy_health_and_kamailio_listen(tmp_path, monkeypatch):
 
     text = ("conversation_svc::127.0.0.1:50051::health_flags::healthy\n"
             "conversation_svc::127.0.0.1:50052::health_flags::/failed_active_hc\n")
-    monkeypatch.setattr(cw.urllib.request, "urlopen", lambda url, timeout: R(text))
+    monkeypatch.setattr(cw._OPENER, "open", lambda url, timeout=None: R(text))
     assert cw.probe_envoy_host("127.0.0.1:50051") is True
     assert cw.probe_envoy_host("127.0.0.1:50052") is False
     assert cw.probe_envoy_host("127.0.0.1:59999") is None
@@ -306,6 +332,110 @@ def test_reads_envoy_health_and_kamailio_listen(tmp_path, monkeypatch):
     cfg.write_text("#!KAMAILIO\nlisten=udp:192.168.0.116:5060\n")
     assert cw.kamailio_listen(cfg) == ("192.168.0.116", 5060)
     assert cw.kamailio_listen(tmp_path / "missing.cfg") is None
+
+
+def test_probe_sip_treats_unreachable_network_as_unknown(monkeypatch):
+    import errno
+
+    class Unreachable:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def settimeout(self, timeout):
+            pass
+
+        def bind(self, addr):
+            pass
+
+        def getsockname(self):
+            return ("192.168.0.9", 40000)
+
+        def sendto(self, data, addr):
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+
+    monkeypatch.setattr(cw.socket, "socket", Unreachable)
+    assert cw.probe_sip("192.168.0.9", 5060) is None
+
+
+def test_unknown_round_breaks_the_miss_streak(tmp_path):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    w.probe_once({"gw": lambda: True})
+    results = iter([False, False, None, False, False])
+    for _ in range(5):
+        w.probe_once({"gw": lambda: next(results)})
+    assert sup.stops == 0 and timers == []
+
+
+def test_hang_restart_is_deferred_while_calls_are_live_then_proceeds(tmp_path):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    calls = [2]
+    w.live_calls = lambda: calls[0]
+    result = [True]
+    probes = {"conv": lambda: result[0]}
+    w.probe_once(probes)
+    result[0] = False
+    for _ in range(3):
+        w.probe_once(probes)
+    assert sup.stops == 0 and timers == []
+    calls[0] = 0
+    for _ in range(3):
+        w.probe_once(probes)
+    assert sup.stops == 1 and timers and timers[-1][0] == 0
+
+
+def test_hang_restart_aborts_when_live_calls_are_unknown(tmp_path):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    w.live_calls = lambda: None
+    result = [True]
+    probes = {"conv": lambda: result[0]}
+    w.probe_once(probes)
+    result[0] = False
+    for _ in range(3):
+        w.probe_once(probes)
+    assert sup.stops == 0 and timers == []
+
+
+def test_cluster_cache_fetches_once_per_round():
+    fetched = []
+    cache = cw._ClusterCache(ttl_s=60, fetch=lambda: fetched.append(1) or "x")
+    assert cache.get() == "x" and cache.get() == "x"
+    assert len(fetched) == 1
+
+
+def test_file_memo_reparses_only_on_change(tmp_path):
+    f = tmp_path / "k.cfg"
+    f.write_text("listen=udp:10.0.0.1:5060\n")
+    parsed = []
+    memo = cw._FileMemo(f, lambda p: parsed.append(1) or cw.kamailio_listen(p))
+    assert memo.get() == ("10.0.0.1", 5060) and memo.get() == ("10.0.0.1", 5060)
+    assert len(parsed) == 1
+    f.write_text("listen=udp:10.0.0.2:5060\n")
+    import os
+    os.utime(f, ns=(f.stat().st_atime_ns, f.stat().st_mtime_ns + 1_000_000_000))
+    assert memo.get() == ("10.0.0.2", 5060)
+
+
+def test_hung_gateway_restarts_even_with_live_calls(tmp_path):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    w.live_calls = lambda: 3
+    result = [True]
+    probes = {"gateway": lambda: result[0]}
+    w.probe_once(probes)
+    result[0] = False
+    for _ in range(3):
+        w.probe_once(probes)
+    assert sup.stops == 1 and timers and timers[-1][0] == 0
+
 
 
 def test_a_hang_is_stopped_then_killed_at_once(tmp_path, monkeypatch):
@@ -324,8 +454,7 @@ def test_a_hang_is_stopped_then_killed_at_once(tmp_path, monkeypatch):
 
     sup, clock = Hung(start=50.0), [100.0]
     w, _ = _watcher(tmp_path, sup, clock)
-    order = []
-    monkeypatch.setattr(cw.time, "sleep", lambda s: (order.append("sleep"), setattr(sup, "statename", "STOPPED")))
+    monkeypatch.setattr(cw.time, "sleep", lambda s: setattr(sup, "statename", "STOPPED"))
     w.probe_once({"gw": lambda: True})
     for _ in range(3):
         w.probe_once({"gw": lambda: False})

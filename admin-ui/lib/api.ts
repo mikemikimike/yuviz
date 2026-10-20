@@ -202,18 +202,44 @@ export const previewVoice = async (providerId: string, text: string): Promise<Bl
   return res.blob();
 };
 
-export const listElevenLabsVoices = (providerId: string) =>
+export const listProviderVoices = (providerId: string) =>
   request<ElevenLabsVoice[]>(`/providers/${providerId}/voices`);
+
+// ── Local models ─────────────────────────────────────────────────────────
+
+export type LocalModelStatus = "ready" | "missing" | "downloading" | "failed" | "unavailable";
+
+export interface LocalModel {
+  engine: string;
+  role: "stt" | "llm" | "tts";
+  name: string;
+  label: string;
+  // null = not language-bound (LLMs).
+  languages: string[] | null;
+  status: LocalModelStatus;
+  error: string | null;
+}
+
+export const listLocalModels = () => request<LocalModel[]>("/local-models");
+
+export const triggerModelDownload = (engine: string, name: string) =>
+  request<{ status: "downloading" | "ready" }>("/local-models/downloads", {
+    method: "POST",
+    body: JSON.stringify({ engine, name }),
+  });
 
 // ── Agents ───────────────────────────────────────────────────────────────
 
 export type AgentStatus = "active" | "inactive";
+export type AgentDirection = "inbound" | "outbound" | "both";
+export type LanguageMode = "monolingual" | "multilingual";
 
 export interface Agent {
   id: string;
   tenant_id: string;
   slug: string;
   name: string;
+  direction: AgentDirection;
   greeting: string;
   system_prompt: string;
   goodbye_grace_ms: number;
@@ -225,6 +251,8 @@ export interface Agent {
   tts_config_by_language: Record<string, string> | null;
   // Only the default language's entry is spoken (at call start, in place of the opening line).
   greeting_by_language: Record<string, string> | null;
+  // null = saved before modes existed.
+  language_mode: LanguageMode | null;
   stt_config_id: string | null;
   llm_config_id: string | null;
   tts_config_id: string | null;
@@ -278,6 +306,7 @@ export interface Agent {
 export interface AgentCreate {
   slug: string;
   name: string;
+  direction?: AgentDirection;
   greeting?: string;
   system_prompt?: string;
   stt_config_id?: string | null;
@@ -289,10 +318,12 @@ export interface AgentCreate {
   supported_languages?: string[] | null;
   tts_config_by_language?: Record<string, string> | null;
   greeting_by_language?: Record<string, string> | null;
+  language_mode?: LanguageMode;
 }
 
 export interface AgentUpdate {
   name?: string;
+  direction?: AgentDirection;
   greeting?: string;
   system_prompt?: string;
   goodbye_grace_ms?: number;
@@ -300,6 +331,7 @@ export interface AgentUpdate {
   supported_languages?: string[] | null;
   tts_config_by_language?: Record<string, string> | null;
   greeting_by_language?: Record<string, string> | null;
+  language_mode?: LanguageMode;
   stt_config_id?: string | null;
   llm_config_id?: string | null;
   tts_config_id?: string | null;
@@ -358,18 +390,6 @@ export interface AgentFromTemplateRequest {
   tts_config_id?: string | null;
 }
 
-export type TestChannel = "voice" | "chat";
-
-export interface VoiceTestSession {
-  credential: string;
-  expires_in: number;
-}
-
-export interface ChatTestSession extends VoiceTestSession {
-  session_id: string;
-  greeting: string;
-}
-
 export interface PromptRevision {
   before: string;
   after: string;
@@ -379,20 +399,6 @@ export interface PromptRevision {
 export const listAgentTemplates = () => request<AgentTemplateInfo[]>("/agent-templates");
 export const createAgentFromTemplate = (tenantSlug: string, body: AgentFromTemplateRequest) =>
   request<Agent>(`/tenants/${tenantSlug}/agents/from-template`, { method: "POST", body: JSON.stringify(body) });
-export const createTestSession = <C extends TestChannel>(tenantSlug: string, agentId: string, channel: C) =>
-  request<C extends "chat" ? ChatTestSession : VoiceTestSession>(
-    `/tenants/${tenantSlug}/agents/${agentId}/test-sessions`,
-    { method: "POST", body: JSON.stringify({ channel }) },
-  );
-export const sendTestChat = (
-  tenantSlug: string,
-  agentId: string,
-  body: { credential: string; session_id: string; message: string },
-) =>
-  request<{ reply: string }>(`/tenants/${tenantSlug}/agents/${agentId}/test-chat`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
 export const revisePrompt = (
   tenantSlug: string,
   agentId: string,

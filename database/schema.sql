@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS agents (
     max_call_duration_s     INT CHECK (max_call_duration_s IS NULL OR max_call_duration_s BETWEEN 30 AND 7200),
     -- inactive = stop routing calls here (falls back like an unavailable agent); not a delete.
     status                  TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+    direction               TEXT NOT NULL DEFAULT 'inbound' CHECK (direction IN ('inbound', 'outbound', 'both')),
     config_version          INT NOT NULL DEFAULT 1,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -140,6 +141,9 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow_draft JSONB;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS supported_languages    TEXT[];
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_config_by_language JSONB;  -- {"hi": "<provider_configs.id>"}
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS greeting_by_language   JSONB;  -- {"hi": "नमस्ते ..."}
+-- Monolingual | multilingual; NULL = agent saved before modes existed (legacy validation path).
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS language_mode TEXT
+    CHECK (language_mode IN ('monolingual', 'multilingual'));
 DO $$ BEGIN
     ALTER TABLE agents ADD CONSTRAINT agents_tts_config_by_language_object
         CHECK (tts_config_by_language IS NULL OR jsonb_typeof(tts_config_by_language) = 'object');
@@ -1352,3 +1356,32 @@ ALTER TABLE call_flows ADD COLUMN IF NOT EXISTS direction TEXT NOT NULL DEFAULT 
 ALTER TABLE call_flows DROP CONSTRAINT IF EXISTS call_flows_direction_check;
 ALTER TABLE call_flows ADD CONSTRAINT call_flows_direction_check
     CHECK (direction IN ('inbound', 'outbound', 'both'));
+
+-- Backfill once for existing agents. Campaign membership and shipped template
+-- channels are stronger evidence than a greeting; legacy Quick-create greetings
+-- and UI template names are the last resort before ambiguous agents stay inbound.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = 'public' AND table_name = 'agents' AND column_name = 'direction') THEN
+    ALTER TABLE agents ADD COLUMN direction TEXT NOT NULL DEFAULT 'inbound';
+    UPDATE agents a SET direction = CASE
+      WHEN EXISTS (SELECT 1 FROM campaigns c WHERE c.agent_id = a.id AND c.deleted_at IS NULL)
+           AND EXISTS (SELECT 1 FROM phone_numbers pn WHERE pn.agent_id = a.id AND pn.deleted_at IS NULL)
+        THEN 'both'
+      WHEN EXISTS (SELECT 1 FROM campaigns c WHERE c.agent_id = a.id AND c.deleted_at IS NULL)
+           OR a.template_id IN ('payment-reminder', 'renewal-offer', 'csat-survey', 'lead-qualification')
+        THEN 'outbound'
+      WHEN btrim(a.greeting) IN (
+             'Hi, do you have a quick minute?',
+             'Hi, I''m calling about your recent enquiry. Do you have a minute?',
+             'Hello, I''m calling about your account. Is now a good time to talk?'
+           ) OR lower(btrim(a.name)) IN ('qualify leads', 'payment reminders')
+        THEN 'outbound'
+      ELSE 'inbound'
+    END;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agents_direction_check') THEN
+    ALTER TABLE agents ADD CONSTRAINT agents_direction_check
+      CHECK (direction IN ('inbound', 'outbound', 'both'));
+  END IF;
+END $$;

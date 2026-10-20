@@ -4,7 +4,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
+#include <string_view>
 #include <stdexcept>
 
 namespace voiceai {
@@ -192,8 +192,9 @@ int WebSocketServer::lws_callback(struct lws*              wsi,
             break;
         }
         case LWS_CALLBACK_HTTP: {
-            // Answered on the thread that moves call audio, so a stuck thread fails the probe.
-            const bool health = in != nullptr && std::strcmp(static_cast<const char*>(in), "/health") == 0;
+            // Answered on the WebSocket service loop: a stuck loop fails the probe.
+            std::string_view target = in != nullptr ? static_cast<const char*>(in) : "";
+            const bool health = target.substr(0, target.find('?')) == "/health";
             if (lws_return_http_status(wsi, health ? HTTP_STATUS_OK : HTTP_STATUS_NOT_FOUND, health ? "ok" : nullptr))
                 return -1;
             return lws_http_transaction_completed(wsi) ? -1 : 0;

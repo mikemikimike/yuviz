@@ -14,6 +14,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -24,7 +26,10 @@ uint16_t free_port() {
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(fd);
+        throw std::runtime_error("free_port: bind failed");
+    }
     socklen_t len = sizeof(addr);
     ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
     ::close(fd);
@@ -82,6 +87,13 @@ TEST(WebSocketHealthTest, HealthReturns200) {
     EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(2));
     EXPECT_EQ(resp.rfind("HTTP/1.1 200", 0), 0u) << resp;
     EXPECT_NE(resp.find("ok"), std::string::npos) << resp;
+}
+
+TEST(WebSocketHealthTest, HealthIgnoresQueryString) {
+    Server s;
+    ASSERT_TRUE(s.server->start());
+    const std::string resp = get(s.cfg.port, "/health?probe=1");
+    EXPECT_EQ(resp.rfind("HTTP/1.1 200", 0), 0u) << resp;
 }
 
 TEST(WebSocketHealthTest, OtherPathsGet404InsteadOfHanging) {
