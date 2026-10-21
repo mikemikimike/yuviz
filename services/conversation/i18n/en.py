@@ -25,3 +25,26 @@ TOOL_FILLERS: tuple[tuple[str, float], ...] = (
     ("Sure, let me look into that.", 2.0),
     ("One moment while I take care of that.", 2.4),
 )
+
+# Phrases that mean the caller is wrapping up, and phrases that sound like the agent signing off.
+CLOSURE_PHRASES: tuple[str, ...] = (
+    "bye",
+    "goodbye",
+    "that's all",
+    "thats all",
+    "that is all",
+    "that's it",
+    "no more questions",
+    "nothing else",
+    "i'm done",
+)
+FAREWELL_PHRASES: tuple[str, ...] = (
+    "goodbye",
+    "bye",
+    "take care",
+    "have a great day",
+    "have a nice day",
+    "have a good day",
+    "thanks for calling",
+    "thank you for calling",
+)

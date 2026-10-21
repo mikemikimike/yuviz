@@ -19,3 +19,7 @@ TOOL_FILLERS: tuple[tuple[str, float], ...] = (
     ("ज़रूर, अभी इसे देखते हैं।", 2.0),
     ("एक पल रुकिए, अभी इसे पूरा करते हैं।", 2.4),
 )
+
+# "नमस्ते" is a farewell only: callers also open with it, so it is not a closure.
+CLOSURE_PHRASES: tuple[str, ...] = ("बस इतना ही", "और कुछ नहीं", "अलविदा", "बाय")
+FAREWELL_PHRASES: tuple[str, ...] = ("नमस्ते", "अलविदा", "शुभ दिन", "दिन शुभ हो", "ध्यान रखिए", "कॉल करने के लिए धन्यवाद")
