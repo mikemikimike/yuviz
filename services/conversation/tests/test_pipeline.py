@@ -28,8 +28,8 @@ from ..directives import (
     TransferType,
 )
 from .. import pipeline as pipeline_module
-from ..fillers import _DEFAULT_TARGET_S, FillerSelector, _TOOL_FILLERS
-from ..i18n import hi, shortest_tool_filler, t
+from ..fillers import _DEFAULT_TARGET_S, _FIRST_TURN_FILLERS, FillerSelector, _TOOL_FILLERS
+from ..i18n import hi, shortest_first_turn_filler, t
 from ..language import fixed_language_instruction, reply_language_instruction
 from ..pipeline import (
     PipelineConversationHandler,
@@ -40,6 +40,7 @@ from ..pipeline import (
 )
 
 _TOOL_CALL_FILLERS = {t for t, _ in _TOOL_FILLERS}
+_FIRST_TURN_PHRASES = {t for t, _ in _FIRST_TURN_FILLERS}
 from ..provider_bundle import ProviderBundle
 from ..tool_latency import _MIN_SAMPLES, ToolLatencyStore
 from ..providers.interfaces import ChatMessage, SttResult
@@ -269,8 +270,9 @@ async def test_first_turn_filler_spoken_before_the_real_response():
         pass
 
     spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
-    assert spoken_texts[0] in _TOOL_CALL_FILLERS
-    assert sum(text in _TOOL_CALL_FILLERS for text in spoken_texts) == 1
+    assert spoken_texts[0] in _FIRST_TURN_PHRASES
+    assert sum(text in _FIRST_TURN_PHRASES for text in spoken_texts) == 1
+    assert not any(text in _TOOL_CALL_FILLERS for text in spoken_texts)
 
 
 @pytest.mark.asyncio
@@ -286,8 +288,9 @@ async def test_first_turn_filler_not_repeated_on_later_turns():
         pass
 
     spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
-    assert spoken_texts[0] in _TOOL_CALL_FILLERS
-    assert sum(text in _TOOL_CALL_FILLERS for text in spoken_texts) == 1
+    assert spoken_texts[0] in _FIRST_TURN_PHRASES
+    assert sum(text in _FIRST_TURN_PHRASES for text in spoken_texts) == 1
+    assert not any(text in _TOOL_CALL_FILLERS for text in spoken_texts)
 
 
 def _seed_latency(store: ToolLatencyStore, agent_id: str, elapsed_ms: float) -> None:
@@ -302,7 +305,7 @@ async def _first_turn_spoken(handler, tts) -> list[str]:
 
 
 def _tier(seconds: float) -> set[str]:
-    return {p for p, s in _TOOL_FILLERS if s == seconds}
+    return {p for p, s in _FIRST_TURN_FILLERS if s == seconds}
 
 
 @pytest.mark.asyncio
@@ -334,22 +337,23 @@ async def test_first_turn_filler_without_latency_history_uses_default_tier(laten
     )
     spoken = await _first_turn_spoken(handler, tts)
 
-    default_tier = max(s for _, s in _TOOL_FILLERS if s <= _DEFAULT_TARGET_S)
+    default_tier = max(s for _, s in _FIRST_TURN_FILLERS if s <= _DEFAULT_TARGET_S)
     assert spoken[0] in _tier(default_tier)
-    assert sum(text in _TOOL_CALL_FILLERS for text in spoken) == 1
+    assert sum(text in _FIRST_TURN_PHRASES for text in spoken) == 1
+    assert spoken[0] not in _TOOL_CALL_FILLERS
 
 
 @pytest.mark.asyncio
 async def test_first_turn_without_a_latency_store_asks_the_selector_once_for_the_default_tier():
     selector = FillerSelector()
     calls = []
-    real = selector.select_tool_filler
+    real = selector.select_first_turn_filler
 
     def spy(*args, **kwargs):
         calls.append((args, kwargs))
         return real(*args, **kwargs)
 
-    selector.select_tool_filler = spy
+    selector.select_first_turn_filler = spy
     tts = _make_tts()
     handler = _make_handler(
         _make_stt("hi there"), _make_llm(["Real", " response", "."]), tts,
@@ -358,11 +362,12 @@ async def test_first_turn_without_a_latency_store_asks_the_selector_once_for_the
     spoken = await _first_turn_spoken(handler, tts)
 
     assert len(calls) == 1
-    (_tool, _last, average_ms), kwargs = calls[0]
+    (_last, average_ms), kwargs = calls[0]
     assert average_ms is None
     assert kwargs == {"language": "hi"}
-    default_tier = max(s for _, s in hi.TOOL_FILLERS if s <= _DEFAULT_TARGET_S)
-    assert spoken[0] in {p for p, s in hi.TOOL_FILLERS if s == default_tier}
+    default_tier = max(s for _, s in hi.FIRST_TURN_FILLERS if s <= _DEFAULT_TARGET_S)
+    assert spoken[0] in {p for p, s in hi.FIRST_TURN_FILLERS if s == default_tier}
+    assert spoken[0] not in {p for p, _ in hi.TOOL_FILLERS}
 
 
 @pytest.mark.asyncio
@@ -381,7 +386,8 @@ async def test_first_turn_filler_selector_failure_still_speaks_one_filler_and_lo
     with caplog.at_level("ERROR", logger="services.conversation.fillers"):
         spoken = await _first_turn_spoken(handler, tts)
 
-    fallback = shortest_tool_filler(None)
+    fallback = shortest_first_turn_filler(None)
+    assert fallback not in _TOOL_CALL_FILLERS
     assert spoken[0] == fallback
     assert spoken.count(fallback) == 1
     assert len([r for r in caplog.records if r.name == "services.conversation.fillers"]) == 1
@@ -407,7 +413,7 @@ async def test_barge_in_after_first_turn_filler_plays_stops_audio_and_never_repl
     assert cancelled
     assert audio_after_cancel == 0
     spoken = [call.args[0] for call in tts.synthesize.await_args_list]
-    assert spoken == [spoken[0]] and spoken[0] in _TOOL_CALL_FILLERS
+    assert spoken == [spoken[0]] and spoken[0] in _FIRST_TURN_PHRASES
 
     # The next turn is not treated as a first turn: no second filler. History is cleared so only the
     # flag (not the non-empty history) can suppress it.
@@ -416,7 +422,7 @@ async def test_barge_in_after_first_turn_filler_plays_stops_audio_and_never_repl
     tts.synthesize.reset_mock()
     async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
         pass
-    assert not any(c.args[0] in _TOOL_CALL_FILLERS for c in tts.synthesize.await_args_list)
+    assert not any(c.args[0] in _FIRST_TURN_PHRASES for c in tts.synthesize.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -467,7 +473,7 @@ async def test_no_first_turn_filler_when_history_is_empty_but_flag_already_set()
 
     spoken = await _first_turn_spoken(handler, tts)
 
-    assert not any(t in _TOOL_CALL_FILLERS for t in spoken)
+    assert not any(t in _FIRST_TURN_PHRASES for t in spoken)
 
 
 @pytest.mark.asyncio
@@ -481,7 +487,7 @@ async def test_no_first_turn_filler_when_flag_unset_but_history_exists():
 
     spoken = await _first_turn_spoken(handler, tts)
 
-    assert not any(t in _TOOL_CALL_FILLERS for t in spoken)
+    assert not any(t in _FIRST_TURN_PHRASES for t in spoken)
 
 
 @pytest.mark.asyncio
@@ -2499,13 +2505,12 @@ async def test_tool_call_filler_burst_within_one_turn_speaks_only_once():
 
 
 @pytest.mark.asyncio
-async def test_tool_call_filler_differs_from_the_first_turn_filler():
-    """The turn-1 phrase is remembered, so the same turn's tool filler cannot repeat it."""
+async def test_turn1_and_tool_call_fillers_come_from_their_own_pools():
+    """The turn-1 opener is neutral; the tool call on the same turn still speaks a lookup filler."""
     from ..tool_latency import _MIN_SAMPLES, ToolLatencyStore
     from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
     from ..tools.llm_adapter import ToolCallStartedEvent
 
-    # 2400 ms is the longest phrase tier, which holds a single phrase.
     store = ToolLatencyStore()
     for _ in range(_MIN_SAMPLES):
         store.record("t1", "a1", "book_appointment", 2400.0)
@@ -2523,9 +2528,11 @@ async def test_tool_call_filler_differs_from_the_first_turn_filler():
         pass
 
     spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
-    fillers_spoken = [t for t in spoken_texts if t in _TOOL_CALL_FILLERS]
-    assert len(fillers_spoken) == 2
-    assert fillers_spoken[0] != fillers_spoken[1]
+    openers = [t for t in spoken_texts if t in _FIRST_TURN_PHRASES]
+    tool_fillers = [t for t in spoken_texts if t in _TOOL_CALL_FILLERS]
+    assert len(openers) == 1
+    assert len(tool_fillers) == 1
+    assert spoken_texts.index(openers[0]) < spoken_texts.index(tool_fillers[0])
 
 
 @pytest.mark.asyncio

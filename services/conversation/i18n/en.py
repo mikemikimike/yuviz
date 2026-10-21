@@ -26,6 +26,16 @@ TOOL_FILLERS: tuple[tuple[str, float], ...] = (
     ("One moment while I take care of that.", 2.4),
 )
 
+# Neutral opener spoken before the LLM has decided anything, so no lookup or task wording.
+FIRST_TURN_FILLERS: tuple[tuple[str, float], ...] = (
+    ("Okay, one moment.", 1.0),
+    ("Alright, just a second.", 1.0),
+    ("Thank you, one moment please.", 1.5),
+    ("Alright, bear with me a moment.", 1.5),
+    ("Thank you, just give me a moment please.", 2.0),
+    ("Thanks for your patience, I'll be with you in just a moment.", 2.4),
+)
+
 # Phrases that mean the caller is wrapping up, and phrases that sound like the agent signing off.
 CLOSURE_PHRASES: tuple[str, ...] = (
     "bye",

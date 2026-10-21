@@ -90,6 +90,14 @@ def _make_package(tmp_path, monkeypatch, modules: dict[str, str]):
         ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", True),)', "TOOL_FILLERS must be a non-empty tuple"),
         ("xx", 'STRINGS = {"fallback_goodbye": ""}\nTOOL_FILLERS = (("xx", 1.0),)', "STRINGS must be a dict"),
         ("xx", 'STRINGS = {"fallback_godbye": "x"}\nTOOL_FILLERS = (("xx", 1.0),)', "keys not in en.STRINGS"),
+        ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = ()', "FIRST_TURN_FILLERS must be a non-empty tuple"),
+        ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = [("a", 1.0)]', "FIRST_TURN_FILLERS must be a non-empty tuple"),
+        ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = (("", 1.0),)', "FIRST_TURN_FILLERS must be a non-empty tuple"),
+        ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = ((1, 1.0),)', "FIRST_TURN_FILLERS must be a non-empty tuple"),
+        ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = (("a", 0),)', "FIRST_TURN_FILLERS must be a non-empty tuple"),
+        ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = (("a", float("inf")),)', "FIRST_TURN_FILLERS must be a non-empty tuple"),
+        ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = (("a", True),)', "FIRST_TURN_FILLERS must be a non-empty tuple"),
+        ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = (("a", 1.0, 2),)', "FIRST_TURN_FILLERS must be a non-empty tuple"),
         ("english", _VALID_XX, "name must be a 2-3 letter lowercase language code"),
     ],
 )
@@ -97,6 +105,36 @@ def test_malformed_language_module_fails_discovery(tmp_path, monkeypatch, module
     name, pkg = _make_package(tmp_path, monkeypatch, {module: source})
     with pytest.raises(ValueError, match=rf"{module!r}.*{rule}"):
         i18n._discover([str(pkg)], name)
+
+
+def test_module_without_first_turn_fillers_discovers_fine(tmp_path, monkeypatch):
+    name, pkg = _make_package(tmp_path, monkeypatch, {"xx": _VALID_XX})
+    assert set(i18n._discover([str(pkg)], name)) == {"en", "xx"}
+
+
+def test_first_turn_accessors_for_a_module_without_the_table(tmp_path, monkeypatch):
+    name, pkg = _make_package(tmp_path, monkeypatch, {"xx": _XX_THREE_TIERS})
+    tables = i18n._discover([str(pkg)], name)
+    shortest = {c: min(m.TOOL_FILLERS, key=lambda f: f[1])[0] for c, m in tables.items()}
+    monkeypatch.setattr(i18n, "_TABLES", tables)
+    monkeypatch.setattr(i18n, "_SHORTEST", shortest)
+    monkeypatch.setattr(
+        i18n,
+        "_SHORTEST_FIRST_TURN",
+        {
+            c: min(m.FIRST_TURN_FILLERS, key=lambda f: f[1])[0] if getattr(m, "FIRST_TURN_FILLERS", None) else shortest[c]
+            for c, m in tables.items()
+        },
+    )
+
+    assert i18n.first_turn_fillers("xx") is None
+    assert i18n.shortest_first_turn_filler("xx") == "xx short"
+
+
+@pytest.mark.parametrize("language", ["fr", "zz", None])
+def test_first_turn_accessors_for_a_language_without_a_module_use_english(language):
+    assert i18n.first_turn_fillers(language) == i18n.first_turn_fillers("en")
+    assert i18n.shortest_first_turn_filler(language) == i18n.shortest_first_turn_filler("en")
 
 
 def test_discovery_requires_english(tmp_path, monkeypatch):
@@ -145,6 +183,20 @@ def test_discovered_language_is_wired_into_strings_selector_and_shortest(tmp_pat
     assert i18n.shortest_tool_filler("xx-YY") == "xx short"
 
 
+def test_first_turn_selector_for_a_module_without_the_table_never_speaks_english(tmp_path, monkeypatch):
+    name, pkg = _make_package(tmp_path, monkeypatch, {"xx": _XX_THREE_TIERS})
+    tables = i18n._discover([str(pkg)], name)
+    shortest = {c: min(m.TOOL_FILLERS, key=lambda f: f[1])[0] for c, m in tables.items()}
+    monkeypatch.setattr(i18n, "_TABLES", tables)
+    monkeypatch.setattr(i18n, "_SHORTEST", shortest)
+    monkeypatch.setattr(i18n, "_SHORTEST_FIRST_TURN", shortest)
+
+    phrase = FillerSelector().select_first_turn_filler(None, 1000, "xx")
+
+    assert phrase == "xx short"
+    assert phrase not in {p for p, _ in en.TOOL_FILLERS + en.FIRST_TURN_FILLERS}
+
+
 @pytest.mark.parametrize("code", sorted(i18n._TABLES))
 def test_selector_error_falls_back_in_the_sessions_language(code, monkeypatch):
     def boom(_):
@@ -171,6 +223,41 @@ def test_unknown_key_still_raises_for_a_discovered_language():
 def test_shortest_tool_filler_is_the_real_shortest_phrase():
     assert i18n.shortest_tool_filler("en") == "One moment."
     assert i18n.shortest_tool_filler("hi") == "एक पल।"
+
+
+# Lookup and task verbs belong to TOOL_FILLERS: the turn-1 opener is spoken before the LLM has decided anything.
+_BANNED_STEMS = {
+    "en": ("check", "look into", "take care of"),
+    "hi": ("देख", "पूरा कर"),
+}
+_LOOKUP_FILLER = {"en": "Let me check on that.", "hi": "जी, अभी देखते हैं।"}
+
+
+def _phrases(pool):
+    return [phrase for phrase, _seconds in pool]
+
+
+@pytest.mark.parametrize("code", sorted(_BANNED_STEMS))
+def test_first_turn_fillers_use_no_lookup_or_task_wording(code):
+    module = {"en": en, "hi": hi}[code]
+    assert module.FIRST_TURN_FILLERS
+    stems = _BANNED_STEMS[code]
+    # The matcher must be able to fire, or the assertion below proves nothing.
+    assert _LOOKUP_FILLER[code] in _phrases(module.TOOL_FILLERS)
+    assert any(stem in _LOOKUP_FILLER[code].lower() for stem in stems)
+    for phrase in _phrases(module.FIRST_TURN_FILLERS):
+        assert not any(stem in phrase.lower() for stem in stems), phrase
+
+
+@pytest.mark.parametrize("module", [en, hi], ids=["en", "hi"])
+def test_first_turn_fillers_are_disjoint_from_tool_fillers_and_cover_the_shortest_tier(module):
+    assert set(_phrases(module.FIRST_TURN_FILLERS)).isdisjoint(_phrases(module.TOOL_FILLERS))
+    assert min(s for _p, s in module.FIRST_TURN_FILLERS) <= min(s for _p, s in module.TOOL_FILLERS)
+
+
+def test_hindi_first_turn_fillers_have_no_latin_letters():
+    for phrase in _phrases(hi.FIRST_TURN_FILLERS):
+        assert not any("a" <= ch.lower() <= "z" for ch in phrase), phrase
 
 
 def test_no_unrequested_language_modules_ship():

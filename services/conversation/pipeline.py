@@ -819,8 +819,8 @@ class PipelineConversationHandler:
                 self._latency_store.agent_average_ms(self._tenant_id, self._agent_id or "")
                 if self._latency_store is not None else None
             )
-            first_turn_filler = self._filler_selector.select_tool_filler(
-                "first_turn", state.tool_call_filler_last_phrase, average_ms,
+            first_turn_filler = self._filler_selector.select_first_turn_filler(
+                state.tool_call_filler_last_phrase, average_ms,
                 language=self._spoken_language(session_id),
             )
             state.tool_call_filler_last_phrase = first_turn_filler
