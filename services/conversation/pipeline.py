@@ -31,7 +31,7 @@ from .directives import (
     strip_markdown_chars,
 )
 from .fillers import FillerSelector
-from .i18n import closure_phrases, farewell_phrases, t
+from .i18n import closure_phrases, farewell_phrases, has_phrase_tables, t
 from .guardrails import GuardrailCounter, GuardrailDetector
 from . import language as lang_state
 from .language import LanguageTracker, fixed_language_instruction, reply_language_instruction, script_language, utterance_language
@@ -236,21 +236,26 @@ def _phrase_tokens(text: str) -> str:
     return " " + " ".join(tok for tok in tokens if tok) + " "
 
 
-def _end_call_rejection(reply_text: str, caller_text: str, language: str, scripted: bool) -> str | None:
-    """Why an [[END_CALL]] marker should not hang up, or None to honour it."""
+def _last_sentence(reply_text: str) -> str:
     sentences = [p.strip().strip("\"'“”‘’") for p in _SENTENCE_RE.split(reply_text)]
-    last_sentence = next((p for p in reversed(sentences) if p), "")
+    return next((p for p in reversed(sentences) if p), "")
+
+
+def _end_call_rejection(reply_text: str, caller_text: str, language: str) -> str | None:
+    """Why an [[END_CALL]] marker should not hang up, or None to honour it."""
+    last_sentence = _last_sentence(reply_text)
     if last_sentence.endswith(_QUESTION_ENDINGS):
         return "question"
+    if not has_phrase_tables(language):
+        # No phrase table (es, fr, ja, zh, ...): English phrases cannot match a native goodbye, so trust the marker.
+        return None
     caller = _phrase_tokens(caller_text)
     if any(_phrase_tokens(p) in caller for p in closure_phrases(language) + closure_phrases("en")):
         return None
     last = _phrase_tokens(last_sentence)
     if any(_phrase_tokens(p) in last for p in farewell_phrases(language) + farewell_phrases("en")):
         return None
-    if not last_sentence:
-        return None if scripted else "marker_only"
-    return "no_closure"
+    return "no_closure" if last_sentence else "marker_only"
 
 
 # Spoken system strings live in i18n/ per language; these are the English texts.
@@ -1413,10 +1418,14 @@ class PipelineConversationHandler:
 
         if not cancel_event.is_set() and any(isinstance(d, EndCallDirective) for d in directives):
             scripted = self._farewell_message is not None
-            # A scripted agent's marker-only reply hands the farewell to the fallback, whatever the transition said.
-            rejection = None if scripted and not reply_text.strip() else _end_call_rejection(
-                transition_text + reply_text, caller_text, self._spoken_language(session_id), scripted,
-            )
+            full_reply = transition_text + reply_text
+            if scripted:
+                # The system speaks the farewell, so only a question in the reply says the call is not over.
+                # A marker-only reply hands the farewell to the fallback, whatever the transition said.
+                asks = _last_sentence(full_reply).endswith(_QUESTION_ENDINGS)
+                rejection = "question" if asks and reply_text.strip() else None
+            else:
+                rejection = _end_call_rejection(full_reply, caller_text, self._spoken_language(session_id))
             if rejection is not None:
                 directives[:] = [d for d in directives if not isinstance(d, EndCallDirective)]
                 log.info("end_call_rejected reason=%s session=%s", rejection, session_id)

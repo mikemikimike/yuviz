@@ -1,6 +1,6 @@
 # Run report: guard-end-call-marker
-Status: halted at build: verify blocked by environment (2 timeout failures outside the changed area)
-PR: none
+Status: shipped
+PR: https://github.com/yuviz-ai/yuviz/pull/143
 
 | Stage | Verdict | Rounds | Output tokens (exact) | Est. cost |
 |---|---|---|---|---|
@@ -8,20 +8,19 @@ PR: none
 | security_design | GREEN | 1 | opus 2,714 | est. $0.12 |
 | design | GREEN | 2 | opus 29,230 | est. $1.24 |
 | plan | GREEN | 2 | opus 12,971 | est. $0.55 |
-| build | halted | 0 | sonnet 33,620 / haiku 1,722 | est. $0.73 |
-| _state_writes | pending | 0 | haiku 42,281 | est. $0.45 |
+| build | GREEN | 1 | sonnet 34,572 / haiku 2,301 | est. $0.76 |
+| review | GREEN | 1 | opus 46,467 / sonnet 6,387 | est. $2.11 |
+| security_code | GREEN | 1 | none recorded | $0 |
+| test | GREEN (233 passed) | 1 | sonnet 4,431 | est. $0.09 |
+| retro | pending | 0 | sonnet 574 | est. $0.01 |
+| _state_writes | pending | 0 | haiku 64,363 | est. $0.68 |
 
-Cost is an estimate: input is taken as 20x output, 80% of it cache reads, with cache reads priced at 10% of the input rate. Total is about $4.6.
+Cost is an estimate: input is taken as 20x output, 80% of it cache reads, with cache reads priced at 10% of the input rate. Total is about $7.1. Token counts are those recorded in the final state, so spend on earlier halted runs may be only partly counted.
 
-Verify (`pytest --timeout=60`, per directory):
-- services/conversation: 1231 passed, 0 failed. This is the area the change touches.
-- services/config: 1096 passed, 2 failed in 360s. Both failures are in test_live_calls.py::TestSnippetAuthority (test_demotion_403s_only_after_the_shipped_60s_ttl and test_soft_delete_403s_after_the_shipped_60s_ttl).
-- Probable cause: those tests wait on a real 60s TTL, which collides with the 60s per-test timeout. Alone, neither finished within 200s, so a hanging DB fixture is also possible. Neither is an assertion failure, and no base comparison was run.
-- The diff touches nothing under services/config or libs.
+Verify: `services/conversation` 1239 passed (also on current `redesign`); `services/config` 1098 passed with `--timeout=180`.
 
 Open findings — decide: none.
-
 Lessons added: None
-Workflow run: wf_54a9246e-053 (resume within this session with resumeFromRunId)
+Workflow run: wf_a11a2e29-2e7 (resume within this session with resumeFromRunId)
 
 New commands and agents register only after a Claude Code restart.

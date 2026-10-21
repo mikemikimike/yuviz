@@ -1,14 +1,14 @@
-# Security review: working-tree diff vs 44458cd (guard-end-call-marker)
+# Security review: guard-end-call-marker (code, base 9b90f7d)
 VERDICT: GREEN
 
 ## Findings
-None. The change is limited to the conversation pipeline's handling of the end-call marker within a single call session. It adds no tenant-scoped reads or writes, roles, tokens, SQL, shell, path or redirect sinks, and no new endpoints.
+None. The change is local to the conversation service's in-process turn handling. It adds no endpoint, query, credential, cache key or role path, and it does not cross a tenant boundary.
 
 ## Verified controls
-- No tenant or authorization surface: the diff touches only `services/conversation/pipeline.py`, `services/conversation/i18n/{__init__,en,hi}.py` and tests. It adds no data access, cache keys, ids or routes.
-- No transcript leak in logs: `end_call_rejected` logs only a fixed reason token and session_id (`pipeline.py`, guard block after `stream_buf.flush()`). The i18n warning logs only the module code and attribute names.
-- What the caller controls: `caller_text` (STT output) is only matched against fixed phrase tables, so it can only allow a marker the LLM already emitted. It cannot create one, and the result is never stricter than before the change. Prompt-injected `[[END_CALL]]` was already reachable, and this change makes it harder to use.
-- No ReDoS: `_PHRASE_SPLIT_RE` is a single character class with `+`, so it runs in linear time. `_SENTENCE_RE` is unchanged and existed before.
-- Call-length bound kept: a rejected marker cannot stretch a call without limit, because the max-duration hangup (`pipeline.py:779-797`) and guardrail escalation (`pipeline.py:1035`) do not depend on the guard.
-- AC12 latch: `end_call` in `on_speech_ended` is now read from `directives` after the stream, so a mid-stream `end_call=True` that the guard later rejects is never acted on. The barge-in and transfer gates at `pipeline.py:952` are unchanged.
-- i18n startup validation: a malformed `CLOSURE_PHRASES` or `FAREWELL_PHRASES` makes `ValueError` fail the import, and `en` must have both. This prevents a silent empty table that would reject every marker.
+- No new reachable surface: the diff touches only `services/conversation/pipeline.py`, `services/conversation/i18n/*` and tests. It adds no routes, RPCs, DB access or auth paths, so there is nothing new for tenant isolation, privilege or IDOR checks to cover.
+- The guard only tightens: `_end_call_rejection` and the scripted branch (`pipeline.py` around lines 1419-1431) can only remove an `EndCallDirective`, never add one. A caller who says "bye" to the LLM gets no new way to hang up the call beyond what the unconditional marker already allowed.
+- Log hygiene: the rejection log carries only `reason` and `session_id`, with no caller utterance or reply text. The i18n warning logs only the module code and attribute names.
+- Untrusted language input: `has_phrase_tables`, `closure_phrases` and `farewell_phrases` handle an unknown or None language without raising. An unknown table means the marker is trusted (the old behaviour) and the English phrases are used as the fallback, so there is no crash on attacker-influenced session language.
+- Input processing cost: `_PHRASE_SPLIT_RE` is a single character class with `+`, so it runs in linear time. Phrase matching is bounded substring search over fixed small tables, so there is no ReDoS on caller transcripts.
+- Phrase tables are validated at import (`i18n/__init__.py` `_validate`), so a malformed module fails startup and is not silently ignored.
+- Both `_llm_to_tts` call sites (`pipeline.py:841`, `pipeline.py:1090`) were checked. The primary path now reads `end_call` from the guarded `directives` list after the stream. The secondary path does not use the yielded flag (`_end_call`).

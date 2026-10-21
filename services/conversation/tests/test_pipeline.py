@@ -2283,6 +2283,41 @@ async def test_farewell_message_synthesized_on_end_call():
 
 
 @pytest.mark.asyncio
+async def test_scripted_farewell_ends_call_without_a_closing_caller():
+    """A scripted agent's farewell is system-spoken, so the closure/farewell phrase checks do not apply."""
+    llm = _make_llm(["Thank you for your time. ", "[[END_CALL]]"])
+    tts = _make_tts(b"\x11" * 640)
+    handler = _make_handler(
+        _make_stt("okay thanks"), llm, tts, system_prompt="You are Alex.",
+        farewell_message="Thanks for calling Yovanex. Goodbye!",
+    )
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+    assert any(r.end_call for r in responses)
+    assert "Thanks for calling Yovanex. Goodbye!" in [c.args[0] for c in tts.synthesize.await_args_list]
+
+
+@pytest.mark.asyncio
+async def test_scripted_agent_trailing_question_still_vetoes_end_call(caplog):
+    llm = _make_llm(["Anything else I can help with? ", "[[END_CALL]]"])
+    handler = _make_handler(
+        _make_stt("I want to book"), llm, _make_tts(b"\x11" * 640), system_prompt="You are Alex.",
+        farewell_message="Thanks for calling Yovanex. Goodbye!",
+    )
+    with caplog.at_level("INFO", logger=pipeline_module.log.name):
+        responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+    assert not any(r.end_call for r in responses)
+    assert "end_call_rejected reason=question" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_thanking_caller_and_wonderful_day_reply_end_the_call():
+    llm = _make_llm(["Your appointment is booked for Tuesday at 3. Have a wonderful day! ", "[[END_CALL]]"])
+    handler = _make_handler(_make_stt("Great, thanks."), llm, _make_tts(b"\x00" * 640))
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    assert any(r.end_call for r in responses)
+
+
+@pytest.mark.asyncio
 async def test_transfer_announcement_synthesized_before_transfer_request():
     """Scripted announcement audio is yielded before the transfer_request."""
     stt = _make_stt("get me a human")

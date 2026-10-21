@@ -37,6 +37,9 @@ CLOSURE_PHRASES: tuple[str, ...] = (
     "no more questions",
     "nothing else",
     "i'm done",
+    "thanks",
+    "thank you",
+    "okay thanks",
 )
 FAREWELL_PHRASES: tuple[str, ...] = (
     "goodbye",
@@ -47,4 +50,8 @@ FAREWELL_PHRASES: tuple[str, ...] = (
     "have a good day",
     "thanks for calling",
     "thank you for calling",
+    "have a wonderful day",
+    "have a lovely day",
+    "talk to you soon",
+    "see you",
 )

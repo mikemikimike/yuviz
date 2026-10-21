@@ -74,7 +74,7 @@ def _discover(path: Iterable[str], package: str) -> dict[str, ModuleType]:
         _validate(code, module)
         missing = [attr for attr in _PHRASE_TABLES if not hasattr(module, attr)]
         if missing:
-            log.warning("i18n module %r has no %s; the end-call guard falls back to English", code, ", ".join(missing))
+            log.warning("i18n module %r has no %s; the end-call guard accepts the marker without a phrase check", code, ", ".join(missing))
     return tables
 
 
@@ -101,6 +101,12 @@ def tool_fillers(language: str | None) -> tuple[tuple[str, float], ...]:
 def shortest_tool_filler(language: str | None) -> str:
     """The language's shortest tool filler, else English's."""
     return _SHORTEST.get(normalize_language(language) or "en", _SHORTEST["en"])
+
+
+def has_phrase_tables(language: str | None) -> bool:
+    """Whether the language has its own closure and farewell phrase tables (English counts)."""
+    table = _TABLES.get(normalize_language(language) or "en")
+    return all(hasattr(table, attr) for attr in _PHRASE_TABLES)
 
 
 def closure_phrases(language: str | None) -> tuple[str, ...]:

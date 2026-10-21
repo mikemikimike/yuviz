@@ -21,5 +21,5 @@ TOOL_FILLERS: tuple[tuple[str, float], ...] = (
 )
 
 # "नमस्ते" is a farewell only: callers also open with it, so it is not a closure.
-CLOSURE_PHRASES: tuple[str, ...] = ("बस इतना ही", "और कुछ नहीं", "अलविदा", "बाय")
+CLOSURE_PHRASES: tuple[str, ...] = ("बस इतना ही", "और कुछ नहीं", "अलविदा", "बाय", "धन्यवाद", "शुक्रिया")
 FAREWELL_PHRASES: tuple[str, ...] = ("नमस्ते", "अलविदा", "शुभ दिन", "दिन शुभ हो", "ध्यान रखिए", "कॉल करने के लिए धन्यवाद")
