@@ -226,14 +226,19 @@ _BANNED_STEMS = {
 _LOOKUP_FILLER = {"en": "Let me check on that.", "hi": "जी, अभी देखते हैं।"}
 
 
+# Every language that ships a turn-1 pool is checked, so a new language is covered without editing the tests.
+_POOLED = sorted(code for code, module in i18n._TABLES.items() if getattr(module, "FIRST_TURN_FILLERS", None))
+
+
 def _phrases(pool):
     return [phrase for phrase, _seconds in pool]
 
 
-@pytest.mark.parametrize("code", sorted(_BANNED_STEMS))
+@pytest.mark.parametrize("code", _POOLED)
 def test_first_turn_fillers_use_no_lookup_or_task_wording(code):
-    module = {"en": en, "hi": hi}[code]
-    assert module.FIRST_TURN_FILLERS
+    module = i18n._TABLES[code]
+    # A language with a turn-1 pool must declare its banned stems here, or its wording goes unchecked.
+    assert code in _BANNED_STEMS, f"add lookup/task stems for {code!r} to _BANNED_STEMS and _LOOKUP_FILLER"
     stems = _BANNED_STEMS[code]
     # The matcher must be able to fire, or the assertion below proves nothing.
     assert _LOOKUP_FILLER[code] in _phrases(module.TOOL_FILLERS)
@@ -242,10 +247,15 @@ def test_first_turn_fillers_use_no_lookup_or_task_wording(code):
         assert not any(stem in phrase.lower() for stem in stems), phrase
 
 
-@pytest.mark.parametrize("module", [en, hi], ids=["en", "hi"])
-def test_first_turn_fillers_are_disjoint_from_tool_fillers_and_cover_the_shortest_tier(module):
+@pytest.mark.parametrize("code", _POOLED)
+def test_first_turn_fillers_are_disjoint_from_tool_fillers_and_cover_the_shortest_tier(code):
+    module = i18n._TABLES[code]
     assert set(_phrases(module.FIRST_TURN_FILLERS)).isdisjoint(_phrases(module.TOOL_FILLERS))
     assert min(s for _p, s in module.FIRST_TURN_FILLERS) <= min(s for _p, s in module.TOOL_FILLERS)
+
+
+def test_the_pooled_languages_include_en_and_hi():
+    assert {"en", "hi"} <= set(_POOLED)
 
 
 def test_hindi_first_turn_fillers_have_no_latin_letters():
