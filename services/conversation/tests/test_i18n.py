@@ -118,14 +118,7 @@ def test_first_turn_accessors_for_a_module_without_the_table(tmp_path, monkeypat
     shortest = {c: min(m.TOOL_FILLERS, key=lambda f: f[1])[0] for c, m in tables.items()}
     monkeypatch.setattr(i18n, "_TABLES", tables)
     monkeypatch.setattr(i18n, "_SHORTEST", shortest)
-    monkeypatch.setattr(
-        i18n,
-        "_SHORTEST_FIRST_TURN",
-        {
-            c: min(m.FIRST_TURN_FILLERS, key=lambda f: f[1])[0] if getattr(m, "FIRST_TURN_FILLERS", None) else shortest[c]
-            for c, m in tables.items()
-        },
-    )
+    monkeypatch.setattr(i18n, "_SHORTEST_FIRST_TURN", i18n._shortest_first_turn(tables, shortest))
 
     assert i18n.first_turn_fillers("xx") is None
     assert i18n.shortest_first_turn_filler("xx") == "xx short"

@@ -53,7 +53,7 @@ def test_select_first_turn_filler_tier_follows_latency(language, pool, average_m
     for _ in range(20):
         phrase = FillerSelector().select_first_turn_filler(None, average_ms, language=language)
         assert phrase in _tier_phrases(pool, seconds)
-        assert phrase not in {p for p, _ in _TOOL_FILLERS}
+        assert phrase not in {p for p, _ in i18n._TABLES[language or "en"].TOOL_FILLERS}
 
 
 def test_select_first_turn_filler_never_repeats_back_to_back():

@@ -91,12 +91,16 @@ _SHORTEST: dict[str, str] = {
     code: min(module.TOOL_FILLERS, key=lambda f: f[1])[0] for code, module in _TABLES.items()
 }
 # Same for the turn-1 pool; a module without FIRST_TURN_FILLERS uses its own shortest tool filler.
-_SHORTEST_FIRST_TURN: dict[str, str] = {
-    code: min(module.FIRST_TURN_FILLERS, key=lambda f: f[1])[0]
-    if getattr(module, "FIRST_TURN_FILLERS", None)
-    else _SHORTEST[code]
-    for code, module in _TABLES.items()
-}
+def _shortest_first_turn(tables: dict[str, ModuleType], shortest: dict[str, str]) -> dict[str, str]:
+    return {
+        code: min(module.FIRST_TURN_FILLERS, key=lambda f: f[1])[0]
+        if getattr(module, "FIRST_TURN_FILLERS", None)
+        else shortest[code]
+        for code, module in tables.items()
+    }
+
+
+_SHORTEST_FIRST_TURN: dict[str, str] = _shortest_first_turn(_TABLES, _SHORTEST)
 
 
 def t(key: str, language: str | None) -> str:
