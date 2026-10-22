@@ -33,7 +33,7 @@ FIRST_TURN_FILLERS: tuple[tuple[str, float], ...] = (
     ("Okay, one moment please.", 1.5),
     ("Alright, bear with me a moment.", 1.5),
     ("Alright, just give me a moment please.", 2.0),
-    ("Alright, sure, just bear with me for one moment please.", 2.4),
+    ("Alright, just bear with me for one moment please.", 2.4),
 )
 
 # Phrases that mean the caller is wrapping up, and phrases that sound like the agent signing off.
