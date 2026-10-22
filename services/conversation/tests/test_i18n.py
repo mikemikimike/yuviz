@@ -220,10 +220,12 @@ def test_shortest_tool_filler_is_the_real_shortest_phrase():
 
 # Lookup and task verbs belong to TOOL_FILLERS: the turn-1 opener is spoken before the LLM has decided anything.
 _BANNED_STEMS = {
-    "en": ("check", "look into", "take care of"),
-    "hi": ("देख", "पूरा कर"),
+    "en": ("check", "look into", "take care of", "thank"),
+    "hi": ("देख", "पूरा कर", "धन्यवाद", "शुक्रिया"),
 }
 _LOOKUP_FILLER = {"en": "Let me check on that.", "hi": "जी, अभी देखते हैं।"}
+# Thanks belong to a closing or a wait the caller has already sat through, not to a reply to a greeting.
+_THANKS_FILLER = {"en": "Thank you, one moment please.", "hi": "धन्यवाद, बस एक पल।"}
 
 
 # Every language that ships a turn-1 pool is checked, so a new language is covered without editing the tests.
@@ -243,6 +245,7 @@ def test_first_turn_fillers_use_no_lookup_or_task_wording(code):
     # The matcher must be able to fire, or the assertion below proves nothing.
     assert _LOOKUP_FILLER[code] in _phrases(module.TOOL_FILLERS)
     assert any(stem in _LOOKUP_FILLER[code].lower() for stem in stems)
+    assert any(stem in _THANKS_FILLER[code].lower() for stem in stems)
     for phrase in _phrases(module.FIRST_TURN_FILLERS):
         assert not any(stem in phrase.lower() for stem in stems), phrase
 
