@@ -140,7 +140,7 @@ def _make_handler(
     has_booking_tool: bool = False,
     workflow: dict | None = None, node_tools: list[str] | None = None,
     node_knowledge: list[str] | None = None, transcripts=None,
-    agent_language: str | None = None, language_mode: str | None = None,
+    agent_language: str | None = None, language_mode: str | None = None, stt_language: str | None = None,
     supported_languages: tuple[str, ...] | None = None, agent_id: str = "a1", **handler_kwargs,
 ) -> PipelineConversationHandler:
     """Build a handler from a hand-built RuntimeConfig/ProviderBundle, no IConfigProvider."""
@@ -182,7 +182,7 @@ def _make_handler(
             workflow=workflow, workflow_draft=workflow,
         ),
         media=MediaInfo(
-            voice=None, language=None,
+            voice=None, language=None, stt_language=stt_language,
             supported_languages=supported_languages or (),
             default_language=supported_languages[0] if supported_languages else None,
         ),
@@ -581,7 +581,7 @@ async def test_pipeline_history_accumulates():
 @pytest.mark.asyncio
 async def test_pipeline_marker_only_reply_without_closure_stays_open(caplog):
     """A marker-only reply to a non-closing caller is not a hangup: the call stays open and the
-    never-go-silent fallback is spoken instead of the goodbye."""
+    "anything else?" check is spoken instead of the goodbye or an error apology."""
     stt = _make_stt("tear down the call")
     llm = _make_llm([_END_CALL_MARKER])        # marker only, nothing spoken
     tts = _make_tts(b"\x00" * 640)
@@ -592,11 +592,24 @@ async def test_pipeline_marker_only_reply_without_closure_stays_open(caplog):
 
     assert not any(r.end_call for r in responses)
     synthesized = [c.args[0] for c in tts.synthesize.await_args_list]
-    assert t("fallback_llm_error", "en") in synthesized
+    assert t("end_call_check", "en") in synthesized
+    assert t("fallback_llm_error", "en") not in synthesized
     assert _FALLBACK_GOODBYE not in synthesized
     assert not any(_END_CALL_MARKER in (m.content or "") for m in handler._get_history("s1") if m.role == "assistant")
     rejections = [r for r in caplog.records if "end_call_rejected reason=marker_only session=" in r.getMessage()]
     assert len(rejections) == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_free_text_agent_language_keeps_the_end_call_guard():
+    """agents.language='English' normalizes to nothing but must not switch the guard off: the English
+    phrase tables apply, so a marker after a non-farewell to a non-closing caller is rejected."""
+    llm = _make_llm(["Okay, noted. ", _END_CALL_MARKER])
+    handler = _make_handler(
+        _make_stt("I want to reschedule"), llm, _make_tts(b"\x00" * 640), agent_language="English",
+    )
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    assert not any(r.end_call for r in responses)
 
 
 @pytest.mark.asyncio
@@ -623,6 +636,22 @@ async def test_pipeline_marker_only_reply_to_closing_caller_gets_fallback_goodby
 
     tts.synthesize.assert_any_call(_FALLBACK_GOODBYE, 16_000)
     assert "end_call_rejected" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stt_language, caller, reply", [
+    ("es", "Gracias, adiós.", "Perfecto, que tenga un buen día."),
+    ("hi-IN", "मुझे बुकिंग करनी है।", "आपकी बुकिंग हो गई।"),
+])
+async def test_guard_uses_the_provider_row_language_when_the_agent_has_none(stt_language, caller, reply):
+    """A legacy agent with agents.language NULL and its language only on the STT row has no phrase
+    table for es, so the marker is trusted; hi uses the hi table, where this caller is no closure."""
+    handler = _make_handler(
+        _make_stt(caller), _make_llm([reply, " ", _END_CALL_MARKER]), _make_tts(b"\x00" * 640),
+        stt_language=stt_language,
+    )
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    assert any(r.end_call for r in responses) == stt_language.startswith("es")
 
 
 @pytest.mark.asyncio
@@ -1217,6 +1246,20 @@ async def test_on_transfer_failed_falls_back_when_llm_produces_nothing():
     history = handler._get_history("s1")
     assert len(history) == 2
     assert history[1].content == _TRANSFER_FAILED_FALLBACK
+
+
+@pytest.mark.asyncio
+async def test_on_transfer_failed_marker_only_reply_speaks_the_transfer_apology_once():
+    """A marker-only recovery reply is rejected, but the transfer-failed apology plays, not the
+    main-turn "anything else?" check, and on_transfer_failed adds no second fallback."""
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(_make_stt(), _make_llm([_END_CALL_MARKER]), tts)
+    async for _ in handler.on_transfer_failed("s1", "+15551234567", "esl_unreachable"):
+        pass
+
+    synthesized = [c.args[0] for c in tts.synthesize.await_args_list]
+    assert synthesized.count(_TRANSFER_FAILED_FALLBACK) == 1
+    assert t("end_call_check", "en") not in synthesized
 
 
 @pytest.mark.asyncio

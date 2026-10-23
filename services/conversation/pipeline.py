@@ -241,15 +241,17 @@ def _last_sentence(reply_text: str) -> str:
     return next((p for p in reversed(sentences) if p), "")
 
 
-def _end_call_rejection(reply_text: str, caller_text: str, language: str) -> str | None:
+def _end_call_rejection(reply_text: str, caller_text: str, language: str | None) -> str | None:
     """Why an [[END_CALL]] marker should not hang up, or None to honour it."""
     last_sentence = _last_sentence(reply_text)
     if last_sentence.endswith(_QUESTION_ENDINGS):
         return "question"
-    if not has_phrase_tables(language):
-        # No phrase table (es, fr, ja, zh, ...): English phrases cannot match a native goodbye, so trust the marker.
+    if language is None or not has_phrase_tables(language):
+        # No known language or phrase table (es, fr, ja, zh, ...): English phrases cannot match a native goodbye,
+        # so trust the marker.
         return None
-    caller = _phrase_tokens(caller_text)
+    # Only the caller's last sentence counts: "Thank you. I also want to reschedule" is not a closure.
+    caller = _phrase_tokens(_last_sentence(caller_text))
     if any(_phrase_tokens(p) in caller for p in closure_phrases(language) + closure_phrases("en")):
         return None
     last = _phrase_tokens(last_sentence)
@@ -562,6 +564,14 @@ class PipelineConversationHandler:
         # Spoken system strings: the session language, else an explicit agents.language.
         # Never a provider row's language, so agents without one keep their English strings.
         self._strings_language = normalize_language(runtime_config.agent.language) or "en"
+        # The [[END_CALL]] guard's language for a single-language agent: agents.language, else the provider rows'
+        # (resolve_languages' order), English when none is set. An explicit "multi" is None: no phrase table applies.
+        # Legacy free text ("English") normalizes to nothing and falls through to the next source.
+        set_languages = [lang for lang in (self._agent_language, stt_language, tts_language) if lang]
+        self._guard_language: str | None = next(
+            (normalize_language(lang) for lang in set_languages if normalize_language(lang) or lang.lower() == "multi"),
+            "en",
+        )
         if self._multilingual:
             log.info(
                 "Multilingual agent %s: default=%s supported=%s stt_language=%s voice_overrides=%s",
@@ -1416,6 +1426,7 @@ class PipelineConversationHandler:
         text_buffer += tail
         reply_text += tail
 
+        end_call_rejected = False
         if not cancel_event.is_set() and any(isinstance(d, EndCallDirective) for d in directives):
             scripted = self._farewell_message is not None
             full_reply = transition_text + reply_text
@@ -1425,8 +1436,11 @@ class PipelineConversationHandler:
                 asks = _last_sentence(full_reply).endswith(_QUESTION_ENDINGS)
                 rejection = "question" if asks and reply_text.strip() else None
             else:
-                rejection = _end_call_rejection(full_reply, caller_text, self._spoken_language(session_id))
+                rejection = _end_call_rejection(
+                    full_reply, caller_text, self._session_language(session_id) or self._guard_language,
+                )
             if rejection is not None:
+                end_call_rejected = True
                 directives[:] = [d for d in directives if not isinstance(d, EndCallDirective)]
                 log.info("end_call_rejected reason=%s session=%s", rejection, session_id)
 
@@ -1437,7 +1451,10 @@ class PipelineConversationHandler:
         elif not spoke and not directives and not cancel_event.is_set() and not self._ending_or_transferring(session_id):
             # Nothing reached the caller (e.g. the model's only output was a dropped text tool call): never go silent.
             # A deliberate end or transfer with no transition line keeps its own wording (goodbye, transfer).
-            fallback_text = t(silent_turn_text, self._spoken_language(session_id))
+            # A rejected marker on a main turn is not an error: ask whether the caller needs anything else.
+            # Other callers (transfer recovery) keep their own wording.
+            fallback_key = "end_call_check" if end_call_rejected and silent_turn_text == "fallback_llm_error" else silent_turn_text
+            fallback_text = t(fallback_key, self._spoken_language(session_id))
             async for chunk in self._synthesize_sentence_stream(fallback_text, session_id):
                 yield fallback_text, chunk, False
                 fallback_text = ""
