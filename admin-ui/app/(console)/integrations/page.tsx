@@ -2,6 +2,7 @@
 
 import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import { CustomApisPanel } from "@/components/CustomApisPanel";
 import { ConnectorsPanel } from "@/components/ConnectorsPanel";
 import { ConnectedAppsHeading } from "@/components/ConnectedAppsHeading";
 import { useActiveTenant } from "@/lib/useActiveTenant";
@@ -63,6 +64,11 @@ function Integrations() {
               ? "Select an account before connecting a calling app to add a phone number."
               : "No account selected."}
         </div>
+      )}
+      {tenant && !loading && (
+        <section id="custom-tools" className="connected-api-tools" aria-labelledby="custom-api-tools-title">
+          <CustomApisPanel key={tenant.id} tenantId={tenant.id} />
+        </section>
       )}
     </>
   );
