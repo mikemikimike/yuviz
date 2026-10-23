@@ -120,9 +120,9 @@ class SarvamTTS:
         return audio
 
     async def prewarm(self, languages: list[str]) -> None:
-        """Synthesizes the tool-call fillers and first-turn filler for each language into the
-        cache, once per voice instance, so a tool call's "one moment" plays without a round trip."""
-        from ...i18n import t, tool_fillers
+        """Synthesizes the filler phrases for each language into the cache (turn-1 and tool-call
+        fillers share one pool), once per voice instance, so "one moment" plays without a round trip."""
+        from ...i18n import tool_fillers
 
         for language in languages:
             code = self._language_code(language)
@@ -130,7 +130,6 @@ class SarvamTTS:
                 continue
             self._prewarmed.add(code)
             phrases = {phrase for phrase, _seconds in tool_fillers(language)}
-            phrases.add(t("first_turn_filler", language))
             await asyncio.gather(*(self.synthesize(p, _PREWARM_RATE, language=language) for p in phrases))
 
     async def _request(self, text: str, sample_rate: int, language_code: str) -> bytes:

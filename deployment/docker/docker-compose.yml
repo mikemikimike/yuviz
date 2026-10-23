@@ -188,7 +188,7 @@ services:
     <<: *python-service
     command: ["python", "-m", "services.clinic"]
     environment:
-      PORT: "8700"
+      CLINIC_SERVICE_URL: http://clinic:8700
       LISTEN_HOST: "0.0.0.0"
       POSTGRES_DSN: ${POSTGRES_DSN}
       JWT_SECRET: ${JWT_SECRET}
