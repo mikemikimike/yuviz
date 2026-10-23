@@ -7,6 +7,8 @@ STRINGS: dict[str, str] = {
     "max_duration_goodbye": "We're at the time limit for this call now. Thanks for calling — goodbye.",
     # Spoken when the LLM stream raises mid-turn, so the caller doesn't hear dead air.
     "fallback_llm_error": "Sorry, I'm having a little trouble right now. Could you say that again?",
+    # Spoken when a lone [[END_CALL]] is rejected (the caller did not say goodbye): the call stays open.
+    "end_call_check": "Is there anything else I can help you with?",
     # Used if the LLM produces no apology text after a failed transfer.
     "transfer_failed_fallback": "I'm sorry, I couldn't connect you to an agent right now.",
     # Replaces transfer_announcement for a fabrication-triggered transfer.

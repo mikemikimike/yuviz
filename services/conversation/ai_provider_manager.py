@@ -231,6 +231,19 @@ def _require_api_key(cfg: ProviderConfig, api_key: str | None) -> str:
     return api_key
 
 
+def _optional_ms(cfg: ProviderConfig, key: str, *, low: int, high: int) -> int | None:
+    """A whole-number millisecond setting from provider extra, or None when unset."""
+    value = (cfg.extra or {}).get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+        raise ValueError(
+            f"provider_config id={cfg.id!r} engine={cfg.engine!r} has an invalid extra.{key} {value!r} "
+            f"— expected whole milliseconds between {low} and {high}"
+        )
+    return int(value)
+
+
 async def _make_deepgram(cfg: ProviderConfig, api_key: str | None) -> Any:
     from .providers.stt.deepgram import DeepgramSTT
 
@@ -238,6 +251,7 @@ async def _make_deepgram(cfg: ProviderConfig, api_key: str | None) -> Any:
         api_key=_require_api_key(cfg, api_key),
         model=cfg.model or "nova-3",
         language=cfg.language,
+        endpointing_ms=_optional_ms(cfg, "endpointing_ms", low=10, high=5000),
     )
 
 
@@ -328,6 +342,19 @@ async def _make_elevenlabs_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
     )
 
 
+async def _make_sarvam_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
+    from .providers.tts.sarvam import DEFAULT_MODEL, DEFAULT_SPEAKER, SarvamTTS
+
+    # The voice is a Sarvam speaker name (lowercase, and it must belong to the model).
+    return SarvamTTS(
+        api_key=_require_api_key(cfg, api_key),
+        speaker=(cfg.voice or "").strip().lower() or DEFAULT_SPEAKER,
+        model=cfg.extra.get("model") or cfg.model or DEFAULT_MODEL,
+        pace=voice_speed(cfg),
+        language=cfg.language,
+    )
+
+
 async def _make_deepgram_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
     from .providers.tts.deepgram import DeepgramTTS
 
@@ -384,6 +411,7 @@ _DEFAULT_REGISTRY: dict[tuple[str, str], ProviderFactory] = {
     ("tts", "kokoro"):         _make_kokoro_tts,
     ("tts", "elevenlabs"):     _make_elevenlabs_tts,
     ("tts", "deepgram"):       _make_deepgram_tts,
+    ("tts", "sarvam"):         _make_sarvam_tts,
     ("tts", "cartesia"):       _make_cartesia_tts,
 }
 

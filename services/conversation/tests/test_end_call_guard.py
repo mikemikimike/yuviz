@@ -122,3 +122,14 @@ def test_languages_without_a_table_honour_a_native_goodbye(language, reply, call
 )
 def test_languages_without_a_table_keep_the_question_veto(language, reply):
     assert _end_call_rejection(reply, "adiós", language) == "question"
+
+
+def test_a_closure_earlier_in_the_caller_turn_does_not_count():
+    caller = "Thank you. I also want to reschedule my Tuesday appointment."
+    assert _end_call_rejection("Okay, I have noted that.", caller, "en") == "no_closure"
+    assert _end_call_rejection("Okay, I have noted that.", "Great, thanks.", "en") is None
+
+
+def test_an_unknown_language_trusts_the_marker_after_the_question_veto():
+    assert _end_call_rejection("Okay, noted.", "I want to book", None) is None
+    assert _end_call_rejection("Anything else?", "adiós", None) == "question"
