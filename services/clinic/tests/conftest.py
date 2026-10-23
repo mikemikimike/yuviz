@@ -1,5 +1,5 @@
 """DB fixtures. Point CLINIC_TEST_DSN at a database that has schema.sql + clinic_schema.sql
-applied (default: the local scratch database `clinic_scratch`)."""
+applied (default: POSTGRES_DSN, else the local scratch database `clinic_scratch`)."""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ import datetime
 import os
 import uuid
 
-os.environ["POSTGRES_DSN"] = os.environ.get(
-    "CLINIC_TEST_DSN", "postgresql:///clinic_scratch?host=/var/run/postgresql",
+# Conftests load for the whole run: keep the suite's POSTGRES_DSN unless a clinic DB is named.
+os.environ["POSTGRES_DSN"] = (
+    os.environ.get("CLINIC_TEST_DSN") or os.environ.get("POSTGRES_DSN")
+    or "postgresql:///clinic_scratch?host=/var/run/postgresql"
 )
 os.environ.setdefault("JWT_SECRET", "dev-only-insecure-secret-do-not-deploy-" * 2)
 
