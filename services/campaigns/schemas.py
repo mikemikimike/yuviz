@@ -41,3 +41,20 @@ class ContactCreate(BaseModel):
 class DncNumberCreate(BaseModel):
     phone_number: str
     reason:       str | None = None
+
+
+class PlatformLimitsUpdate(BaseModel):
+    model_config = {"strict": True}
+    total_call_capacity:           int | None
+    inbound_reserve:               int
+    max_outbound_concurrent_calls: int | None
+
+
+class CpsLimitUpdate(BaseModel):
+    model_config = {"strict": True}
+    cps: int
+
+
+class TenantCapUpdate(BaseModel):
+    model_config = {"strict": True}
+    max_outbound_concurrent_calls: int | None
