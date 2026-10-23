@@ -109,7 +109,7 @@ _fs_start() {
 # Runs Kamailio in the foreground from the rendered config.
 _kamailio_start() {
   mkdir -p "$KAMAILIO_DIR/run"
-  kamailio -f "$KAMAILIO_DIR/kamailio.cfg" -D -E -Y "$KAMAILIO_DIR/run"
+  kamailio -f "$KAMAILIO_DIR/kamailio.cfg" -DD -E -Y "$KAMAILIO_DIR/run"
 }
 
 _kamailio_pids() {

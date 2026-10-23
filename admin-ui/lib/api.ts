@@ -1518,13 +1518,16 @@ async function campaignsRequest<T>(path: string, options?: RequestInit): Promise
   });
   if (!res.ok) {
     let detail = res.statusText;
+    let body: Record<string, unknown> | undefined;
     try {
-      const body = await res.json();
-      detail = body.detail || detail;
+      body = await res.json();
+      const raw = body?.detail;
+      if (typeof raw === "string") detail = raw;
+      else if (Array.isArray(raw)) detail = raw.map((d) => d?.msg).filter(Boolean).join("; ") || detail;
     } catch {
       // response body wasn't JSON — fall back to statusText
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, detail, body);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -1542,6 +1545,7 @@ export interface Campaign {
   max_concurrent_calls: number;
   pacing_seconds: number;
   max_attempts: number;
+  retry_gap_minutes?: number;
   calling_hours_start: string | null;
   calling_hours_end: string | null;
   calling_hours_timezone: string;
@@ -1556,6 +1560,7 @@ export interface CampaignCreate {
   max_concurrent_calls?: number;
   pacing_seconds?: number;
   max_attempts?: number;
+  retry_gap_minutes?: number;
   calling_hours_start?: string | null;
   calling_hours_end?: string | null;
   calling_hours_timezone?: string;
@@ -1567,6 +1572,8 @@ export interface CampaignUpdate {
   max_concurrent_calls?: number;
   pacing_seconds?: number;
   max_attempts?: number;
+  retry_gap_minutes?: number;
+  calling_hours_timezone?: string;
 }
 
 export interface CampaignProgress {
@@ -1577,9 +1584,17 @@ export interface CampaignProgress {
   failed: number;
   no_answer: number;
   blocked: number;
+  busy: number;
+  declined: number;
+  status: CampaignStatus;
+  wait_reason: string | null;
+  wait_since: string | null;
+  tenant_cap: number | null;
+  effective_limit: number;
+  waiting_count: number;
 }
 
-export type ContactStatus = "pending" | "calling" | "completed" | "failed" | "no_answer" | "blocked";
+export type ContactStatus = "pending" | "calling" | "completed" | "failed" | "no_answer" | "busy" | "declined" | "blocked";
 
 export interface CampaignContact {
   id: string;
@@ -1626,6 +1641,109 @@ export const pauseCampaign = (campaignId: string) =>
 
 export const resumeCampaign = (campaignId: string) =>
   campaignsRequest<Campaign>(`/campaigns/${campaignId}/resume`, { method: "POST" });
+
+export interface ReadinessCheck {
+  id: string;
+  level: "block" | "warn";
+  field: string;
+  message: string;
+  count: number | null;
+}
+
+export interface CostEstimate {
+  currency: string;
+  calls: number;
+  per_call_minor: number;
+  total_minor: number;
+  avg_billable_s: number;
+  avg_source: string;
+}
+
+export interface CampaignReadiness {
+  ready: boolean;
+  checks: ReadinessCheck[];
+  estimate: CostEstimate | null;
+}
+
+export interface CampaignAttempt {
+  id: string;
+  contact_id: string;
+  attempt: number;
+  state: string;
+  outcome: string | null;
+  disposition: string | null;
+  callee_masked: string | null;
+  created_at: string;
+  answered_at: string | null;
+  ended_at: string | null;
+  failure_reason: string | null;
+}
+
+export interface CallerIdOption {
+  did: string;
+  path: string;
+}
+
+export const getCampaignReadiness = (campaignId: string) =>
+  campaignsRequest<CampaignReadiness>(`/campaigns/${campaignId}/readiness`);
+
+export const listCampaignAttempts = (campaignId: string) =>
+  campaignsRequest<CampaignAttempt[]>(`/campaigns/${campaignId}/attempts`);
+
+export const listCampaignCallerIds = (tenantId: string) =>
+  campaignsRequest<CallerIdOption[]>(`/tenants/${tenantId}/campaigns/caller-ids`);
+
+// ── Outbound capacity (platform operator only) ───────────────────────────
+
+export interface CpsLimit {
+  scope: string;
+  cps: number;
+  updated_at: string;
+}
+
+export interface PlatformLimits {
+  total_call_capacity: number | null;
+  inbound_reserve: number;
+  max_outbound_concurrent_calls: number | null;
+  updated_at: string;
+  cps_limits: CpsLimit[];
+}
+
+export interface CapacityUsage {
+  platform_in_flight: number;
+  cps: { scope: string; cps: number | null; sends_last_second: number }[];
+}
+
+export interface TenantCap {
+  tenant_id: string;
+  name: string;
+  slug: string;
+  max_outbound_concurrent_calls: number | null;
+  in_flight: number;
+}
+
+export type PlatformLimitsUpdate = Pick<
+  PlatformLimits,
+  "total_call_capacity" | "inbound_reserve" | "max_outbound_concurrent_calls"
+>;
+
+export const getPlatformLimits = () => campaignsRequest<PlatformLimits>("/capacity/platform");
+
+export const updatePlatformLimits = (body: PlatformLimitsUpdate) =>
+  campaignsRequest<PlatformLimits>("/capacity/platform", { method: "PUT", body: JSON.stringify(body) });
+
+export const updateCpsLimit = (scope: string, cps: number) =>
+  campaignsRequest<CpsLimit>(`/capacity/cps/${encodeURIComponent(scope)}`, { method: "PUT", body: JSON.stringify({ cps }) });
+
+export const getCapacityUsage = () => campaignsRequest<CapacityUsage>("/capacity/usage");
+
+export const listTenantCaps = () => campaignsRequest<TenantCap[]>("/capacity/tenants");
+
+export const updateTenantCap = (tenantId: string, cap: number | null) =>
+  campaignsRequest<TenantCap>(`/capacity/tenants/${tenantId}`, {
+    method: "PUT",
+    body: JSON.stringify({ max_outbound_concurrent_calls: cap }),
+  });
 
 export interface CampaignWithTenant extends Campaign {
   tenantName: string;

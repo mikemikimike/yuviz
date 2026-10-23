@@ -6,16 +6,21 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import {
   AgentWithTenant,
-  ApiError,
   CampaignCreate,
   createCampaign,
   listAllAgents,
-  listPurchasedNumbers,
-  PurchasedNumber,
+  CallerIdOption,
+  listCampaignCallerIds,
   Tenant,
   listTenants,
   uploadCampaignContacts,
 } from "@/lib/api";
+import {
+  CampaignDialingFields,
+  DEFAULT_RETRY_GAP_MINUTES,
+  serverFieldError,
+  validateDialing,
+} from "@/components/campaigns/CampaignDialingFields";
 
 const EMPTY_FORM: CampaignCreate = {
   agent_id: "",
@@ -98,10 +103,11 @@ export default function NewCampaignPage() {
   const router = useRouter();
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [agents, setAgents] = useState<AgentWithTenant[]>([]);
-  const [purchasedNumbers, setPurchasedNumbers] = useState<PurchasedNumber[]>([]);
+  const [callerIds, setCallerIds] = useState<CallerIdOption[] | null>(null);
+  const [retryGap, setRetryGap] = useState<number | "">("");
+  const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
   const [tenantId, setTenantId] = useState("");
   const [form, setForm] = useState<CampaignCreate>(EMPTY_FORM);
-  const [callerIdCustom, setCallerIdCustom] = useState(false);
   const [countryCode, setCountryCode] = useState(COUNTRY_OPTIONS[0].prefix);
   const [contactsFile, setContactsFile] = useState<File | null>(null);
   const [csvPreview, setCsvPreview] = useState<CsvPreview | null>(null);
@@ -127,12 +133,19 @@ export default function NewCampaignPage() {
     const first = agentsForTenant(tenantId)[0];
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setForm((f) => ({ ...f, agent_id: first?.id || "" }));
-    if (tenantId) listPurchasedNumbers(tenantId).then(setPurchasedNumbers).catch(() => setPurchasedNumbers([]));
+    if (tenantId) listCampaignCallerIds(tenantId).then(setCallerIds).catch(() => setCallerIds([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, agents]);
 
   // agent_id is NOT NULL server-side; omitting it surfaces the backend error on Create.
   const audienceValid = !!form.name.trim();
+  const dialing = {
+    caller_id: form.caller_id || "",
+    max_attempts: form.max_attempts ?? 1,
+    retry_gap_minutes: retryGap,
+    max_concurrent_calls: form.max_concurrent_calls ?? 1,
+  };
+  const dialingValid = Object.keys(validateDialing(dialing)).length === 0;
 
   const handleFile = (file: File) => {
     setContactsFile(file);
@@ -153,7 +166,7 @@ export default function NewCampaignPage() {
     setSubmitting(true);
     setError(null);
     try {
-      const created = await createCampaign(tenantId, form);
+      const created = await createCampaign(tenantId, { ...form, retry_gap_minutes: retryGap === "" ? DEFAULT_RETRY_GAP_MINUTES : retryGap });
       if (contactsFile) {
         // Contacts need an existing campaign, so the staged file is uploaded only after create.
         await uploadCampaignContacts(created.id, contactsFile).catch(() => {
@@ -163,7 +176,13 @@ export default function NewCampaignPage() {
       }
       router.push(`/campaigns/${created.id}`);
     } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
+      const { field, message } = serverFieldError(e);
+      if (field) {
+        setServerErrors({ [field]: message });
+        setStep(2);
+      } else {
+        setError(message);
+      }
       setSubmitting(false);
     }
   };
@@ -215,49 +234,6 @@ export default function NewCampaignPage() {
                     onChange={(e) => setForm({ ...form, name: e.target.value })}
                     placeholder="August collections"
                   />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Caller ID</label>
-                  {!callerIdCustom ? (
-                    <select
-                      className="form-select"
-                      value={form.caller_id || ""}
-                      onChange={(e) => {
-                        if (e.target.value === "__custom__") {
-                          setCallerIdCustom(true);
-                          setForm({ ...form, caller_id: "" });
-                        } else {
-                          setForm({ ...form, caller_id: e.target.value });
-                        }
-                      }}
-                    >
-                      <option value="">Select a caller ID…</option>
-                      {purchasedNumbers.map((n) => (
-                        <option key={n.id} value={n.phone_number}>
-                          {n.phone_number}
-                        </option>
-                      ))}
-                      <option value="__custom__">Custom…</option>
-                    </select>
-                  ) : (
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <input
-                        className="form-input"
-                        style={{ fontFamily: "var(--mono)" }}
-                        value={form.caller_id || ""}
-                        onChange={(e) => setForm({ ...form, caller_id: e.target.value })}
-                        placeholder="5000"
-                        autoFocus
-                      />
-                      <button className="btn btn-ghost btn-sm" onClick={() => setCallerIdCustom(false)}>
-                        Use a registered number
-                      </button>
-                    </div>
-                  )}
-                  {!callerIdCustom && purchasedNumbers.length === 0 && (
-                    <div className="form-hint">No active caller IDs — pick &quot;Custom…&quot; to enter one.</div>
-                  )}
                 </div>
 
                 <div className="form-group">
@@ -445,31 +421,18 @@ export default function NewCampaignPage() {
                   onChange={(e) => setForm({ ...form, pacing_seconds: Number(e.target.value) })}
                 />
               </div>
-              <div className="form-group" style={{ flex: 1 }}>
-                <label className="form-label">
-                  Max concurrent calls <span className="hint">calls in flight at once</span>
-                </label>
-                <input
-                  type="number"
-                  min={1}
-                  className="form-input"
-                  value={form.max_concurrent_calls}
-                  onChange={(e) => setForm({ ...form, max_concurrent_calls: Number(e.target.value) })}
-                />
-              </div>
-              <div className="form-group" style={{ flex: 1 }}>
-                <label className="form-label">
-                  Max attempts <span className="hint">retry ladder per contact</span>
-                </label>
-                <input
-                  type="number"
-                  min={1}
-                  className="form-input"
-                  value={form.max_attempts}
-                  onChange={(e) => setForm({ ...form, max_attempts: Number(e.target.value) })}
-                />
-              </div>
             </div>
+
+            <CampaignDialingFields
+              values={dialing}
+              onChange={(v) => {
+                setForm({ ...form, caller_id: v.caller_id, max_attempts: v.max_attempts, max_concurrent_calls: v.max_concurrent_calls });
+                setRetryGap(v.retry_gap_minutes);
+                setServerErrors({});
+              }}
+              callerIds={callerIds}
+              errors={serverErrors}
+            />
 
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label className="form-label">
@@ -576,12 +539,12 @@ export default function NewCampaignPage() {
             <button
               className="btn btn-primary btn-sm"
               onClick={() => setStep((step + 1) as StepId)}
-              disabled={step === 1 && !audienceValid}
+              disabled={(step === 1 && !audienceValid) || (step === 2 && !dialingValid)}
             >
               Next
             </button>
           ) : (
-            <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={submitting}>
+            <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={submitting || !dialingValid}>
               {submitting ? "Creating…" : "Create campaign"}
             </button>
           )}

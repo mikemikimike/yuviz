@@ -11,7 +11,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 
-SCHEMA_SQL = pathlib.Path(__file__).resolve().parents[3] / "database" / "schema.sql"
+DATABASE_DIR = pathlib.Path(__file__).resolve().parents[3] / "database"
+SCHEMA_FILES = [DATABASE_DIR / "schema.sql", DATABASE_DIR / "telephony_schema.sql", DATABASE_DIR / "knowledge_schema.sql", DATABASE_DIR / "rls.sql"]
 
 
 def _dsn_for(dbname: str) -> str:
@@ -20,10 +21,8 @@ def _dsn_for(dbname: str) -> str:
 
 
 def apply_schema(dsn: str) -> None:
-    subprocess.run(
-        ["psql", "-q", "-v", "ON_ERROR_STOP=1", "-f", str(SCHEMA_SQL), dsn],
-        check=True, capture_output=True,
-    )
+    for path in SCHEMA_FILES:
+        subprocess.run(["psql", "-q", "-v", "ON_ERROR_STOP=1", "-v", "yuviz_app_password=scratch", "-f", str(path), dsn], check=True, capture_output=True)
 
 
 @asynccontextmanager
@@ -38,3 +37,4 @@ async def scratch_database():
     finally:
         await admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
         await admin.close()
+

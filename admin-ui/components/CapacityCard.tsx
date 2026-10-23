@@ -14,10 +14,15 @@ import {
   updateTenantCap,
 } from "@/lib/api";
 
-const errText = (e: unknown) => (e instanceof ApiError ? e.detail : String(e));
+const errText = (e: unknown) => (e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e));
 
-// Blank means "no limit" (null); anything else is sent as-is so the server's strict validation answers.
-const toCap = (draft: string): number | null => (draft.trim() === "" ? null : Number(draft));
+function toInt(draft: string): number {
+  if (!/^\d+$/.test(draft.trim())) throw new Error("Enter a whole number.");
+  return Number(draft);
+}
+
+// Blank means "no limit" (null); anything else must be a whole number, so a typo can never clear a limit.
+const toCap = (draft: string): number | null => (draft.trim() === "" ? null : toInt(draft));
 
 function PlatformLimitsForm({ limits, onSaved }: { limits: PlatformLimits; onSaved: (l: PlatformLimits) => void }) {
   const [total, setTotal] = useState(String(limits.total_call_capacity ?? ""));
@@ -33,7 +38,7 @@ function PlatformLimitsForm({ limits, onSaved }: { limits: PlatformLimits; onSav
       onSaved(
         await updatePlatformLimits({
           total_call_capacity: toCap(total),
-          inbound_reserve: Number(reserve),
+          inbound_reserve: toInt(reserve),
           max_outbound_concurrent_calls: toCap(outbound),
         }),
       );
@@ -78,7 +83,7 @@ function CpsRow({ scope, cps, sends, onSaved }: { scope: string; cps: number | n
     setSaving(true);
     setError(null);
     try {
-      const updated = await updateCpsLimit(scope, Number(draft));
+      const updated = await updateCpsLimit(scope, toInt(draft));
       setStored(updated.cps);
       onSaved();
     } catch (e) {
@@ -171,7 +176,8 @@ export function CapacityCard() {
 
   const refreshUsage = () => getCapacityUsage().then(setUsage).catch((e) => setUsageError(errText(e)));
   const sendsFor = (scope: string) => usage?.cps.find((c) => c.scope === scope)?.sends_last_second ?? 0;
-  const cpsScopes = limits?.cps_limits ?? [];
+  const cpsScopes = [...new Set([...(limits?.cps_limits ?? []).map((c) => c.scope), ...(usage?.cps ?? []).map((c) => c.scope)])].sort();
+  const cpsFor = (scope: string) => limits?.cps_limits.find((c) => c.scope === scope)?.cps ?? null;
 
   return (
     <div className="card" style={{ marginBottom: 16 }}>
@@ -188,15 +194,15 @@ export function CapacityCard() {
         <div className="card-title" style={{ marginBottom: 6 }}>Calls per second</div>
         {usageError && <div className="form-hint" style={{ color: "var(--red)" }}>{usageError}</div>}
         {cpsScopes.length === 0 ? (
-          <div className="form-hint">No CPS limits are set; a scope with no row has no limit.</div>
+          <div className="form-hint">No CPS scopes yet; a scope appears here after its first send.</div>
         ) : (
           <table className="tbl">
             <thead>
               <tr><th>Scope</th><th>Limit</th><th>Sent last second</th><th>Set limit</th></tr>
             </thead>
             <tbody>
-              {cpsScopes.map((c) => (
-                <CpsRow key={c.scope} scope={c.scope} cps={c.cps} sends={sendsFor(c.scope)} onSaved={refreshUsage} />
+              {cpsScopes.map((scope) => (
+                <CpsRow key={`${scope}:${cpsFor(scope)}`} scope={scope} cps={cpsFor(scope)} sends={sendsFor(scope)} onSaved={refreshUsage} />
               ))}
             </tbody>
           </table>

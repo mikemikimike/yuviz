@@ -8,7 +8,7 @@ from typing import Any
 from libs.telephony_sdk.did_format import normalize_did
 from libs.tenancy import platform_conn, tenant_conn
 
-from . import audit, db
+from . import audit, capacity, db
 
 
 async def get_campaign(campaign_id: Any, *, platform_scoped: bool = False) -> dict[str, Any] | None:
@@ -21,11 +21,41 @@ async def get_campaign(campaign_id: Any, *, platform_scoped: bool = False) -> di
     return dict(row) if row is not None else None
 
 
+async def get_campaign_for_caller(campaign_id: Any, tenant_id: Any | None) -> dict[str, Any] | None:
+    """tenant_id None is a platform caller. A foreign campaign is indistinguishable from a missing one."""
+    pool = await db.get_pool()
+    conn_cm = tenant_conn(pool) if tenant_id is not None else platform_conn(pool, reason="campaign-by-id")
+    async with conn_cm as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM campaigns WHERE id = $1 AND deleted_at IS NULL AND ($2::uuid IS NULL OR tenant_id = $2::uuid)",
+            campaign_id, tenant_id,
+        )
+    return dict(row) if row is not None else None
+
+
 async def list_campaigns(tenant_id: Any) -> list[dict[str, Any]]:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         rows = await conn.fetch(
             "SELECT * FROM campaigns WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC",
+            tenant_id,
+        )
+    return [dict(row) for row in rows]
+
+
+async def list_caller_ids(tenant_id: Any) -> list[dict[str, Any]]:
+    """The tenant's DIDs with their outbound path: the bound telephony provider, else 'native'."""
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT pn.did, COALESCE(tc.provider, 'native') AS path
+            FROM phone_numbers pn
+            LEFT JOIN telephony_configs tc
+                   ON tc.id = pn.telephony_config_id AND tc.tenant_id = pn.tenant_id AND tc.deleted_at IS NULL
+            WHERE pn.tenant_id = $1 AND pn.deleted_at IS NULL
+            ORDER BY pn.did
+            """,
             tenant_id,
         )
     return [dict(row) for row in rows]
@@ -62,7 +92,7 @@ async def caller_id_owned_by_tenant(tenant_id: Any, caller_id: str | None) -> bo
 async def create_campaign(
     tenant_id: Any, *, agent_id: Any, name: str, caller_id: str | None,
     max_concurrent_calls: int, pacing_seconds: int, max_attempts: int,
-    calling_hours_start: str | None = None, calling_hours_end: str | None = None,
+    retry_gap_minutes: int = 60, calling_hours_start: str | None = None, calling_hours_end: str | None = None,
     calling_hours_timezone: str = "UTC",
     user_id: Any | None = None, user_email: str | None = None,
 ) -> dict[str, Any]:
@@ -71,10 +101,10 @@ async def create_campaign(
         row = await conn.fetchrow(
             "INSERT INTO campaigns "
             "(tenant_id, agent_id, name, caller_id, max_concurrent_calls, pacing_seconds, max_attempts, "
-            "calling_hours_start, calling_hours_end, calling_hours_timezone) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *",
+            "retry_gap_minutes, calling_hours_start, calling_hours_end, calling_hours_timezone) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *",
             tenant_id, agent_id, name, caller_id, max_concurrent_calls, pacing_seconds, max_attempts,
-            calling_hours_start, calling_hours_end, calling_hours_timezone,
+            retry_gap_minutes, calling_hours_start, calling_hours_end, calling_hours_timezone,
         )
         result = dict(row)
         await audit.write_audit(
@@ -136,18 +166,32 @@ async def get_progress(campaign_id: Any, *, platform_scoped: bool = False) -> di
         row = await conn.fetchrow(
             """
             SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status = 'pending')   AS pending,
-                COUNT(*) FILTER (WHERE status = 'calling')   AS calling,
-                COUNT(*) FILTER (WHERE status = 'completed') AS completed,
-                COUNT(*) FILTER (WHERE status = 'failed')    AS failed,
-                COUNT(*) FILTER (WHERE status = 'no_answer') AS no_answer,
-                COUNT(*) FILTER (WHERE status = 'blocked')   AS blocked
-            FROM campaign_contacts WHERE campaign_id = $1
+                c.status, c.wait_reason, c.wait_since, t.max_outbound_concurrent_calls AS tenant_cap,
+                LEAST(c.max_concurrent_calls, t.max_outbound_concurrent_calls) AS effective_limit,
+                COUNT(cc.id) AS total,
+                COUNT(cc.id) FILTER (WHERE cc.status = 'pending')   AS pending,
+                COUNT(cc.id) FILTER (
+                    WHERE cc.status = 'pending' AND (cc.next_attempt_at IS NULL OR cc.next_attempt_at <= now())
+                )                                                   AS due,
+                COUNT(cc.id) FILTER (WHERE cc.status = 'calling')   AS calling,
+                COUNT(cc.id) FILTER (WHERE cc.status = 'completed') AS completed,
+                COUNT(cc.id) FILTER (WHERE cc.status = 'failed')    AS failed,
+                COUNT(cc.id) FILTER (WHERE cc.status = 'no_answer') AS no_answer,
+                COUNT(cc.id) FILTER (WHERE cc.status = 'busy')      AS busy,
+                COUNT(cc.id) FILTER (WHERE cc.status = 'declined')  AS declined,
+                COUNT(cc.id) FILTER (WHERE cc.status = 'blocked')   AS blocked
+            FROM campaigns c
+            JOIN tenants t ON t.id = c.tenant_id
+            LEFT JOIN campaign_contacts cc ON cc.campaign_id = c.id
+            WHERE c.id = $1
+            GROUP BY c.id, t.id
             """,
             campaign_id,
         )
-    return dict(row)
+    progress = dict(row)
+    due = progress.pop("due")
+    progress["waiting_count"] = due if progress["wait_reason"] is not None else 0
+    return progress
 
 
 async def resolve_outbound_route(
@@ -161,8 +205,9 @@ async def resolve_outbound_route(
     async with conn_cm as conn:
         row = await conn.fetchrow(
             """
-            SELECT t.slug AS tenant_slug, a.slug AS agent_slug, tc.provider AS provider,
-                   (pn.id IS NOT NULL) AS caller_id_owned
+            SELECT t.slug AS tenant_slug, a.slug AS agent_slug, tc.provider AS provider, tc.id AS telephony_config_id,
+                   pn.agent_id AS did_agent_id, (pn.id IS NOT NULL) AS caller_id_owned,
+                   (a.tenant_id = t.id AND a.status = 'active' AND a.deleted_at IS NULL) AS agent_ok
             FROM tenants t
             JOIN agents a ON a.id = $2
             LEFT JOIN phone_numbers pn ON pn.tenant_id = t.id AND pn.did = $3 AND pn.deleted_at IS NULL
@@ -172,3 +217,23 @@ async def resolve_outbound_route(
             tenant_id, agent_id, normalize_did(caller_id),
         )
     return dict(row)
+
+
+async def is_finished(campaign_id: Any) -> bool:
+    """Worker-side: every contact is terminal and no attempt is open (including an answered call that has not ended)."""
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="campaign-dial-state") as conn:
+        return await conn.fetchval(
+            f"""
+            SELECT NOT EXISTS (SELECT 1 FROM campaign_contacts WHERE campaign_id = $1 AND status IN ('pending', 'calling'))
+               AND NOT EXISTS (SELECT 1 FROM campaign_attempts WHERE campaign_id = $1 AND {capacity.IN_FLIGHT})
+            """,
+            campaign_id,
+        )
+
+
+async def set_wait_reason(campaign_id: Any, reason: capacity.WaitReason | None) -> None:
+    """Worker-side wait reason; touches the row only when it changes."""
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="campaign-dial-state") as conn:
+        await capacity.write_wait_reason(conn, campaign_id, reason)

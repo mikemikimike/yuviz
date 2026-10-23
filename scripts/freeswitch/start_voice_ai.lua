@@ -17,7 +17,7 @@ local gateway_ws = os.getenv("VOICE_AI_GATEWAY_WS") or ("ws://127.0.0.1:" .. (os
 local uuid = session:get_uuid()
 session:answer()
 
--- Both values come from the caller's own SIP INVITE. Anything outside this
+-- The inbound values come from the caller's own SIP INVITE. Anything outside this
 -- allowlist could break out of the JSON (e.g. inject a different "did") or
 -- split the API args.
 local function sip_token(value)
@@ -28,15 +28,21 @@ end
 -- (transfer, hangup) to the correct node in a multi-node deployment.
 local fs_host = session:getVariable("local_ip_v4") or ""
 
--- A reminder call placed by the clinic service sets yuviz_remote_ani in its originate command
--- (server side; a SIP INVITE cannot set it), so the agent sees the patient it dialled rather
--- than the hospital's own caller ID. Every other call has no such variable.
-local ani = session:getVariable("yuviz_remote_ani") or session:getVariable("caller_id_number")
+-- A campaign call (campaign_key comes from the consumed dial intent, never a header) is outbound: its
+-- agent is the intent's agent DID and the remote party, the callee, is the ani.
+-- A clinic reminder sets yuviz_remote_ani server-side (an INVITE cannot), so the agent sees the patient
+-- it dialled rather than the hospital's own caller ID.
+local did, ani, direction
+if session:getVariable("campaign_key") then
+    did, ani, direction = session:getVariable("campaign_agent_did"), session:getVariable("campaign_callee"), "outbound"
+else
+    did = session:getVariable("destination_number")
+    ani = session:getVariable("yuviz_remote_ani") or session:getVariable("caller_id_number")
+    direction = "inbound"
+end
 
-local meta = string.format('{"did":"%s","ani":"%s","direction":"inbound","freeswitch_host":"%s"}',
-    sip_token(session:getVariable("destination_number")),
-    sip_token(ani),
-    sip_token(fs_host))
+local meta = string.format('{"did":"%s","ani":"%s","direction":"%s","freeswitch_host":"%s"}',
+    sip_token(did), sip_token(ani), direction, sip_token(fs_host))
 
 local result = freeswitch.API():execute("uuid_audio_fork",
     uuid .. " start " .. gateway_ws .. "/voice/" .. uuid .. " mono 16000 " .. meta)

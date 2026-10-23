@@ -11,7 +11,7 @@ from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 
-from ..exceptions import TelephonyProviderError
+from ..exceptions import TelephonyProviderError, TelephonyRateLimited
 from ..interface import ISmsProvider, ITelephonyProvider, InboundSyncResult, InboundUrls, NormalizedInboundCall
 from ..registry import SmsProviderRegistry, TelephonyProviderRegistry
 
@@ -49,6 +49,7 @@ def _expected_signature(auth_token: str, base_url: str, nonce: str, version: str
 
 class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
     PROVIDER_NAME = "vobiz"
+    supports_campaign_outbound = True
     # Tests replace this with an httpx.MockTransport.
     _http_transport: httpx.AsyncBaseTransport | None = None
 
@@ -91,9 +92,14 @@ class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
             body["ring_method"] = "POST"
 
         endpoint = f"{_BASE_URL}/v1/Account/{self._auth_id}/Call/"
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with self._client() as client:
             resp = await client.post(endpoint, json=body, headers=self._headers)
 
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After", "")
+            raise TelephonyRateLimited(
+                "Rate limited by Vobiz", retry_after=int(retry_after) if retry_after.isdigit() else None,
+            )
         if resp.status_code != 201:
             raise TelephonyProviderError(f"Vobiz initiate_call returned {resp.status_code}: {resp.text}")
 

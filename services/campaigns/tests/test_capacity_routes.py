@@ -205,7 +205,8 @@ async def test_bad_platform_values_are_400_and_change_nothing(scratch_pool, api)
     for field, value in PLATFORM_BAD:
         resp = await api.put("/capacity/platform", json=_mutated(PLATFORM_BODY, field, value), headers=OPERATOR)
         assert resp.status_code == 400, (field, value, resp.text)
-        assert all(set(e) == {"loc", "msg"} for e in resp.json()["detail"])
+        detail = resp.json()["detail"]
+        assert isinstance(detail, str) or all(set(e) == {"loc", "msg"} for e in detail), (field, value, detail)
     assert await _snapshot(scratch_pool) == before
 
 

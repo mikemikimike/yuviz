@@ -22,7 +22,7 @@ from .dial_request import DialRequestClient
 log = logging.getLogger(__name__)
 
 CheckId = Literal[
-    "agent_unavailable", "caller_id_missing", "caller_id_not_owned", "caller_id_not_routed_to_agent",
+    "agent_unavailable", "caller_id_missing", "caller_id_not_owned",
     "no_pending_contacts", "timezone_invalid", "provider_not_ready", "provider_not_campaign_capable",
     "no_healthy_sip_node", "campaign_cap_above_tenant_cap",
 ]
@@ -129,10 +129,6 @@ async def _caller_id_checks(campaign: dict, tenant_id: UUID, dial_client: DialRe
 
 async def _sip_checks(campaign: dict, route: dict, dial_client: DialRequestClient) -> list[Check]:
     checks = []
-    if route["did_agent_id"] != campaign["agent_id"]:
-        checks.append(_block(
-            "caller_id_not_routed_to_agent", "caller_id", "the caller ID is not assigned to this campaign's agent",
-        ))
     if not await dial_client.probe():
         checks.append(_block("no_healthy_sip_node", "caller_id", "no SIP node is available to place calls"))
     return checks

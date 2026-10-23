@@ -4,13 +4,27 @@ from __future__ import annotations
 
 import csv
 import io
-from typing import Any
+import re
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from libs.tenancy import platform_conn, tenant_conn
 
-from . import db, originate
+from . import attempts, capacity, db
 
 _PHONE_SEPARATORS = str.maketrans("", "", " -().")
+_DIAL_NUMBER_RE = re.compile(r"\+?[0-9]{3,15}")
+
+
+@dataclass(frozen=True)
+class Claimed:
+    contact: dict[str, Any]
+    attempt: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class Waiting:
+    reason: capacity.WaitReason | None
 
 
 def parse_contacts_csv(content: bytes) -> list[dict[str, str]]:
@@ -33,7 +47,7 @@ def parse_contacts_csv(content: bytes) -> list[dict[str, str]]:
         if not phone:
             continue
         phone = phone.translate(_PHONE_SEPARATORS)
-        if not originate.is_valid_dial_number(phone):
+        if _DIAL_NUMBER_RE.fullmatch(phone) is None:
             invalid_rows.append(row_num)
             continue
         contacts.append({"phone_number": phone, "name": (row.get(name_col) or "").strip() if name_col else ""})
@@ -89,6 +103,7 @@ async def claim_next_pending(campaign_id: Any, *, platform_scoped: bool = False)
     async with conn_cm as conn:
         row = await conn.fetchrow(
             "SELECT * FROM campaign_contacts WHERE campaign_id = $1 AND status = 'pending' "
+            "AND (next_attempt_at IS NULL OR next_attempt_at <= now()) "
             "ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED",
             campaign_id,
         )
@@ -100,6 +115,46 @@ async def claim_next_pending(campaign_id: Any, *, platform_scoped: bool = False)
             row["id"],
         )
         return dict(updated)
+
+
+async def peek_next_due(campaign_id: Any) -> dict[str, Any] | None:
+    """The next contact claim_next_due would take; no lock, so the worker can run its external pre-checks first."""
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="campaign-by-id") as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM campaign_contacts WHERE campaign_id = $1 AND status = 'pending' "
+            "AND (next_attempt_at IS NULL OR next_attempt_at <= now()) ORDER BY created_at LIMIT 1",
+            campaign_id,
+        )
+    return dict(row) if row is not None else None
+
+
+async def claim_next_due(
+    campaign: dict[str, Any], *, contact_id: Any, path: attempts.Path, provider: str | None, cps_scope: str,
+) -> Claimed | Waiting:
+    """Admit, claim the pre-checked contact and reserve its first send in one transaction."""
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="campaign-dial-state") as conn:
+        await conn.execute(attempts.ADMISSION_LOCK)
+        await conn.execute("SELECT 1 FROM campaigns WHERE id = $1 FOR UPDATE", campaign["id"])
+        reason = await capacity.admit(conn, campaign, cps_scope)
+        if reason is not None:
+            await capacity.write_wait_reason(conn, campaign["id"], reason)
+            return Waiting(reason)
+        contact = await conn.fetchrow(
+            "UPDATE campaign_contacts SET status = 'calling', attempt_count = attempt_count + 1, last_attempted_at = now() "
+            "WHERE id = $1 AND campaign_id = $2 AND status = 'pending' "
+            "AND (next_attempt_at IS NULL OR next_attempt_at <= now()) AND id IN "
+            "(SELECT id FROM campaign_contacts WHERE id = $1 FOR UPDATE SKIP LOCKED) RETURNING *",
+            contact_id, campaign["id"],
+        )
+        if contact is None:
+            return Waiting(None)
+        attempt = await attempts.create_attempt(
+            conn, campaign=campaign, contact=dict(contact), path=path, provider=provider, cps_scope=cps_scope,
+        )
+        await capacity.write_wait_reason(conn, campaign["id"], None)
+    return Claimed(dict(contact), attempt)
 
 
 async def release_claim(contact_id: Any, *, platform_scoped: bool = False) -> None:

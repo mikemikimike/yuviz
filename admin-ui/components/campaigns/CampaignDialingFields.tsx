@@ -24,15 +24,19 @@ export function validateDialing(v: DialingValues): Record<string, string> {
   return errors;
 }
 
-// Maps a server error to a form field: list detail by `loc`, string detail by its leading token.
+const FORM_FIELDS = ["caller_id", "max_attempts", "retry_gap_minutes", "max_concurrent_calls"];
+
+// Maps a server error to a form field: list detail by `loc`, string detail by a leading field token.
 export function serverFieldError(e: unknown): { field: string | null; message: string } {
   if (!(e instanceof ApiError)) return { field: null, message: String(e) };
   const raw = e.body?.detail;
   if (Array.isArray(raw)) {
     const loc = raw[0]?.loc;
-    return { field: Array.isArray(loc) ? String(loc[loc.length - 1]) : null, message: e.detail };
+    const last = Array.isArray(loc) ? String(loc[loc.length - 1]) : null;
+    return { field: last && FORM_FIELDS.includes(last) ? last : null, message: e.detail };
   }
-  return { field: e.detail.split(" ")[0], message: e.detail };
+  const lead = e.detail.split(" ")[0];
+  return { field: FORM_FIELDS.includes(lead) ? lead : null, message: e.detail };
 }
 
 interface Props {
@@ -90,7 +94,10 @@ export function CampaignDialingFields({ values, onChange, callerIds, errors = {}
               onChange={(e) => set({ caller_id: e.target.value })}
               placeholder="5000"
             />
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setForceCustom(false)}>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => {
+                setForceCustom(false);
+                set({ caller_id: "" });
+              }}>
               Use a registered number
             </button>
           </div>

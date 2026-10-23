@@ -108,10 +108,6 @@ async def _caller_id_not_owned(pool, camp):
     await pool.execute("UPDATE campaigns SET caller_id = '+14155550999' WHERE id = $1", camp["id"])
 
 
-async def _caller_id_not_routed(pool, camp):
-    await pool.execute("UPDATE phone_numbers SET agent_id = NULL WHERE tenant_id = $1", camp["tenant_id"])
-
-
 async def _no_contacts(pool, camp):
     await pool.execute("UPDATE campaign_contacts SET status = 'completed' WHERE campaign_id = $1", camp["id"])
 
@@ -124,7 +120,6 @@ _CASES = {
     "agent_unavailable": (_break_agent_missing, {}, True),
     "caller_id_missing": (_caller_id_missing, {}, True),
     "caller_id_not_owned": (_caller_id_not_owned, {}, True),
-    "caller_id_not_routed_to_agent": (_caller_id_not_routed, {}, True),
     "no_pending_contacts": (_no_contacts, {}, True),
     "timezone_invalid": (_bad_timezone, {}, True),
 }

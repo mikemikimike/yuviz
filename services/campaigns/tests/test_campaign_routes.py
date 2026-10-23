@@ -121,7 +121,7 @@ async def test_effective_limit_is_the_lower_of_campaign_and_tenant_caps(scratch_
 
 
 _BLOCK_IDS = [
-    "agent_unavailable", "caller_id_missing", "caller_id_not_owned", "caller_id_not_routed_to_agent",
+    "agent_unavailable", "caller_id_missing", "caller_id_not_owned",
     "no_pending_contacts", "timezone_invalid", "provider_not_ready", "provider_not_campaign_capable",
     "no_healthy_sip_node",
 ]
@@ -135,8 +135,6 @@ async def _break(pool, api, world, check_id, monkeypatch):
         await pool.execute("UPDATE campaigns SET caller_id = NULL WHERE id = $1", cid)
     elif check_id == "caller_id_not_owned":
         await pool.execute("UPDATE campaigns SET caller_id = '+14155550999' WHERE id = $1", cid)
-    elif check_id == "caller_id_not_routed_to_agent":
-        await pool.execute("UPDATE phone_numbers SET agent_id = NULL WHERE tenant_id = $1", world["tenant_id"])
     elif check_id == "no_pending_contacts":
         await pool.execute("UPDATE campaign_contacts SET status = 'completed' WHERE campaign_id = $1", cid)
     elif check_id == "timezone_invalid":

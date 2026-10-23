@@ -7,11 +7,14 @@ import {
   updateTenant, updateTenantConcurrency,
 } from "@/lib/api";
 import { ACTIVE_TENANT_STORAGE_KEY } from "@/components/AppShell";
+import { CapacityCard } from "@/components/CapacityCard";
 import { Modal } from "@/components/Modal";
 import { useActiveTenant } from "@/lib/useActiveTenant";
+import { useConnectionAccess } from "@/lib/useConnectionAccess";
 
 export default function TenantsPage() {
   const { tenant: activeTenant, isAllTenants } = useActiveTenant();
+  const { checked, isPlatformOperator } = useConnectionAccess();
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [agentCounts, setAgentCounts] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
@@ -200,6 +203,8 @@ export default function TenantsPage() {
       </div>
 
       {error && <div className="error-banner">{error}</div>}
+
+      {checked && isPlatformOperator && <CapacityCard />}
 
       <div className="card">
         {loading ? (
