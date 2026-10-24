@@ -186,7 +186,7 @@ start_webcall() {
 start_clinic_service() {
   _require JWT_SECRET || return 0
   cd "$REPO"
-  python3 -m services.clinic   # port from CLINIC_SERVICE_URL (default 8700)
+  PORT=8700 python3 -m services.clinic
 }
 
 # ── Block 14: Admin UI (Next.js, port 3000) ───────────────────────────────────
@@ -202,8 +202,7 @@ verify() {
       "$(_url_port "${CONFIG_SERVICE_URL:-}" 8000)" "$(_url_port "${KNOWLEDGE_SERVICE_URL:-}" 8100)" \
       "$(_url_port "${NEXT_PUBLIC_DID_SERVICE_URL:-}" 8200)" \
       "$(_url_port "${CAMPAIGNS_SERVICE_URL:-}" 8400)" "$(_url_port "${TOOLEXEC_SERVICE_URL:-}" 8600)" \
-      "$(_url_port "${CLINIC_SERVICE_URL:-}" 8700)" \
-      "$(_url_port "${TELEPHONY_SERVICE_URL:-}" 8750)" 50051 50052 10000 "${GATEWAY_LISTEN_PORT:-8080}" 3000; do
+      "$(_url_port "${CLINIC_SERVICE_URL:-}" 8700)" "$(_url_port "${TELEPHONY_SERVICE_URL:-}" 8750)" 50051 50052 10000 "${GATEWAY_LISTEN_PORT:-8080}" 3000; do
     nc -z localhost "$port" 2>/dev/null && echo "  :$port  OPEN" || echo "  :$port  CLOSED"
   done
 

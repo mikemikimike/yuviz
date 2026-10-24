@@ -166,8 +166,8 @@ class SarvamTTS:
                 self._pinned[key] = audio
 
     async def prewarm(self, languages: list[str]) -> None:
-        """Pins the filler phrases for each language (turn-1 and tool-call fillers share one pool),
-        once per voice instance, so "one moment" plays without a round trip."""
+        """Pins the filler phrases for each language (the tool-call pool, which the turn-1 filler is also
+        drawn from), once per voice instance, so a "one moment" plays without a round trip."""
         from ...i18n import tool_fillers
 
         todo = {}

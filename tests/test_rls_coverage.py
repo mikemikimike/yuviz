@@ -238,6 +238,9 @@ _EXPLICIT_OVERRIDE_REASONS = {
     # Retrieval hot path: parallel search branches and the post-response log writer have no request context
     # of their own (separate tasks), so they name the tenant the resolved plan belongs to.
     "retrieval-search", "retrieval-log",
+    # Clinic workers act for the row's own tenant after a cross-tenant claim; the seed script names its tenant.
+    "clinic-reminder-dial", "clinic-tool-call", "clinic-outbox-deliver", "clinic-outbox-done", "clinic-outbox-failed",
+    "seed-clinic-demo",
 }
 
 # Every platform_conn(reason=...) literal; a new bypass must be added here.
@@ -247,6 +250,10 @@ _BYPASS_REASONS = {
     "identity-resolution", "users-null-tenant-listing", "users-admin-by-id",
     "users-create", "users-change-password", "users-email-change",
     "tenants-out-of-rls-scope", "phone-numbers-prewarm",
+    # Config startup and tenant update: a read-only SELECT of the live tenants (a table outside RLS), written to
+    # Redis as tenant:{slug} because the Gateway cannot fall back to Postgres for its VAD and timer settings.
+    # Nothing read here is returned to a caller.
+    "tenants-prewarm",
     "agents-by-id", "call-flow-by-id", "carriers-by-id", "phone-numbers-by-id", "phone-numbers-did-lookup",
     "provider-configs-by-id", "telephony-configs-by-id", "tool-provider-configs-by-id",
     "calls-platform-read", "audit-log-platform-read",
@@ -281,6 +288,9 @@ _BYPASS_REASONS = {
     # request field, and the only thing that escapes the connection is a
     # boolean the caller never sees — disconnect returns a constant body.
     "oauth-shared-grant-check",
+    # Clinic: one worker leases due rows across tenants; the bearer key is what names the tenant;
+    # originate results are matched by FreeSWITCH job uuid, never by tenant-supplied input.
+    "clinic-outbox-claim", "clinic-reminder-claim", "clinic-reminder-job-event", "clinic-tool-key-lookup",
 }
 
 # Platform-branch mutations with genuinely no tenant to stamp.
