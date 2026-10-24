@@ -297,6 +297,25 @@ async def test_success_maps_to_success_and_returns_only_data_projection():
     assert result.payload == {"order_id": "o1"}
 
 
+async def test_oversized_data_is_truncated_with_a_marker_before_it_reaches_the_model():
+    client = _FakeToolExecClient({"chain_status": "success", "data": {"blob": "x" * 2_000_000}})
+
+    result = await ApiExecExecutor(client).execute(_request())
+
+    assert result.status == ToolStatus.SUCCESS
+    assert result.payload["truncated"] is True
+    assert len(result.payload["data_excerpt"]) <= 6000
+    assert len(json.dumps(result.payload)) < 7000
+
+
+async def test_data_under_the_cap_is_passed_through_untouched():
+    client = _FakeToolExecClient({"chain_status": "success", "data": {"blob": "x" * 1000}})
+
+    result = await ApiExecExecutor(client).execute(_request())
+
+    assert result.payload == {"blob": "x" * 1000}
+
+
 async def test_partial_maps_to_failed_with_partial_flag():
     client = _FakeToolExecClient({"chain_status": "partial", "data": {}, "error": "b failed"})
     executor = ApiExecExecutor(client)
