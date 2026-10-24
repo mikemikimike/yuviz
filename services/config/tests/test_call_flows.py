@@ -12,7 +12,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from libs.tenancy import current_scope, set_caller_tenant, set_target_tenant
-from services.config import agents, auth, cache, call_flows, provider_configs
+from services.config import agents, auth, cache, call_flows, provider_configs, tenants
 from services.config.app import app
 
 
@@ -456,3 +456,37 @@ async def test_agent_deactivation_or_delete_reaches_a_warm_runtime_cache(test_te
         await agents.soft_delete_agent(deleted["id"], tenant_slug=test_tenant["slug"])
         after_delete = await call_flows.get_published_for_runtime(test_tenant["slug"], flow["id"])
         assert after_delete["agent_slugs"] == {}
+
+
+def _dial_graph(destination: str) -> dict:
+    return {
+        "version": 1,
+        "nodes": [START, {"id": "n2", "type": "dial", "data": {"destination": destination}}],
+        "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
+    }
+
+
+@pytest.mark.parametrize("destination", ["+442071234567", "sip:x@attacker.example", "+8821234567890"])
+async def test_publish_refuses_dial_outside_the_default_transfer_policy(test_tenant, destination):
+    flow = await _flow(test_tenant)
+    with _as_tenant(test_tenant["id"]):
+        with pytest.raises(call_flows.CallFlowValidationError) as exc:
+            await call_flows.publish(flow["id"], _dial_graph(destination))
+    assert [(e.id, e.field) for e in exc.value.errors] == [("n2", "destination")]
+
+
+@pytest.mark.parametrize("destination", ["+18005550100", "1001"])
+async def test_publish_allows_a_domestic_dial(test_tenant, destination):
+    flow = await _flow(test_tenant)
+    with _as_tenant(test_tenant["id"]):
+        published = await call_flows.publish(flow["id"], _dial_graph(destination))
+    assert published["config_version"] == flow["config_version"] + 1
+
+
+async def test_publish_allows_international_dial_only_after_opt_in_but_never_premium(test_tenant):
+    flow = await _flow(test_tenant)
+    await tenants.update_tenant(test_tenant["id"], allow_international_transfers=True)
+    with _as_tenant(test_tenant["id"]):
+        await call_flows.publish(flow["id"], _dial_graph("+442071234567"))
+        with pytest.raises(call_flows.CallFlowValidationError):
+            await call_flows.publish(flow["id"], _dial_graph("+8821234567890"))

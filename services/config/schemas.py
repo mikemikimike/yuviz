@@ -64,6 +64,11 @@ class TenantConcurrencyUpdate(BaseModel):
     max_concurrent_calls: int = Field(ge=1, le=10_000)
 
 
+class TenantTransferPolicyUpdate(BaseModel):
+    home_calling_code: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,2}$")
+    allow_international_transfers: bool | None = None
+
+
 class SystemPromptGenerate(BaseModel):
     name: str
     purpose: str = ""

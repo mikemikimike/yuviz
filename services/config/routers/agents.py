@@ -7,6 +7,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from libs.config_sdk.dial_targets import transfer_policy_problem
 from libs.config_sdk.languages import LANGUAGES
 from libs.tenancy import tenant_conn
 
@@ -409,10 +410,16 @@ async def update_agent(
     body: AgentUpdate,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
-    await _resolve_tenant(tenant_slug, current_user)
+    tenant = await _resolve_tenant(tenant_slug, current_user)
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
+    if fields.get("transfer_destination"):
+        problem = transfer_policy_problem(
+            fields["transfer_destination"], tenants_service.transfer_policy(tenant),
+        )
+        if problem:
+            raise HTTPException(status_code=422, detail=f"transfer_destination: {problem}")
     return await agents_service.update_agent(
         agent_id, tenant_slug=tenant_slug,
         user_id=current_user.id, user_email=current_user.email, **fields,

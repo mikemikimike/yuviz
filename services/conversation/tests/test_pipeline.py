@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from libs.config_sdk.dial_targets import TransferPolicy
 from libs.config_sdk.workflow import starter_graph
 from libs.config_sdk import (
     Agent,
@@ -144,7 +145,8 @@ def _make_handler(
     workflow: dict | None = None, node_tools: list[str] | None = None,
     node_knowledge: list[str] | None = None, transcripts=None,
     agent_language: str | None = None, language_mode: str | None = None, stt_language: str | None = None,
-    supported_languages: tuple[str, ...] | None = None, agent_id: str = "a1", **handler_kwargs,
+    supported_languages: tuple[str, ...] | None = None, agent_id: str = "a1",
+    allow_international_transfers: bool = False, home_calling_code: str = "1", **handler_kwargs,
 ) -> PipelineConversationHandler:
     """Build a handler from a hand-built RuntimeConfig/ProviderBundle, no IConfigProvider."""
     now = datetime.now(timezone.utc)
@@ -155,6 +157,7 @@ def _make_handler(
         transfer_timeout_ms=None,
         default_stt_config_id=None, default_llm_config_id=None, default_tts_config_id=None,
         config_version=1, updated_at=now,
+        home_calling_code=home_calling_code, allow_international_transfers=allow_international_transfers,
     )
     # Every agent runs a graph; explicit workflow= is for graph tests.
     # node_tools / node_knowledge land on the start node for per-stage scoping.
@@ -1407,8 +1410,59 @@ async def test_transfer_directive_sip_uri_from_model_is_never_dialled():
     transfers = await _directive_transfers(
         '[[TRANSFER type="cold" destination="sip:attacker@evil.example.com" reason="x"]]',
         transfer_type="cold", transfer_destination="sip:desk@pbx.acme.example",
+        allow_international_transfers=True,
     )
     assert [t.destination for t in transfers] == ["sip:desk@pbx.acme.example"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dest", ["+442071234567", "sip:desk@pbx.acme.example", "+8821234567890"])
+async def test_transfer_directive_refuses_stored_destination_outside_tenant_policy(dest):
+    """A value saved before the policy existed is still refused at call time."""
+    transfers = await _directive_transfers(
+        '[[TRANSFER reason="x"]]', transfer_type="cold", transfer_destination=dest,
+    )
+    assert transfers == []
+
+
+@pytest.mark.asyncio
+async def test_transfer_directive_dials_international_destination_after_opt_in():
+    transfers = await _directive_transfers(
+        '[[TRANSFER reason="x"]]', transfer_type="cold", transfer_destination="+442071234567",
+        allow_international_transfers=True,
+    )
+    assert [t.destination for t in transfers] == ["+442071234567"]
+
+
+@pytest.mark.asyncio
+async def test_transfer_directive_refuses_premium_rate_even_after_opt_in():
+    transfers = await _directive_transfers(
+        '[[TRANSFER reason="x"]]', transfer_type="cold", transfer_destination="+8821234567890",
+        allow_international_transfers=True,
+    )
+    assert transfers == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dest", ["1001", "+18005550100"])
+async def test_transfer_directive_still_dials_domestic_destination(dest):
+    transfers = await _directive_transfers(
+        '[[TRANSFER reason="x"]]', transfer_type="cold", transfer_destination=dest,
+    )
+    assert [t.destination for t in transfers] == [dest]
+
+
+@pytest.mark.parametrize("dest, opted_in, expected", [
+    ("+442071234567", False, None), ("+8821234567890", True, None),
+    ("+442071234567", True, "+442071234567"), ("+18005550100", False, "+18005550100"),
+])
+def test_escalation_transfer_obeys_tenant_policy(dest, opted_in, expected):
+    handler = _make_handler(
+        _make_stt(), _make_llm(), _make_tts(), transfer_type="cold", transfer_destination=dest,
+        escalation_threshold=0, allow_international_transfers=opted_in,
+    )
+    request = handler.record_guardrail_violation("s1")
+    assert (request.destination if request else None) == expected
 
 
 @pytest.mark.asyncio
@@ -2278,6 +2332,7 @@ def test_transfer_instruction_injected_for_valid_sip_uri():
         _make_stt(), _make_llm(), _make_tts(),
         system_prompt="You are Alex.",
         transfer_type="cold", transfer_destination="sip:agent@example.com",
+        allow_international_transfers=True,
     )
     assert 'destination="sip:agent@example.com"' in handler._workflow.system_prompt()
 
@@ -2309,6 +2364,9 @@ def test_transfer_instruction_absent_for_unknown_transfer_type():
     assert "[[TRANSFER" not in handler._workflow.system_prompt()
 
 
+_OPEN = TransferPolicy(allow_international=True)
+
+
 @pytest.mark.parametrize("dest", [
     "1001\n\napi hupall",
     "1001\n",
@@ -2318,32 +2376,32 @@ def test_transfer_instruction_absent_for_unknown_transfer_type():
 ])
 def test_transfer_destination_problem_refuses_esl_injection(dest):
     from ..pipeline import transfer_destination_problem
-    assert transfer_destination_problem(dest) is not None
+    assert transfer_destination_problem(dest, _OPEN) is not None
 
 
 def test_transfer_destination_problem_diagnoses():
     from ..pipeline import transfer_destination_problem
-    assert transfer_destination_problem(None) is not None
-    assert transfer_destination_problem("   ") is not None
-    assert transfer_destination_problem("sip:x") is not None
-    assert transfer_destination_problem("call me maybe") is not None
-    assert transfer_destination_problem("1001") is None
-    assert transfer_destination_problem("+18005550100") is None
-    assert transfer_destination_problem("sip:agent@example.com") is None
-    assert transfer_destination_problem("sips:agent@host.tld") is None
+    assert transfer_destination_problem(None, _OPEN) is not None
+    assert transfer_destination_problem("   ", _OPEN) is not None
+    assert transfer_destination_problem("sip:x", _OPEN) is not None
+    assert transfer_destination_problem("call me maybe", _OPEN) is not None
+    assert transfer_destination_problem("1001", _OPEN) is None
+    assert transfer_destination_problem("+18005550100", _OPEN) is None
+    assert transfer_destination_problem("sip:agent@example.com", _OPEN) is None
+    assert transfer_destination_problem("sips:agent@host.tld", _OPEN) is None
     # The Gateway only routes lowercase schemes as SIP URIs (EslClient::looks_like_sip_uri).
-    assert transfer_destination_problem("SIPS:agent@host.tld") is not None
+    assert transfer_destination_problem("SIPS:agent@host.tld", _OPEN) is not None
 
 
 @pytest.mark.parametrize("dest", ["788", "5005"])
 def test_transfer_destination_problem_names_platform_ai_numbers(dest):
     from ..pipeline import transfer_destination_problem
-    assert "own AI numbers" in transfer_destination_problem(dest)
+    assert "own AI numbers" in transfer_destination_problem(dest, _OPEN)
 
 
 def test_transfer_destination_problem_names_loopback_uri():
     from ..pipeline import transfer_destination_problem
-    assert "points at this host" in transfer_destination_problem("sip:3500@127.0.0.1:5080")
+    assert "points at this host" in transfer_destination_problem("sip:3500@127.0.0.1:5080", _OPEN)
 
 
 # ---------------------------------------------------------------------------

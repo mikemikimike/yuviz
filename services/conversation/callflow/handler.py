@@ -11,6 +11,8 @@ import asyncio
 import logging
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
+from libs.config_sdk.dial_targets import TransferPolicy, transfer_policy_problem
+
 from ..directives import TransferRequest, TransferType
 from ..session import HandlerResponse
 from ..session_finalizer import FinalizationResult, FinalizationStatus
@@ -46,6 +48,7 @@ class CallFlowConversationHandler:
         handoff: Callable[[str, dict[str, Any]], Awaitable[Any | None]],
         voice_for: Callable[[str], Awaitable[Any | None]],
         agent_slugs: dict[str, str],
+        transfer_policy: TransferPolicy,
     ) -> None:
         self._runner = runner
         self._default_tts = tts
@@ -57,6 +60,7 @@ class CallFlowConversationHandler:
         self._handoff = handoff
         self._voice_for = voice_for
         self._agent_slugs = agent_slugs
+        self._transfer_policy = transfer_policy
 
         self._delegate: Any | None = None
         self._events: asyncio.Queue[_FlowEvent] = asyncio.Queue()
@@ -114,6 +118,11 @@ class CallFlowConversationHandler:
                 return
             elif isinstance(action, Dial):
                 self._ended = True
+                if transfer_policy_problem(action.destination, self._transfer_policy):
+                    # A flow published before the tenant's policy tightened; never dial it.
+                    log.warning("callflow: dial destination refused by transfer policy session=%s", self._session_id)
+                    await self.out_responses.put(HandlerResponse(tts_payloads=pcm, end_call=True))
+                    return
                 await self.out_responses.put(HandlerResponse(
                     tts_payloads=pcm,
                     transfer_request=TransferRequest(

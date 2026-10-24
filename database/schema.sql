@@ -1184,6 +1184,16 @@ ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_max_concurrent_calls_check
 ALTER TABLE tenants ADD  CONSTRAINT tenants_max_concurrent_calls_check
     CHECK (max_concurrent_calls IS NULL OR max_concurrent_calls >= 1);
 
+-- Transfer-destination policy (libs/config_sdk/dial_targets.py TransferPolicy). Domestic =
+-- no international prefix, or an international-format number under home_calling_code.
+-- Default is closed: international numbers and external SIP hosts need the opt-in.
+-- Premium-rate/satellite ranges are refused regardless.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS home_calling_code TEXT NOT NULL DEFAULT '1';
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS allow_international_transfers BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_home_calling_code_check;
+ALTER TABLE tenants ADD  CONSTRAINT tenants_home_calling_code_check
+    CHECK (home_calling_code ~ '^[1-9][0-9]{0,2}$');
+
 -- Mid-call stage. NULL = never transferred; readers COALESCE to 'ai'.
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS live_stage TEXT;
 ALTER TABLE calls DROP CONSTRAINT IF EXISTS calls_live_stage_check;

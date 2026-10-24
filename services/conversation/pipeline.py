@@ -17,9 +17,11 @@ from typing import Any, AsyncGenerator
 
 from libs.config_sdk import RuntimeConfig, validate_transfer_timeout_ms
 from libs.config_sdk.dial_targets import (
+    TransferPolicy,
     is_platform_ai_number,
     is_sip_uri_shape,
     is_transfer_destination,
+    transfer_policy_problem,
 )
 from libs.knowledge_sdk import IKnowledgeProvider, RetrievalPolicy
 
@@ -411,14 +413,14 @@ def _build_transfer_instruction(
 # Runtime ESL-injection allowlist for transfer destinations, including
 # workflow-rendered ones. Must match EslClient.cpp's is_safe_destination;
 # never relax it for convenience.
-def transfer_destination_problem(destination: str | None) -> str | None:
+def transfer_destination_problem(destination: str | None, policy: TransferPolicy) -> str | None:
     """None when the destination looks routable; otherwise a human-readable
     diagnosis for the session-setup error log. Checks the exact value the
     Gateway will receive (no strip), with the Gateway's own allowlist."""
     if destination is None or not destination.strip():
         return "transfer_destination is empty"
     if is_transfer_destination(destination):
-        return None
+        return transfer_policy_problem(destination, policy)
     if is_platform_ai_number(destination):
         return (
             f"transfer_destination {destination!r} is one of this platform's own AI numbers "
@@ -533,6 +535,9 @@ class PipelineConversationHandler:
         self._call_started_at = time.monotonic()
         self._transfer_type_default        = runtime_config.policies.transfer_type
         self._transfer_destination_default = runtime_config.policies.transfer_destination
+        self._transfer_policy = TransferPolicy(
+            runtime_config.tenant.home_calling_code, runtime_config.tenant.allow_international_transfers,
+        )
         self._escalation_threshold         = runtime_config.policies.escalation_threshold
         # Caller-ID resolution inputs (see transfer_engine._resolve_caller_id).
         self._caller_id_policy  = runtime_config.policies.caller_id_policy
@@ -552,7 +557,7 @@ class PipelineConversationHandler:
                 tt, runtime_config.agent.slug,
             )
         elif tt and tt != "none":
-            problem = transfer_destination_problem(self._transfer_destination_default)
+            problem = transfer_destination_problem(self._transfer_destination_default, self._transfer_policy)
             if problem:
                 log.error(
                     "Transfer misconfigured for agent %s (transfer_type=%s): %s "
@@ -1126,7 +1131,7 @@ class PipelineConversationHandler:
                 (d for d in directives if isinstance(d, TransferDirective)), None,
             )
             directive_problem = (
-                transfer_destination_problem(self._transfer_destination_default)
+                transfer_destination_problem(self._transfer_destination_default, self._transfer_policy)
                 if transfer_directive is not None and self._transfer_type_default != "none" else None
             )
             if directive_problem is not None:
@@ -1226,6 +1231,7 @@ class PipelineConversationHandler:
             session_id=session_id, tenant_id=self._tenant_id, call_id=self._call_id,
             transfer_type=self._transfer_type_default,
             transfer_destination=destination_override or self._transfer_destination_default,
+            transfer_policy=self._transfer_policy,
             escalation_threshold=self._escalation_threshold,
             already_requested=self._session(session_id).transfer_requested,
             caller_id_policy=self._caller_id_policy,
@@ -1399,7 +1405,7 @@ class PipelineConversationHandler:
         # Category only: a rendered destination is caller-derived, so never logged.
         if destination is None:
             problem = "destination is empty or not built from call-context variables"
-        elif transfer_destination_problem(destination) is not None:
+        elif transfer_destination_problem(destination, self._transfer_policy) is not None:
             problem = "rendered destination failed the transfer allowlist"
         else:
             problem = None

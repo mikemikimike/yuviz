@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from libs.config_sdk.dial_targets import is_dial_number, is_transfer_destination
+from libs.config_sdk.dial_targets import (
+    TransferPolicy, is_dial_number, is_transfer_destination, transfer_policy_problem,
+)
 from services.config.schemas import AgentUpdate
 
 # Same shapes as tests/esl_client_test.cpp's kInjectedDestinations: the Gateway
@@ -85,3 +87,51 @@ def test_agent_update_rejects_bad_transfer_destination(value):
 def test_agent_update_accepts_real_values_and_clearing():
     AgentUpdate(transfer_destination="sip:agent@example.com", platform_did="+18005550100", custom_caller_id="1001")
     AgentUpdate(transfer_destination="", platform_did=None, custom_caller_id="")
+
+
+DEFAULT = TransferPolicy()
+OPEN = TransferPolicy(allow_international=True)
+
+
+@pytest.mark.parametrize("value", [
+    "1001", "+18005550100", "+12425550100", "5551234567",
+])
+def test_domestic_destinations_pass_the_default_policy(value):
+    assert transfer_policy_problem(value, DEFAULT) is None
+
+
+@pytest.mark.parametrize("value", [
+    "+442071234567", "00442071234567", "+919812345678", "sip:agent@example.com", "sips:a@evil.example:5061",
+])
+def test_international_and_external_sip_need_the_opt_in(value):
+    assert transfer_policy_problem(value, DEFAULT) is not None
+    assert transfer_policy_problem(value, OPEN) is None
+
+
+@pytest.mark.parametrize("value", [
+    "+19005550100", "+19765550100", "19005550100", "9005550100", "+881123456", "+8821234567890",
+    "+8835551234", "+870123456789", "+878123456789", "+9791234567", "+449091234567", "09091234567",
+    "00882123456789", "sip:+8821234567890@example.com", "sip:19005550100@example.com",
+])
+def test_premium_and_satellite_ranges_are_refused_even_when_opted_in(value):
+    assert transfer_policy_problem(value, OPEN) is not None
+    assert transfer_policy_problem(value, TransferPolicy(home_calling_code="882")) is not None
+
+
+@pytest.mark.parametrize("value", ["+442071234567", "+447911123456", "+4402071234567"])
+def test_home_calling_code_makes_a_country_domestic(value):
+    assert transfer_policy_problem(value, TransferPolicy(home_calling_code="44")) is None
+    assert transfer_policy_problem("+12125550100", TransferPolicy(home_calling_code="44")) is not None
+
+
+def test_allowlisted_sip_host_needs_no_opt_in(monkeypatch):
+    monkeypatch.setenv("VOICEAI_TRANSFER_SIP_HOSTS", "pbx.acme.example, other.example")
+    assert transfer_policy_problem("sip:desk@pbx.acme.example", DEFAULT) is None
+    assert transfer_policy_problem("sip:desk@eu.pbx.acme.example:5070", DEFAULT) is None
+    assert transfer_policy_problem("sip:desk@evilpbx.acme.example", DEFAULT) is not None
+    assert transfer_policy_problem("sip:desk@acme.example", DEFAULT) is not None
+
+
+@pytest.mark.parametrize("value", ["sip:a@b@c", "call me", "sip:x@127.0.0.1", "788"])
+def test_policy_refuses_what_is_not_a_transfer_destination(value):
+    assert transfer_policy_problem(value, OPEN) is not None

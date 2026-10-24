@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from libs.config_sdk.dial_targets import TransferPolicy, transfer_policy_problem
+
 from .directives import TransferDirective, TransferRequest, TransferType, coerce_transfer_type
 from .metrics import IMetrics, NullMetrics
 
@@ -79,6 +81,7 @@ class DecisionContext:
     custom_caller_id: str | None = None
     caller_number: str = ""
     waiting_experience: str = "announcement_moh"
+    transfer_policy: TransferPolicy = TransferPolicy()
 
 
 @dataclass(frozen=True)
@@ -162,6 +165,8 @@ class TransferDecisionEngine:
             return reject("transfer_disabled")
         if not destination:
             return reject("no_destination_configured")
+        if transfer_policy_problem(destination, ctx.transfer_policy):
+            return reject("destination_not_permitted")
 
         # caller_id is ignored by the gateway for cold transfers.
         request = TransferRequest(

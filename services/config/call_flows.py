@@ -12,6 +12,7 @@ import json
 import uuid
 from typing import Any
 
+from libs.config_sdk.dial_targets import transfer_policy_problem
 from libs.config_sdk.callflow import (
     CallFlowError,
     CallFlowValidationError as GraphInvalid,
@@ -114,6 +115,25 @@ async def _agent_reference_errors(
                     "available — it may have been deleted or deactivated. "
                     "Pick another.",
                 ))
+    return errs
+
+
+async def _dial_destination_errors(graph: dict[str, Any], tenant_id: Any) -> list[CallFlowError]:
+    """Editor errors for `dial` nodes whose destination is malformed or outside the tenant's transfer policy."""
+    dials = [
+        (str(n.get("id") or ""), str((n.get("data") or {}).get("destination") or ""))
+        for n in (graph.get("nodes") or [])
+        if isinstance(n, dict) and n.get("type") == "dial"
+    ]
+    dials = [(node_id, dest) for node_id, dest in dials if dest.strip()]  # _node_errors reports an unset one
+    if not dials:
+        return []
+    policy = tenants_service.transfer_policy(await tenants_service.get_tenant_by_id(tenant_id))
+    errs: list[CallFlowError] = []
+    for node_id, dest in dials:
+        problem = transfer_policy_problem(dest, policy)
+        if problem:
+            errs.append(CallFlowError("node", node_id, "destination", problem[0].upper() + problem[1:] + "."))
     return errs
 
 
@@ -385,6 +405,9 @@ async def publish(
         agent_errs = await _agent_reference_errors(conn, graph, current["tenant_id"])
         if agent_errs:
             raise CallFlowValidationError(agent_errs)
+        dial_errs = await _dial_destination_errors(graph, current["tenant_id"])
+        if dial_errs:
+            raise CallFlowValidationError(dial_errs)
         next_version = current["config_version"] + 1
         row = await conn.fetchrow(
             "UPDATE call_flows SET graph = $2::jsonb, graph_draft = $2::jsonb, "
