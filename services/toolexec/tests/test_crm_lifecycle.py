@@ -61,6 +61,14 @@ class Provider:
         return [r for r in self.requests if r.url.path.endswith(suffix)]
 
 
+class RejectsFirstRequest(Upstream):
+    """A CRM whose session ended early: 401 for the stale token, then normal."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        response = super().__call__(request)
+        return httpx.Response(401, json={}) if len(self.requests) == 1 else response
+
+
 @pytest.fixture
 def provider(monkeypatch) -> Provider:
     recorder = Provider()
@@ -188,6 +196,35 @@ async def test_a_slow_token_refresh_is_bounded_by_the_step_timeout_and_still_com
     row = await _connection(pool, connection)
     assert decrypt_tenant_secret(str(tenant["id"]), row["refresh_token_ref"]) == "rt-new-1"
     assert row["status"] == "connected"
+
+
+@pytest.mark.asyncio
+async def test_a_401_from_the_crm_refreshes_once_and_retries_with_the_new_token(
+    pool, tenant_agent, crm_cleanup, provider, monkeypatch,
+):
+    tenant, agent = tenant_agent
+    upstream = RejectsFirstRequest(body=zoho_body())
+    await _setup(pool, tenant, agent, monkeypatch, upstream)  # the stored expiry says the token is good
+    response = await _lookup(tenant, agent)
+
+    assert response.chain_status == "success"
+    assert len(provider.calls("/token")) == 1
+    assert [r.headers["authorization"] for r in upstream.requests] == ["Bearer at-1", "Bearer at-new-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_401_that_persists_after_the_refresh_fails_the_step_without_a_second_refresh(
+    pool, tenant_agent, crm_cleanup, provider, monkeypatch,
+):
+    tenant, agent = tenant_agent
+    upstream = Upstream(status=401, body={})
+    connection = await _setup(pool, tenant, agent, monkeypatch, upstream)
+
+    response = await _lookup(tenant, agent)
+
+    assert (response.chain_status, response.error) == ("failed", "http_status_401")
+    assert len(provider.calls("/token")) == 1 and len(upstream.requests) == 2
+    assert (await _connection(pool, connection))["status"] == "connected"
 
 
 @pytest.mark.asyncio

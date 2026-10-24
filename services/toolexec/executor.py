@@ -313,6 +313,15 @@ async def _within_step_deadline(awaitable: Any, deadline: float) -> Any:
         raise _StepFailure("timeout", "step_timeout") from None
 
 
+async def _credential_work(awaitable: Any, deadline: float) -> Any:
+    try:
+        return await _within_step_deadline(awaitable, deadline)
+    except auth_schemes.ReconnectRequired:
+        raise _StepFailure("unavailable", "reconnect_required")
+    except ValueError:
+        raise _StepFailure("unavailable", "credential_unavailable")
+
+
 def _coerce(value: Any, json_type: str) -> Any:
     if value is None:
         return None
@@ -810,14 +819,9 @@ async def _run_steps(
 
             hostname, allowed_ips = await resolve_and_validate_endpoint(url)
 
-            try:
-                injected_auth_keys = await _within_step_deadline(
-                    auth_schemes.apply(api_row, headers, query_params, effective_url=url), deadline,
-                )
-            except auth_schemes.ReconnectRequired:
-                raise _StepFailure("unavailable", "reconnect_required")
-            except ValueError:
-                raise _StepFailure("unavailable", "credential_unavailable")
+            injected_auth_keys = await _credential_work(
+                auth_schemes.apply(api_row, headers, query_params, effective_url=url), deadline,
+            )
 
             # Exclude auth-injected keys: never persist credentials, and rotating tokens would break the hash dedupe.
             resolved_arguments = {
@@ -861,20 +865,32 @@ async def _run_steps(
                     # (Google keeps a deleted event's id and refuses to reuse it).
                     body_fields[api_row["idempotency_body_field"]] = claimed.hex
 
-            request_timeout_ms = max(int((deadline - time.monotonic()) * 1000), 1)
             body_style = api_row.get("body_style", "json")
             json_body = body_fields if body_style == "json" and body_fields else None
             data_body = _form_fields(body_fields) if body_style == "form" and body_fields else None
 
-            try:
-                status_code, body, truncated = await asyncio.wait_for(
-                    _do_request(api_row["method"], url, headers, query_params, json_body, data_body,
-                                allowed_ips, request_timeout_ms),
-                    timeout=request_timeout_ms / 1000,
+            for attempt in (1, 2):
+                request_timeout_ms = max(int((deadline - time.monotonic()) * 1000), 1)
+                try:
+                    status_code, body, truncated = await asyncio.wait_for(
+                        _do_request(api_row["method"], url, headers, query_params, json_body, data_body,
+                                    allowed_ips, request_timeout_ms),
+                        timeout=request_timeout_ms / 1000,
+                    )
+                except (asyncio.TimeoutError, httpx.TimeoutException):
+                    # Keep the claim: a timed-out mutation may have landed.
+                    raise _StepFailure("timeout", "step_timeout")
+                if status_code != 401 or attempt == 2 or api_row["auth_scheme"] != "oauth2_authorization_code":
+                    break
+                # The stored expiry can be wrong (Salesforce reports none): refresh once and retry.
+                # A 401 means the request was not processed, so the retry cannot repeat a side effect.
+                if not await _credential_work(
+                    oauth.refresh_after_unauthorized(tenant_id, api_row["oauth_connection_id"]), deadline,
+                ):
+                    break
+                injected_auth_keys = await _credential_work(
+                    auth_schemes.apply(api_row, headers, query_params, effective_url=url), deadline,
                 )
-            except (asyncio.TimeoutError, httpx.TimeoutException):
-                # Keep the claim: a timed-out mutation may have landed.
-                raise _StepFailure("timeout", "step_timeout")
 
             if truncated:
                 # Keep the claim: whether the mutation landed is unknown.

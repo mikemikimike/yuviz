@@ -48,6 +48,7 @@ _platform_secret_resolver = CompositeSecretResolver()  # the PLATFORM resolver â
 
 _STATE_TTL_MINUTES = 10
 _EXPIRY_SKEW_SECONDS = 60
+_ASSUMED_ACCESS_TTL_S = 15 * 60
 _PROVIDER_TIMEOUT_S = 10.0
 _API_KEY_VERIFY_URLS = {"calcom": "https://api.cal.com/v2/me"}
 _REDIRECT_URI_ENV = "TOOLEXEC_OAUTH_REDIRECT_URI"
@@ -225,8 +226,14 @@ def _validated_api_base(spec: OAuthProvider, claim: Any) -> str:
     return claim
 
 
-def _expires_at(body: dict[str, Any]) -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(body.get("expires_in", 3600)))
+def _expires_at(body: dict[str, Any], provider: str) -> datetime.datetime:
+    expires_in = body.get("expires_in")
+    if expires_in is None:
+        # Salesforce never sends one and its org session timeout can be as short as 15 minutes,
+        # so assume the shortest. A 401 from the API forces a refresh whatever this says.
+        log.info("oauth_expires_in_missing", extra={"provider": provider})
+        expires_in = _ASSUMED_ACCESS_TTL_S
+    return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(expires_in))
 
 
 def _id_token_claims(id_token: str) -> dict[str, Any]:
@@ -357,7 +364,7 @@ async def complete_authorization(
             account_label, provider_sub = info.json().get("Email"), None if zuid is None else str(zuid)
         access_ref = encrypt_tenant_secret(tenant_id, access_token)
         refresh_ref = encrypt_tenant_secret(tenant_id, refresh_token)
-        access_expires_at = _expires_at(body)
+        access_expires_at = _expires_at(body, redeemed["provider"])
     except Exception:
         raise ValueError("oauth_connection_failed") from None
 
@@ -516,7 +523,20 @@ async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAu
     return token, spec, row["api_base_url"], row["auth_kind"]
 
 
-async def _refresh_serialized(tenant_id: str, row: Any, spec: OAuthProvider) -> str:
+async def refresh_after_unauthorized(tenant_id: str, connection_id: str) -> bool:
+    """The provider's API refused the access token (401) although the stored
+    expiry said it was good: refresh now. False when there is nothing to
+    refresh (a static API key); ReconnectRequired when the refresh token is dead."""
+    row = await _connection_row(tenant_id, connection_id)
+    if row is None or row["status"] != "connected":
+        raise ReconnectRequired
+    if row["auth_kind"] == "api_key":
+        return False
+    await _refresh_serialized(tenant_id, row, PROVIDERS[row["provider"]], force=True)
+    return True
+
+
+async def _refresh_serialized(tenant_id: str, row: Any, spec: OAuthProvider, *, force: bool = False) -> str:
     """Concurrent refreshes of one connection in this process run one at a time,
     and each re-reads the row once it holds the lock. A provider that rejects a
     reused refresh token (Salesforce with rotation on) answers a second
@@ -529,7 +549,8 @@ async def _refresh_serialized(tenant_id: str, row: Any, spec: OAuthProvider) -> 
         current = await _connection_row(tenant_id, row["id"])
         if current is None or current["status"] != "connected":
             raise ReconnectRequired
-        if not _expiring(current):
+        # Another caller refreshed while this one waited: use its token.
+        if current["access_token_ref"] != row["access_token_ref"] or not (force or _expiring(current)):
             return await auth_schemes.resolve_tenant_ref(tenant_id, current["access_token_ref"])
         return await _refresh(tenant_id, current, spec)
 
@@ -581,7 +602,7 @@ async def _refresh(tenant_id: str, row: Any, spec: OAuthProvider) -> str:
         new_refresh = body.get("refresh_token")
         access_ref = encrypt_tenant_secret(tenant_id, access_token)
         new_refresh_ref = encrypt_tenant_secret(tenant_id, new_refresh) if new_refresh else None
-        access_expires_at = _expires_at(body)
+        access_expires_at = _expires_at(body, spec.key)
     except Exception:
         raise ValueError("credential_unavailable") from None
 

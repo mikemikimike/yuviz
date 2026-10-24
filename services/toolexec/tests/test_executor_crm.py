@@ -325,7 +325,7 @@ async def test_a_missing_spoken_key_leaves_no_deterministic_line_but_the_chain_s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [401, 404, 500])
+@pytest.mark.parametrize("status", [403, 404, 500])  # 401 refreshes and retries: test_crm_lifecycle
 async def test_an_error_status_never_reaches_the_transform_or_the_step_row(
     pool, tenant_agent, crm_cleanup, monkeypatch, status,
 ):

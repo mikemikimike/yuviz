@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import dataclasses
+import datetime
 import hashlib
 import json
 import logging
@@ -544,6 +545,14 @@ async def test_a_dead_hubspot_refresh_token_flips_the_status_and_requires_reconn
     assert str(fake.requests[-1].url) == "https://api.hubspot.com/oauth/v3/token"
     row = await pool.fetchrow("SELECT status, refresh_token_ref FROM oauth_connections WHERE id = $1", connection["id"])
     assert row["status"] == "reconnect_needed" and row["refresh_token_ref"] is None
+
+
+def test_a_token_response_without_expires_in_assumes_the_shortest_salesforce_session(caplog):
+    with caplog.at_level(logging.INFO, logger="services.toolexec.oauth"):
+        expires_at = oauth._expires_at({"access_token": "x"}, "salesforce")
+    remaining = (expires_at - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    assert 14 * 60 < remaining <= 15 * 60
+    assert [r.message for r in caplog.records] == ["oauth_expires_in_missing"]
 
 
 def test_every_oauth_provider_asks_for_a_scope_without_a_preset():
