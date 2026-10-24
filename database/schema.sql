@@ -1156,6 +1156,24 @@ DO $$ BEGIN
     OR (oauth_connection_id IS NOT NULL AND endpoint_url ~ '^/'))$sql$;
 END $$;
 
+-- CRM lookup presets applied before the per-provider names: every provider wrote one
+-- 'crm_lookup_contact' row, spoke its success_template to the caller, and made a re-apply
+-- insert a second row. Rename in place (agent attachments follow the id) and drop the
+-- spoken line. Idempotent: both predicates stop matching once migrated. A tenant that
+-- already has a live API under the new name keeps the old row's name, so the rename
+-- never trips custom_apis_tenant_name_key; its re-apply is the plain-language 409.
+-- crm-lookup-rename:begin
+UPDATE custom_apis SET success_template = NULL
+ WHERE preset_key IN ('salesforce_crm', 'hubspot_crm', 'zoho_crm')
+   AND success_template = 'Contact lookup: {{$.outcome}}.{{$.spoken}}';
+UPDATE custom_apis c SET name = replace(c.preset_key, '_crm', '') || '_lookup_contact'
+ WHERE c.preset_key IN ('salesforce_crm', 'hubspot_crm', 'zoho_crm')
+   AND c.name = 'crm_lookup_contact' AND c.deleted_at IS NULL
+   AND NOT EXISTS (SELECT 1 FROM custom_apis o
+                    WHERE o.tenant_id = c.tenant_id AND o.deleted_at IS NULL
+                      AND lower(o.name) = replace(c.preset_key, '_crm', '') || '_lookup_contact');
+-- crm-lookup-rename:end
+
 -- One DO block per table; each re-adds the existing values unchanged plus
 -- 'confirmation_required'. The implementer copies the current value lists
 -- verbatim from the api_chain_runs / api_chain_steps CREATE TABLEs
