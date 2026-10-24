@@ -261,7 +261,7 @@ _BYPASS_REASONS = {
     # Platform-scoped, read-only export of calls (services/config/calls.py export_calls with tenant_slug=None);
     # added by the call-export change on redesign, registered here so the walker matches the code.
     "calls-platform-export",
-    "campaign-by-id", "dnc-by-id", "campaign-worker-scan", "campaign-dial-state",
+    "campaign-by-id", "dnc-by-id", "campaign-worker-scan", "campaign-dial-state", "campaign-attempts-list",
     # Operator-only platform capacity limits; each write audits its own entity.
     "capacity-admin",
     "kb-by-id", "kb-admin-by-id", "agent-kb-by-id", "kb-ingestion-job-claim",

@@ -67,6 +67,12 @@ async def scratch_pool():
     """Superuser pool on a throwaway database for seeding and inspection; the app itself runs as yuviz_app, so RLS applies."""
     async with scratch_database() as dsn:
         parts = urlsplit(dsn)
+        # Roles are cluster-wide and other test modules reset yuviz_app's password, so set it here.
+        admin = await asyncpg.connect(dsn)
+        try:
+            await admin.execute("ALTER ROLE yuviz_app PASSWORD 'scratch'")
+        finally:
+            await admin.close()
         await db.close_pool()
         await db.get_pool(urlunsplit(parts._replace(netloc=f"yuviz_app:scratch@{parts.hostname}:{parts.port or 5432}")))
         p = await asyncpg.create_pool(dsn, min_size=1, max_size=5)

@@ -133,6 +133,7 @@ start_knowledge_worker() {
 # The pacing worker runs in-process; no separate block.
 start_campaigns_service() {
   _require JWT_SECRET || return 0
+  _warn_env_drift SIP_PROXY_HOST
   cd "$REPO"
   REDIS_URL="$(_redis_url_for campaigns)" python3 -m uvicorn services.campaigns.app:app --host "$LISTEN_HOST" --port "$(_url_port "${CAMPAIGNS_SERVICE_URL:-}" 8400)"
 }
