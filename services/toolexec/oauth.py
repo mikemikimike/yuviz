@@ -50,6 +50,8 @@ _STATE_TTL_MINUTES = 10
 _EXPIRY_SKEW_SECONDS = 60
 _ASSUMED_ACCESS_TTL_S = 15 * 60
 _PROVIDER_TIMEOUT_S = 10.0
+_REFRESH_LEASE_S = 30.0
+_REFRESH_POLL_S = 0.05
 _API_KEY_VERIFY_URLS = {"calcom": "https://api.cal.com/v2/me"}
 _REDIRECT_URI_ENV = "TOOLEXEC_OAUTH_REDIRECT_URI"
 _refresh_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -507,13 +509,13 @@ def _expiring(row: Any) -> bool:
     return (row["access_expires_at"] - datetime.datetime.now(datetime.timezone.utc)).total_seconds() <= _EXPIRY_SKEW_SECONDS
 
 
-async def _connection_row(tenant_id: str, connection_id: Any, conn: Any = None) -> Any:
-    query = "SELECT * FROM oauth_connections WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL"
-    if conn is not None:
-        return await conn.fetchrow(query, tenant_id, connection_id)
+async def _connection_row(tenant_id: str, connection_id: Any) -> Any:
     pool = await db.get_pool()
-    async with tenant_conn(pool) as own:
-        return await own.fetchrow(query, tenant_id, connection_id)
+    async with tenant_conn(pool) as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM oauth_connections WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL",
+            tenant_id, connection_id,
+        )
 
 
 async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAuthProvider, str | None, str]:
@@ -544,49 +546,63 @@ async def refresh_after_unauthorized(tenant_id: str, connection_id: str) -> bool
 
 async def _refresh_serialized(tenant_id: str, row: Any, spec: OAuthProvider, *, force: bool = False) -> str:
     """Concurrent refreshes of one connection run one at a time and each
-    re-reads the row once it holds the lock. A provider that rejects a reused
+    re-reads the row once it holds the claim. A provider that rejects a reused
     refresh token (Salesforce with rotation on) answers a second in-flight
     refresh with invalid_grant before the first has committed, which would flip
     a healthy connection to reconnect_needed. The asyncio lock orders callers
-    in this process; the transaction-scoped advisory lock orders them across
-    processes and replicas, and releases with the transaction even if this
-    process dies. The refresh writes through the connection that holds it, so
-    waiting refreshes never need a second pooled connection."""
+    in this process; a short lease on the row (refresh_claimed_until) orders
+    them across processes and replicas without holding a pooled connection
+    across the provider call. A process that dies mid-refresh leaves a lease
+    that expires on its own."""
     key = str(row["id"])
     lock = _refresh_locks.get(key) or _refresh_locks.setdefault(key, asyncio.Lock())
     async with lock:
         pool = await db.get_pool()
-        async with tenant_conn(pool) as conn:
-            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"oauth_refresh:{key}")
-            current = await _connection_row(tenant_id, row["id"], conn)
-            if current is None or current["status"] != "connected":
-                raise ReconnectRequired
-            # Another caller refreshed while this one waited: use its token.
-            if current["access_token_ref"] != row["access_token_ref"] or not (force or _expiring(current)):
-                return await auth_schemes.resolve_tenant_ref(tenant_id, current["access_token_ref"])
-            token = await _refresh(tenant_id, current, spec, conn)
-        # Raised after the block: the flip to reconnect_needed commits with the transaction.
-        if token is None:
-            raise ReconnectRequired
-        return token
+        while True:
+            async with tenant_conn(pool) as conn:
+                claimed_until = await conn.fetchval(
+                    "UPDATE oauth_connections SET refresh_claimed_until = now() + make_interval(secs => $3) "
+                    " WHERE tenant_id = $1 AND id = $2 AND status = 'connected' AND deleted_at IS NULL "
+                    "   AND (refresh_claimed_until IS NULL OR refresh_claimed_until < now()) "
+                    "RETURNING refresh_claimed_until",
+                    tenant_id, row["id"], _REFRESH_LEASE_S,
+                )
+            current = await _connection_row(tenant_id, row["id"])
+            try:
+                if current is None or current["status"] != "connected":
+                    raise ReconnectRequired
+                # Another caller refreshed while this one waited: use its token.
+                if current["access_token_ref"] != row["access_token_ref"] or not (force or _expiring(current)):
+                    return await auth_schemes.resolve_tenant_ref(tenant_id, current["access_token_ref"])
+                if claimed_until is not None:
+                    return await _refresh(tenant_id, current, spec)
+            finally:
+                if claimed_until is not None:
+                    async with tenant_conn(pool) as conn:
+                        await conn.execute(
+                            "UPDATE oauth_connections SET refresh_claimed_until = NULL "
+                            " WHERE tenant_id = $1 AND id = $2 AND refresh_claimed_until = $3",
+                            tenant_id, row["id"], claimed_until,
+                        )
+            await asyncio.sleep(_REFRESH_POLL_S)
 
 
-async def _winners_token(tenant_id: str, connection_id: Any, conn: Any) -> str:
+async def _winners_token(tenant_id: str, connection_id: Any) -> str:
     """Another refresh (or a disconnect) won the conditional write; use the
     winner's token, or require a reconnect if it left the row not connected."""
-    row = await conn.fetchrow(
-        "SELECT access_token_ref FROM oauth_connections "
-        "WHERE tenant_id = $1 AND id = $2 AND status = 'connected' AND deleted_at IS NULL",
-        tenant_id, connection_id,
-    )
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        row = await conn.fetchrow(
+            "SELECT access_token_ref FROM oauth_connections "
+            "WHERE tenant_id = $1 AND id = $2 AND status = 'connected' AND deleted_at IS NULL",
+            tenant_id, connection_id,
+        )
     if row is None:
         raise ReconnectRequired
     return await auth_schemes.resolve_tenant_ref(tenant_id, row["access_token_ref"])
 
 
-async def _refresh(tenant_id: str, row: Any, spec: OAuthProvider, conn: Any) -> str | None:
-    """The new access token, or None when the provider says the refresh token is
-    dead and the row has been flipped to reconnect_needed."""
+async def _refresh(tenant_id: str, row: Any, spec: OAuthProvider) -> str:
     refresh_token = await auth_schemes.resolve_tenant_ref(tenant_id, row["refresh_token_ref"])
     try:
         client_id, client_secret = await _client_credentials(spec)
@@ -597,16 +613,18 @@ async def _refresh(tenant_id: str, row: Any, spec: OAuthProvider, conn: Any) -> 
     except Exception:
         raise ValueError("credential_unavailable") from None
 
+    pool = await db.get_pool()
     if resp.status_code == 400 and _refresh_token_dead(resp):
-        flipped = await conn.execute(
-            "UPDATE oauth_connections SET status = 'reconnect_needed', access_token_ref = NULL, "
-            "       refresh_token_ref = NULL, access_expires_at = NULL, updated_at = now() "
-            " WHERE tenant_id = $1 AND id = $2 AND refresh_token_ref = $3 AND status = 'connected'",
-            tenant_id, row["id"], row["refresh_token_ref"],
-        )
+        async with tenant_conn(pool) as conn:
+            flipped = await conn.execute(
+                "UPDATE oauth_connections SET status = 'reconnect_needed', access_token_ref = NULL, "
+                "       refresh_token_ref = NULL, access_expires_at = NULL, updated_at = now() "
+                " WHERE tenant_id = $1 AND id = $2 AND refresh_token_ref = $3 AND status = 'connected'",
+                tenant_id, row["id"], row["refresh_token_ref"],
+            )
         if flipped == "UPDATE 0":
-            return await _winners_token(tenant_id, row["id"], conn)
-        return None
+            return await _winners_token(tenant_id, row["id"])
+        raise ReconnectRequired
     if resp.status_code != 200:
         raise ValueError("credential_unavailable")
 
@@ -620,17 +638,18 @@ async def _refresh(tenant_id: str, row: Any, spec: OAuthProvider, conn: Any) -> 
     except Exception:
         raise ValueError("credential_unavailable") from None
 
-    updated = await conn.fetchrow(
-        "UPDATE oauth_connections SET access_token_ref = $4, access_expires_at = $5, "
-        "       refresh_token_ref = COALESCE($6, refresh_token_ref), updated_at = now() "
-        " WHERE tenant_id = $1 AND id = $2 AND refresh_token_ref = $3 AND access_token_ref = $7 "
-        "   AND status = 'connected' "
-        "RETURNING id",
-        tenant_id, row["id"], row["refresh_token_ref"], access_ref, access_expires_at, new_refresh_ref,
-        row["access_token_ref"],
-    )
+    async with tenant_conn(pool) as conn:
+        updated = await conn.fetchrow(
+            "UPDATE oauth_connections SET access_token_ref = $4, access_expires_at = $5, "
+            "       refresh_token_ref = COALESCE($6, refresh_token_ref), updated_at = now() "
+            " WHERE tenant_id = $1 AND id = $2 AND refresh_token_ref = $3 AND access_token_ref = $7 "
+            "   AND status = 'connected' "
+            "RETURNING id",
+            tenant_id, row["id"], row["refresh_token_ref"], access_ref, access_expires_at, new_refresh_ref,
+            row["access_token_ref"],
+        )
     if updated is None:
-        return await _winners_token(tenant_id, row["id"], conn)
+        return await _winners_token(tenant_id, row["id"])
     return access_token
 
 

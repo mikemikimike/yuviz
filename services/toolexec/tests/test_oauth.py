@@ -833,6 +833,74 @@ async def test_refreshes_from_two_processes_under_strict_reuse_detection_use_the
 
 
 @pytest.mark.asyncio
+async def test_concurrent_refreshes_do_not_hold_pooled_connections_across_the_provider_call(
+    pool, tenants, fake,
+):
+    """More simultaneous refreshes than the pool has connections, each waiting on a slow provider:
+    none may sit on a pooled connection while it waits, or an unrelated lookup queues behind them."""
+    made, _users = tenants
+    extra = []
+    try:
+        connections = []
+        for i in range(12):
+            slug = f"oauth-pool-{i}-{uuid.uuid4().hex[:8]}"
+            tenant = str(await pool.fetchval("INSERT INTO tenants (name, slug) VALUES ($1, $1) RETURNING id", slug))
+            extra.append(tenant)
+            user = str(await pool.fetchval(
+                "INSERT INTO users (tenant_id, email, password_hash, role) VALUES ($1, $2, 'x', 'admin') RETURNING id",
+                tenant, f"{slug}@oauth.test",
+            ))
+            connection = await _connect(tenant, user, fake)
+            await _expire_access_token(pool, connection["id"])
+            connections.append((tenant, str(connection["id"])))
+
+        async def _slow(request):
+            await asyncio.sleep(1.5)
+            return httpx.Response(200, json={"access_token": "at-new", "expires_in": 3600})
+
+        fake.token = _slow
+        refreshes = []
+        for tenant, connection_id in connections:
+            set_target_tenant(tenant)
+            refreshes.append(asyncio.create_task(oauth.access_token_for(tenant, connection_id)))
+        await asyncio.sleep(0.5)                                # every refresh is waiting on the provider
+
+        set_target_tenant(made["a"])
+        started = time.monotonic()
+        await oauth.list_connections(made["a"])
+        assert time.monotonic() - started < 0.5
+
+        assert [(await r)[0] for r in refreshes] == ["at-new"] * 12
+    finally:
+        set_target_tenant(made["a"])
+        await pool.execute("DELETE FROM oauth_authorization_states WHERE tenant_id = ANY($1::uuid[])", extra)
+        await pool.execute("DELETE FROM oauth_connections WHERE tenant_id = ANY($1::uuid[])", extra)
+        await pool.execute(
+            "DELETE FROM audit_log WHERE user_id IN (SELECT id FROM users WHERE tenant_id = ANY($1::uuid[]))", extra,
+        )
+        await pool.execute("DELETE FROM users WHERE tenant_id = ANY($1::uuid[])", extra)
+        await pool.execute("DELETE FROM tenants WHERE id = ANY($1::uuid[])", extra)
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_claim_left_by_a_dead_process_expires(pool, tenants, fake):
+    made, users = tenants
+    connection = await _connect(made["a"], users["a"], fake, refresh="rt-original")
+    await _expire_access_token(pool, connection["id"])
+    await pool.execute(
+        "UPDATE oauth_connections SET refresh_claimed_until = now() + interval '1 second' WHERE id = $1",
+        connection["id"],
+    )
+    fake.token = lambda request: httpx.Response(200, json={"access_token": "at-new", "expires_in": 3600})
+    started = time.monotonic()
+    token, *_ = await oauth.access_token_for(made["a"], str(connection["id"]))
+
+    assert token == "at-new" and time.monotonic() - started >= 0.5
+    row = await pool.fetchrow("SELECT * FROM oauth_connections WHERE id = $1", connection["id"])
+    assert row["refresh_claimed_until"] is None
+
+
+@pytest.mark.asyncio
 async def test_a_5xx_refresh_leaves_the_status_unchanged(pool, tenants, fake):
     made, users = tenants
     connection = await _connect(made["a"], users["a"], fake)

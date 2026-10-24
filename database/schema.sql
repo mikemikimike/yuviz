@@ -1126,6 +1126,10 @@ ALTER TABLE oauth_connections ADD COLUMN IF NOT EXISTS auth_kind TEXT NOT NULL D
 -- binding at call time are the controls. NULL for fixed-origin providers.
 ALTER TABLE oauth_connections ADD COLUMN IF NOT EXISTS api_base_url TEXT
     CHECK (api_base_url IS NULL OR api_base_url ~ '^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$');
+-- Lease taken by a token refresh so concurrent refreshes (across processes) make one provider
+-- call without holding a DB connection through it. Bounded: a refresh that dies leaves a lease
+-- that simply expires.
+ALTER TABLE oauth_connections ADD COLUMN IF NOT EXISTS refresh_claimed_until TIMESTAMPTZ;
 -- 'oauth_connection': endpoint_url holds a PATH and the origin comes from the row's
 -- connection at call time. Per row, so one shared connection serves both kinds.
 ALTER TABLE custom_apis ADD COLUMN IF NOT EXISTS endpoint_base_source TEXT NOT NULL DEFAULT 'literal'
