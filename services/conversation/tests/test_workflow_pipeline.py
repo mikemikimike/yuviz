@@ -44,7 +44,7 @@ TRANSFER_GRAPH = {
             "greeting": "Thanks for calling."}},
         {"id": "n2", "type": "transfer", "data": {
             "name": "to_human", "prompt": "Say you're connecting them.",
-            "transfer_destination": "+15559999"}},
+            "transfer_destination": "+14155559999"}},
         {"id": "n3", "type": "end", "data": {
             "name": "goodbye", "prompt": "Close.", "disposition": "completed"}},
     ],
@@ -226,7 +226,7 @@ async def test_workflow_transfer_node_surfaces_a_transfer_request():
     assert handler._workflow.node.name == "to_human"
     transfers = [r.transfer_request for r in responses if r.transfer_request]
     assert len(transfers) == 1
-    assert transfers[0].destination == "+15559999"
+    assert transfers[0].destination == "+14155559999"
     assert transfers[0].trigger == "workflow_policy"
     assert not any(r.end_call for r in responses)
 
@@ -333,7 +333,7 @@ async def test_transfer_flush_timeout_still_routes_and_leaves_straggler():
 
     transfers = [r.transfer_request for r in responses if r.transfer_request]
     assert len(transfers) == 1
-    assert transfers[0].destination == "+15559999"
+    assert transfers[0].destination == "+14155559999"
 
 
 async def test_transfer_rejects_injected_destination_from_extracted_variable():

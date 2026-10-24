@@ -94,10 +94,28 @@ OPEN = TransferPolicy(allow_international=True)
 
 
 @pytest.mark.parametrize("value", [
-    "1001", "+18005550100", "+12425550100", "5551234567",
+    "1001", "+18005550100", "+14165550100", "+17875550100", "5551234567", "12125550100", "2125550100",
 ])
 def test_domestic_destinations_pass_the_default_policy(value):
     assert transfer_policy_problem(value, DEFAULT) is None
+
+
+CARIBBEAN_AND_NON_US_CA = [
+    "+18765551234", "+18095551234", "+12845551234", "+14735551234", "+16495551234",
+    "+12685551234", "+12425550100", "+13455551234", "+14415551234", "+18685551234",
+    "0018765551234", "18765551234", "8765551234",
+]
+
+
+@pytest.mark.parametrize("value", CARIBBEAN_AND_NON_US_CA)
+def test_non_us_canada_nanp_numbers_need_the_opt_in(value):
+    assert transfer_policy_problem(value, DEFAULT) is not None
+    assert transfer_policy_problem(value, OPEN) is None
+
+
+def test_nanp_area_codes_do_not_matter_when_another_country_is_home():
+    assert transfer_policy_problem("+18765551234", TransferPolicy(home_calling_code="44")) is not None
+    assert transfer_policy_problem("+442071234567", TransferPolicy(home_calling_code="44")) is None
 
 
 @pytest.mark.parametrize("value", [

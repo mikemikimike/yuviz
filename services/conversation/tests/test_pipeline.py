@@ -1347,7 +1347,7 @@ async def test_pipeline_transfer_directive_split_across_tokens_still_detected():
     tts = _make_tts(b"\x00" * 640)
 
     handler = _make_handler(
-        stt, llm, tts, transfer_type="cold", transfer_destination="+1555",
+        stt, llm, tts, transfer_type="cold", transfer_destination="+14155550100",
     )
     responses = []
     async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0):
@@ -1574,7 +1574,7 @@ async def test_transfer_request_suppressed_on_barge_in_cancel():
     tts = _make_tts()
 
     handler = _make_handler(
-        stt, llm, tts, transfer_type="cold", transfer_destination="+1555",
+        stt, llm, tts, transfer_type="cold", transfer_destination="+14155550100",
     )
 
     responses = []

@@ -74,6 +74,18 @@ _NATIONAL_PREMIUM_RATE_RE = {
     "44": re.compile(r"09[0-9]{8,9}"),
 }
 
+# NANP area codes outside the US and Canada. They share country code 1 but are
+# international destinations billed at premium rates and the usual one-ring /
+# revenue-share fraud targets (Caribbean, Bermuda). A home code of 1 means the US and
+# Canada only, so these need the international opt-in. US territories (PR, USVI,
+# Guam, ...) are US numbers and stay domestic.
+_NANP_NON_US_CA_AREA_CODES = frozenset({
+    "242", "246", "264", "268", "284", "345", "441", "473", "649", "658", "664", "721",
+    "758", "767", "784", "809", "829", "849", "868", "869", "876",
+})
+_NANP_NUMBER_RE = re.compile(r"1[2-9][0-9]{9}")
+_NANP_NATIONAL_RE = re.compile(r"1?([2-9][0-9]{9})")
+
 # Comma-separated SIP hosts (and their subdomains) a transfer may reach without the
 # tenant's international opt-in, e.g. the platform's own SIP domain.
 _SIP_HOST_ALLOWLIST_ENV = "VOICEAI_TRANSFER_SIP_HOSTS"
@@ -103,6 +115,16 @@ def _is_premium_rate(number: str, home_calling_code: str) -> bool:
     return international.startswith(_PREMIUM_RATE_PREFIXES)
 
 
+def _is_home_country(digits: str, home_calling_code: str) -> bool:
+    """`digits` is E.164 (country code first). For home code 1 that means the US or
+    Canada, not the other NANP countries."""
+    if not digits.startswith(home_calling_code):
+        return False
+    return home_calling_code != "1" or (
+        _NANP_NUMBER_RE.fullmatch(digits) is not None and digits[1:4] not in _NANP_NON_US_CA_AREA_CODES
+    )
+
+
 def _sip_host_allowed(host: str) -> bool:
     allowed = (h.strip().lower().rstrip(".") for h in os.environ.get(_SIP_HOST_ALLOWLIST_ENV, "").split(","))
     return any(a and (host == a or host.endswith("." + a)) for a in allowed)
@@ -128,6 +150,10 @@ def transfer_policy_problem(value: str, policy: TransferPolicy) -> str | None:
     international_form = value.startswith(("+", "00"))
     if international_form and not policy.allow_international:
         digits = value[1:] if value.startswith("+") else value[2:]
-        if not digits.startswith(policy.home_calling_code):
+        if not _is_home_country(digits, policy.home_calling_code):
+            return "international numbers need international transfers enabled for your account"
+    if not international_form and not policy.allow_international and policy.home_calling_code == "1":
+        national = _NANP_NATIONAL_RE.fullmatch(value)
+        if national is not None and not _is_home_country("1" + national.group(1), "1"):
             return "international numbers need international transfers enabled for your account"
     return None
