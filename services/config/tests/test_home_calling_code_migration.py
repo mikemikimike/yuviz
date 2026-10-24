@@ -78,7 +78,7 @@ async def _home(conn, tenant) -> str:
 
 
 async def test_indian_tenant_keeps_its_plus91_destinations(scratch_db, conn):
-    destinations = ("+918012345678", "00918098765432", "1001")
+    destinations = ("+918012345678", "00918098765432", "1001", "09876543210", "9005551234")
     tenant = await _tenant(conn, dids=("918065354620", "918065354621"), destinations=destinations)
     _upgrade(scratch_db)
     row = await conn.fetchrow("SELECT * FROM tenants WHERE id = $1", tenant)

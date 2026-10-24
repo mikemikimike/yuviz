@@ -110,12 +110,46 @@ def test_international_and_external_sip_need_the_opt_in(value):
 
 @pytest.mark.parametrize("value", [
     "+19005550100", "+19765550100", "19005550100", "9005550100", "+881123456", "+8821234567890",
-    "+8835551234", "+870123456789", "+878123456789", "+9791234567", "+449091234567", "09091234567",
+    "+8835551234", "+870123456789", "+878123456789", "+9791234567", "+449091234567",
     "00882123456789", "sip:+8821234567890@example.com", "sip:19005550100@example.com",
 ])
 def test_premium_and_satellite_ranges_are_refused_even_when_opted_in(value):
     assert transfer_policy_problem(value, OPEN) is not None
-    assert transfer_policy_problem(value, TransferPolicy(home_calling_code="882")) is not None
+
+
+@pytest.mark.parametrize("value", [
+    "+19005550100", "+8821234567890", "+9791234567", "+449091234567", "00882123456789",
+])
+def test_international_premium_is_refused_whatever_the_home_code(value):
+    assert transfer_policy_problem(value, TransferPolicy(home_calling_code="882", allow_international=True)) is not None
+    assert transfer_policy_problem(value, TransferPolicy(home_calling_code="91", allow_international=True)) is not None
+
+
+@pytest.mark.parametrize("home, value", [
+    ("44", "09091234567"), ("44", "0909123456"), ("44", "sip:09091234567@example.com"),
+    ("1", "9005550100"), ("1", "19765550100"),
+])
+def test_national_premium_ranges_apply_in_their_own_country(home, value):
+    assert transfer_policy_problem(value, TransferPolicy(home_calling_code=home, allow_international=True)) is not None
+
+
+@pytest.mark.parametrize("value", [
+    "09876543210", "9005551234", "9765551234", "19005551234", "08012345678", "9876543210",
+    "+919005551234", "00919765551234",
+])
+def test_indian_numbers_are_not_premium(value):
+    assert transfer_policy_problem(value, TransferPolicy(home_calling_code="91")) is None
+
+
+def test_indian_national_number_in_a_sip_user_part_is_not_premium():
+    assert transfer_policy_problem(
+        "sip:09876543210@example.com", TransferPolicy(home_calling_code="91", allow_international=True),
+    ) is None
+
+
+@pytest.mark.parametrize("value", ["09091234567", "09876543210"])
+def test_uk_national_premium_does_not_apply_to_other_home_codes(value):
+    assert transfer_policy_problem(value, TransferPolicy(home_calling_code="1")) is None
 
 
 @pytest.mark.parametrize("value", ["+442071234567", "+447911123456", "+4402071234567"])

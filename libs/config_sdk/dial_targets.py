@@ -66,8 +66,13 @@ def is_transfer_destination(value: str) -> bool:
 # Prefixes are country-code digits (no + / 00): global satellite (881, 882, 883),
 # Inmarsat (87x), international premium rate (979), NANP 900/976, UK 09xx (+449).
 _PREMIUM_RATE_PREFIXES = ("881", "882", "883", "87", "979", "1900", "1976", "449")
-# The same ranges dialled nationally: NANP 900/976 (optional trunk 1), UK 09xx.
-_PREMIUM_RATE_NATIONAL_RE = re.compile(r"1?(?:900|976)[0-9]{7}|09[0-9]{8,9}")
+# The same ranges dialled nationally, which only mean premium in their own country, so
+# keyed by the tenant's home calling code: NANP 900/976 (optional trunk 1), UK 09xx.
+# India's 09876543210 and mobiles that begin 900/976 must not match, so no catch-all.
+_NATIONAL_PREMIUM_RATE_RE = {
+    "1": re.compile(r"1?(?:900|976)[0-9]{7}"),
+    "44": re.compile(r"09[0-9]{8,9}"),
+}
 
 # Comma-separated SIP hosts (and their subdomains) a transfer may reach without the
 # tenant's international opt-in, e.g. the platform's own SIP domain.
@@ -87,13 +92,14 @@ class TransferPolicy:
     allow_international: bool = False
 
 
-def _is_premium_rate(number: str) -> bool:
+def _is_premium_rate(number: str, home_calling_code: str) -> bool:
     if number.startswith("+"):
         international = number[1:]
     elif number.startswith("00"):
         international = number[2:]
     else:
-        return _PREMIUM_RATE_NATIONAL_RE.fullmatch(number) is not None
+        national = _NATIONAL_PREMIUM_RATE_RE.get(home_calling_code)
+        return national is not None and national.fullmatch(number) is not None
     return international.startswith(_PREMIUM_RATE_PREFIXES)
 
 
@@ -112,12 +118,12 @@ def transfer_policy_problem(value: str, policy: TransferPolicy) -> str | None:
         )
     if value.lower().startswith(("sip:", "sips:")):
         user = re.split(r"[:;]", value.split(":", 1)[1].split("@", 1)[0], maxsplit=1)[0]
-        if is_dial_number(user) and _is_premium_rate(user):
+        if is_dial_number(user) and _is_premium_rate(user, policy.home_calling_code):
             return "premium-rate and satellite numbers cannot be transfer destinations"
         if not policy.allow_international and not _sip_host_allowed(_sip_uri_host(value)):
             return "SIP addresses outside this platform need international transfers enabled for your account"
         return None
-    if _is_premium_rate(value):
+    if _is_premium_rate(value, policy.home_calling_code):
         return "premium-rate and satellite numbers cannot be transfer destinations"
     international_form = value.startswith(("+", "00"))
     if international_form and not policy.allow_international:
