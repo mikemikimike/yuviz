@@ -28,7 +28,7 @@ FIRST_TURN_FILLERS: tuple[tuple[str, float], ...] = (
     ("जी, बस एक पल रुकिए।", 1.5),
     ("जी, एक पल दीजिए।", 1.5),
     ("जी, कृपया एक पल रुकिए।", 2.0),
-    ("जी, ज़रा एक पल रुकिए, बस एक सेकंड।", 2.4),
+    ("जी, कृपया ज़रा एक पल रुकिए।", 2.4),
 )
 
 # "नमस्ते" is a farewell only: callers also open with it, so it is not a closure.

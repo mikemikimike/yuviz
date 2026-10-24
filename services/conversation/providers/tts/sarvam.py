@@ -166,9 +166,9 @@ class SarvamTTS:
                 self._pinned[key] = audio
 
     async def prewarm(self, languages: list[str]) -> None:
-        """Pins the filler phrases for each language (the tool-call pool, which the turn-1 filler is also
-        drawn from), once per voice instance, so a "one moment" plays without a round trip."""
-        from ...i18n import tool_fillers
+        """Pins the filler phrases for each language (the turn-1 pool and the tool-call pool), once per voice
+        instance, so a "one moment" plays without a round trip."""
+        from ...i18n import first_turn_fillers, tool_fillers
 
         todo = {}
         for language in languages:
@@ -176,7 +176,7 @@ class SarvamTTS:
             if code in self._prewarmed:
                 continue
             self._prewarmed.add(code)
-            phrases = {phrase for phrase, _seconds in tool_fillers(language)}
+            phrases = {phrase for phrase, _seconds in (*(first_turn_fillers(language) or ()), *tool_fillers(language))}
             todo[language] = sorted(phrases)
         await asyncio.gather(self.pin_phrases(todo), *(self._warm_socket(lang) for lang in languages))
 

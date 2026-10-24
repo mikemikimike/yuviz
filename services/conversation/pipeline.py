@@ -748,7 +748,8 @@ class PipelineConversationHandler:
         async def _run() -> None:
             for language in self._filler_languages():
                 spoken = language or self._strings_language
-                phrases = [phrase for phrase, _ms in (*tool_fillers(spoken), *(first_turn_fillers(spoken) or ()))]
+                # Turn-1 phrases first: the opener is wanted right after the greeting, tool fillers only later.
+                phrases = [phrase for phrase, _ms in (*(first_turn_fillers(spoken) or ()), *tool_fillers(spoken))]
                 for phrase in phrases:
                     try:
                         async for _chunk in self._synthesize_sentence_stream(

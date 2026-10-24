@@ -33,7 +33,7 @@ FIRST_TURN_FILLERS: tuple[tuple[str, float], ...] = (
     ("Okay, one moment.", 1.0),
     ("Alright, just a second.", 1.0),
     ("Okay, one moment please.", 1.5),
-    ("Alright, bear with me a moment.", 1.5),
+    ("Alright, one moment please.", 1.5),
     ("Alright, just give me a moment please.", 2.0),
     ("Alright, just bear with me for one moment please.", 2.4),
 )
