@@ -9,15 +9,16 @@ Wire protocol per stream:
 
 An internal asyncio.Queue decouples gRPC message reading from processing.
 This allows cancel_generation messages to be processed between pipeline
-stages even when the servicer is inside a speech_ended() async-for loop.
+stages even while a speech_ended() turn is blocked on the LLM or a tool.
 """
 
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import time
-from typing import Awaitable, AsyncIterator, Callable
+from typing import AsyncGenerator, Awaitable, AsyncIterator, Callable
 
 import grpc
 import grpc.aio
@@ -277,6 +278,38 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         msg_fut: asyncio.Future | None = None
         out_fut: asyncio.Future | None = None
 
+        # Messages taken off msg_q while a turn runs, ahead of anything still queued.
+        backlog: collections.deque[pb.GatewayMessage | None] = collections.deque()
+        turn_stream: AsyncGenerator | None = None
+
+        async def _turn_responses(turn: AsyncIterator) -> AsyncGenerator:
+            """Yield the turn's responses, or None whenever a gateway message arrives first,
+            so a cancel is seen while the turn is blocked on the LLM or a tool."""
+            next_resp = asyncio.ensure_future(turn.__anext__())
+            next_msg: asyncio.Future | None = None
+            try:
+                while True:
+                    if next_msg is None:
+                        next_msg = asyncio.ensure_future(msg_q.get())
+                    await asyncio.wait({next_resp, next_msg}, return_when=asyncio.FIRST_COMPLETED)
+                    if next_msg.done():
+                        backlog.append(next_msg.result())
+                        next_msg = None
+                        yield None
+                    elif next_resp.done():
+                        try:
+                            response = next_resp.result()
+                        except StopAsyncIteration:
+                            return
+                        next_resp = asyncio.ensure_future(turn.__anext__())
+                        yield response
+            finally:
+                if next_msg is not None and not next_msg.cancel():
+                    backlog.append(next_msg.result())
+                if not next_resp.done():
+                    next_resp.cancel()
+                    await asyncio.gather(next_resp, return_exceptions=True)
+
         try:
             # Inside the try: a hangup while the greeting is still synthesizing
             # cancels the stream here, and the session must still be closed.
@@ -284,7 +317,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                 yield out
 
             while True:
-                if session.out_responses is not None:
+                if backlog:
+                    msg = backlog.popleft()
+                elif session.out_responses is not None:
                     if msg_fut is None:
                         msg_fut = asyncio.ensure_future(msg_q.get())
                     if out_fut is None:
@@ -357,18 +392,19 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     end_call_grace_period = 0
                     turn_transfer         = None
 
-                    async for response in session.speech_ended(
-                        se.duration_ms, se.energy_db
-                    ):
+                    turn_stream = _turn_responses(
+                        session.speech_ended(se.duration_ms, se.energy_db).__aiter__()
+                    )
+                    async for response in turn_stream:
                         # Drain BEFORE sending so a cancel_generation that arrived
                         # during synthesis stops this turn's audio from being sent.
-                        while not msg_q.empty():
-                            pending = msg_q.get_nowait()
+                        while backlog or not msg_q.empty():
+                            pending = backlog.popleft() if backlog else msg_q.get_nowait()
                             if pending is None:
                                 # Stream ended during pipeline — stop generating.
                                 await session.cancel()
                                 cancelled = True
-                                await msg_q.put(None)  # re-enqueue so outer loop exits
+                                backlog.appendleft(None)  # so outer loop exits
                                 break
                             pcase = pending.WhichOneof("payload")
                             if pcase == "cancel_generation":
@@ -413,21 +449,24 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     )
                             elif pcase == "speech_ended":
                                 # New utterance while this turn's pipeline still runs —
-                                # re-enqueue for the outer loop.
-                                await msg_q.put(pending)
+                                # leave it for the outer loop.
+                                backlog.appendleft(pending)
                                 break
                             elif pcase in (
                                 "transfer_initiated", "transfer_completed", "transfer_failed",
                             ):
                                 # Defer: transfer_failed streams its own TTS, which would
                                 # interleave with this turn's audio.
-                                await msg_q.put(pending)
+                                backlog.appendleft(pending)
                                 break
                             else:
                                 log.warning(
                                     "Unexpected %s during speech pipeline session=%s",
                                     pcase, sid,
                                 )
+
+                        if response is None:
+                            continue  # woken by a message, already handled above
 
                         if not cancelled:
                             if response.end_call:
@@ -686,6 +725,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             for pending_fut in (msg_fut, out_fut):
                 if pending_fut is not None and not pending_fut.done():
                     pending_fut.cancel()
+            if turn_stream is not None:
+                await turn_stream.aclose()  # stops a turn still running behind the stream
             reader_task.cancel()
             try:
                 await reader_task
