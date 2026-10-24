@@ -69,6 +69,25 @@ def test_llm_directive_cannot_override_configured_type_or_destination():
     assert decision.request.reason == "explicit"
 
 
+def _directive_reason(raw: str) -> str:
+    directive = TransferDirective(transfer_type=TransferType.COLD, destination="", reason=raw)
+    decision = TransferDecisionEngine().evaluate(
+        _ctx(transfer_type="cold", transfer_destination="1001"),
+        TransferTrigger(type=TriggerType.LLM_DIRECTIVE, directive=directive),
+    )
+    return decision.request.reason
+
+
+def test_directive_reason_is_one_short_line_without_control_characters():
+    reason = _directive_reason('card is 4111\n2026-10-24 INFO forged line\x00\x1b[31m ' + "x" * 500)
+    assert "\n" not in reason and "\x00" not in reason and "\x1b" not in reason
+    assert len(reason) <= 120
+
+
+def test_blank_directive_reason_falls_back_to_a_constant():
+    assert _directive_reason(" \n\t ") == "caller_requested_human"
+
+
 def test_llm_directive_missing_payload_rejected():
     engine = TransferDecisionEngine()
     decision = engine.evaluate(_ctx(), TransferTrigger(type=TriggerType.LLM_DIRECTIVE, directive=None))
