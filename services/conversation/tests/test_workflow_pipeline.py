@@ -5,6 +5,10 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock
 
+import pytest
+
+from libs.config_sdk.workflow import CALL_CONTEXT_VARIABLES, TRANSFER_DESTINATION_VARIABLES
+
 from services.conversation.tools.executor_registry import ExecutorRegistry
 from services.conversation.tools.llm_adapter import LLMAdapter, TokenEvent, ToolCallEvent
 from services.conversation.tools.orchestrator import ToolCallOrchestrator
@@ -414,19 +418,28 @@ async def test_templated_destination_from_call_flow_handoff_is_refused(caplog):
     assert "882345678901" not in caplog.text
 
 
-async def test_templated_destination_built_from_call_context_still_transfers():
-    graph = _templated_transfer_graph("{{ called_number }}")
-    transfers = await _transfers_for(graph, called_number="+15557654321")
-    assert [t.destination for t in transfers] == ["+15557654321"]
+@pytest.mark.parametrize("variable", ["caller_number", "called_number"])
+async def test_destination_cannot_be_built_from_a_call_number(variable, caplog):
+    # caller_number is the spoofable CLI; called_number is not guaranteed to be a routed DID.
+    # Both are domestic here, so the transfer policy alone would let them through.
+    graph = _templated_transfer_graph("{{ %s }}" % variable)
+    with caplog.at_level("WARNING"):
+        transfers = await _transfers_for(
+            graph, caller_number="+14155550123", called_number="+14155550456",
+        )
+    assert transfers == []
+    assert "4155550123" not in caplog.text and "4155550456" not in caplog.text
 
 
-async def test_handoff_value_cannot_override_call_context_in_a_destination():
-    graph = _templated_transfer_graph("{{ called_number }}")
-    transfers = await _transfers_for(
-        graph, called_number="+15557654321",
-        initial_variables={"called_number": "+882345678901"},
-    )
-    assert [t.destination for t in transfers] == ["+15557654321"]
+async def test_destination_with_no_variables_still_transfers():
+    transfers = await _transfers_for(_templated_transfer_graph("+14155557654"))
+    assert [t.destination for t in transfers] == ["+14155557654"]
+
+
+def test_transfer_destination_variables_exclude_both_call_numbers():
+    assert "caller_number" not in TRANSFER_DESTINATION_VARIABLES
+    assert "called_number" not in TRANSFER_DESTINATION_VARIABLES
+    assert set(TRANSFER_DESTINATION_VARIABLES) <= set(CALL_CONTEXT_VARIABLES)
 
 
 async def test_next_turn_interrupts_background_extract_before_live_generate():

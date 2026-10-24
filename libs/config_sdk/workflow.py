@@ -32,6 +32,14 @@ CALL_CONTEXT_VARIABLES = (
     "current_date", "current_time", "business_name",
 )
 
+# The subset a transfer destination may be rendered from. caller_number is the caller's
+# own CLI, which a caller can spoof to any number; called_number is whatever the call
+# arrived on (not necessarily a number routed to this tenant) or, outbound, contact
+# data. Neither may choose where the platform dials, so only non-number context stays.
+TRANSFER_DESTINATION_VARIABLES = tuple(
+    v for v in CALL_CONTEXT_VARIABLES if v not in ("caller_number", "called_number")
+)
+
 # Not Jinja2: templates include caller-influenced values (sandbox-escape risk).
 # _ANY_BRACES_RE catches malformed {{ ... }} (e.g. "{{ name }") so it never reaches TTS.
 _TEMPLATE_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\|([^}]*))?\}\}")

@@ -1404,7 +1404,7 @@ class PipelineConversationHandler:
         ) or None
         # Category only: a rendered destination is caller-derived, so never logged.
         if destination is None:
-            problem = "destination is empty or not built from call-context variables"
+            problem = "destination is empty or uses a variable a destination may not (caller_number, called_number, extracted)"
         elif transfer_destination_problem(destination, self._transfer_policy) is not None:
             problem = "rendered destination failed the transfer allowlist"
         else:
