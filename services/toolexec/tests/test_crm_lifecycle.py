@@ -169,6 +169,28 @@ async def test_a_5xx_or_slow_crm_gives_a_bounded_failure_and_leaves_the_connecti
 
 
 @pytest.mark.asyncio
+async def test_a_slow_token_refresh_is_bounded_by_the_step_timeout_and_still_commits_the_rotation(
+    pool, tenant_agent, crm_cleanup, provider, monkeypatch,
+):
+    tenant, agent = tenant_agent
+    upstream = Upstream(body=zoho_body())
+    connection = await _setup(pool, tenant, agent, monkeypatch, upstream, expires_in_s=-30)
+    provider.delay = 1.0
+
+    started = time.monotonic()
+    response = await _lookup(tenant, agent, chain_budget_ms=300)  # the call's own budget, not a tuned constant
+
+    assert time.monotonic() - started < 0.9
+    assert (response.chain_status, response.error) == ("timeout", "step_timeout")
+    assert upstream.requests == []
+    # The refresh the step gave up on is allowed to finish: abandoning it would lose the rotated token.
+    await asyncio.gather(*executor._inflight_auth)
+    row = await _connection(pool, connection)
+    assert decrypt_tenant_secret(str(tenant["id"]), row["refresh_token_ref"]) == "rt-new-1"
+    assert row["status"] == "connected"
+
+
+@pytest.mark.asyncio
 async def test_two_concurrent_refreshes_leave_one_winner_and_the_row_keeps_a_refresh_token(
     pool, tenant_agent, crm_cleanup, provider, monkeypatch,
 ):

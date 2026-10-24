@@ -289,6 +289,30 @@ class _StepFailure(Exception):
         self.http_status = http_status
 
 
+_inflight_auth: set[asyncio.Task] = set()
+
+
+def _settle_inflight(task: asyncio.Task) -> None:
+    _inflight_auth.discard(task)
+    if not task.cancelled():
+        task.exception()  # retrieved so a failure after the step gave up is not logged as unhandled
+
+
+async def _within_step_deadline(awaitable: Any, deadline: float) -> Any:
+    """Bound credential work (a token refresh is a provider round trip) by the
+    step's own deadline. The work is shielded rather than cancelled: a refresh
+    that already got a rotated refresh token back must still commit it, or the
+    connection is lost. It is bounded by the provider call timeout, and the
+    task is held here so it is not collected mid-flight."""
+    task = asyncio.ensure_future(awaitable)
+    _inflight_auth.add(task)
+    task.add_done_callback(_settle_inflight)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=max(deadline - time.monotonic(), 0))
+    except asyncio.TimeoutError:
+        raise _StepFailure("timeout", "step_timeout") from None
+
+
 def _coerce(value: Any, json_type: str) -> Any:
     if value is None:
         return None
@@ -768,6 +792,8 @@ async def _run_steps(
         arguments_hash: str | None = None
         injected_auth_keys: set[str] = set()
         started = time.monotonic()
+        step_timeout_ms = min(api_row.get("timeout_ms") or 6000, remaining_budget_ms)
+        deadline = started + step_timeout_ms / 1000
 
         try:
             effective_url = api_row["endpoint_url"]
@@ -785,7 +811,9 @@ async def _run_steps(
             hostname, allowed_ips = await resolve_and_validate_endpoint(url)
 
             try:
-                injected_auth_keys = await auth_schemes.apply(api_row, headers, query_params, effective_url=url)
+                injected_auth_keys = await _within_step_deadline(
+                    auth_schemes.apply(api_row, headers, query_params, effective_url=url), deadline,
+                )
             except auth_schemes.ReconnectRequired:
                 raise _StepFailure("unavailable", "reconnect_required")
             except ValueError:
@@ -833,7 +861,7 @@ async def _run_steps(
                     # (Google keeps a deleted event's id and refuses to reuse it).
                     body_fields[api_row["idempotency_body_field"]] = claimed.hex
 
-            step_timeout_ms = min(api_row.get("timeout_ms") or 6000, remaining_budget_ms)
+            request_timeout_ms = max(int((deadline - time.monotonic()) * 1000), 1)
             body_style = api_row.get("body_style", "json")
             json_body = body_fields if body_style == "json" and body_fields else None
             data_body = _form_fields(body_fields) if body_style == "form" and body_fields else None
@@ -841,8 +869,8 @@ async def _run_steps(
             try:
                 status_code, body, truncated = await asyncio.wait_for(
                     _do_request(api_row["method"], url, headers, query_params, json_body, data_body,
-                                allowed_ips, step_timeout_ms),
-                    timeout=step_timeout_ms / 1000,
+                                allowed_ips, request_timeout_ms),
+                    timeout=request_timeout_ms / 1000,
                 )
             except (asyncio.TimeoutError, httpx.TimeoutException):
                 # Keep the claim: a timed-out mutation may have landed.
