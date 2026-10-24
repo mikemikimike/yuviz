@@ -27,8 +27,8 @@ SCHEMA = REPO / "database" / "schema.sql"
 _BASE = os.environ["POSTGRES_DSN"].rsplit("/", 1)[0]
 
 
-def _psql(database: str, *args: str, timeout: float | None = None) -> None:
-    subprocess.run(
+def _psql(database: str, *args: str, timeout: float | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(
         ["psql", f"{_BASE}/{database}", "-q", "-v", "ON_ERROR_STOP=1", *args],
         check=True, capture_output=True, timeout=timeout,
     )
@@ -44,6 +44,33 @@ def scratch_db():
         _psql("postgres", "-c", f"DROP DATABASE IF EXISTS {name}", timeout=5)
     except subprocess.TimeoutExpired:
         warnings.warn(f"scratch database {name} was not dropped: DROP DATABASE did not return in 5s")
+
+
+@pytest.fixture(scope="module")
+def rls_db():
+    """CI-style database (every schema file, then rls.sql with yuviz_app) whose tables
+    are owned by a role that is neither superuser nor BYPASSRLS, as on a managed Postgres."""
+    name = f"home_code_rls_{uuid.uuid4().hex[:8]}"
+    owner = f"home_code_owner_{uuid.uuid4().hex[:8]}"
+    _psql("postgres", "-c", f"CREATE DATABASE {name}")
+    for sql in ("schema", "knowledge_schema", "telephony_schema", "clinic_schema"):
+        _psql(name, "-f", str(REPO / "database" / f"{sql}.sql"))
+    _psql(name, "-v", "yuviz_app_password=testpw", "-f", str(REPO / "database" / "rls.sql"))
+    _psql("postgres", "-c", f"CREATE ROLE {owner} NOSUPERUSER NOBYPASSRLS")
+    _psql(
+        name, "-c", f"GRANT ALL ON SCHEMA public TO {owner}",
+        "-c", f"""DO $$ DECLARE t text; BEGIN
+          FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+            EXECUTE format('ALTER TABLE %I OWNER TO {owner}', t);
+          END LOOP;
+          FOR t IN SELECT p.oid::regprocedure::text FROM pg_proc p
+                    WHERE p.pronamespace = 'public'::regnamespace AND NOT EXISTS (
+                      SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e') LOOP
+            EXECUTE format('ALTER FUNCTION %s OWNER TO {owner}', t);
+          END LOOP; END $$""",
+    )
+    yield name, owner
+    _psql("postgres", "-c", f"DROP DATABASE IF EXISTS {name}", "-c", f"DROP ROLE IF EXISTS {owner}", timeout=10)
 
 
 @pytest.fixture
@@ -109,6 +136,28 @@ async def test_reapplying_schema_keeps_a_code_set_since(scratch_db, conn):
     await conn.execute("UPDATE tenants SET home_calling_code = '44' WHERE id = $1", tenant)
     _upgrade(scratch_db)
     assert await _home(conn, tenant) == "44"
+
+
+async def test_non_bypassrls_owner_upgrade_fails_loudly_and_leaves_no_column(rls_db):
+    name, owner = rls_db
+    c = await asyncpg.connect(f"{_BASE}/{name}")
+    try:
+        await c.execute("ALTER TABLE tenants DROP COLUMN IF EXISTS home_calling_code")
+        await c.execute("TRUNCATE tenants CASCADE")
+        tenant = await _tenant(c, dids=("918065354620",))
+        # FORCE RLS hides the evidence rows from this owner: without the block turning
+        # row_security off, every tenant silently got '1' and the apply exited 0.
+        with pytest.raises(subprocess.CalledProcessError) as failed:
+            _psql(name, "-c", f"SET ROLE {owner}", "-f", str(SCHEMA))
+        assert "row-level security" in failed.value.stderr.decode()
+        assert await c.fetchval(
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_name = 'tenants' AND column_name = 'home_calling_code'"
+        ) == 0
+        _psql(name, "-f", str(SCHEMA))  # the retry, as a superuser, derives from the data
+        assert await _home(c, tenant) == "91"
+    finally:
+        await c.close()
 
 
 def test_sql_calling_code_list_equals_the_python_table():

@@ -1194,6 +1194,10 @@ ALTER TABLE tenants ADD  CONSTRAINT tenants_max_concurrent_calls_check
 -- superadmin has set since is never overwritten. Evidence, best first: the country code
 -- of the tenant's live DIDs (stored digits-only), else of its agents' transfer
 -- destinations written +CC... or 00CC...; the commonest code wins. No evidence keeps '1'.
+-- row_security is switched off for the block because phone_numbers and agents are FORCE
+-- RLS: an owner without BYPASSRLS would otherwise read no rows and silently give every
+-- tenant '1'. With it off, such an owner gets an error and the block rolls back, so the
+-- next apply retries; apply schema.sql as a superuser or a BYPASSRLS role.
 -- The code list is libs/config_sdk/calling_codes.py; a test keeps the two equal.
 DO $$
 BEGIN
@@ -1201,6 +1205,7 @@ BEGIN
     SELECT 1 FROM information_schema.columns
      WHERE table_schema = current_schema() AND table_name = 'tenants' AND column_name = 'home_calling_code'
   ) THEN
+    PERFORM set_config('row_security', 'off', true);
     ALTER TABLE tenants ADD COLUMN home_calling_code TEXT NOT NULL DEFAULT '1';
     WITH codes(code) AS (
       SELECT unnest(ARRAY[
