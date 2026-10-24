@@ -1,12 +1,17 @@
 # Code review
-VERDICT: AMBER
+VERDICT: GREEN
 
-Scope: admin-ui/ working-tree diff (round 3), checked against 02-design.md and 05-phase6-design.md (Interfaces and Test plan).
-Checks: `npx tsc --noEmit` exit 0. `npm run build` succeeds and emits the full route table.
+Scope (round 4): `git diff origin/redesign...HEAD -- admin-ui/`, checked against 02-design.md (Interfaces and Test plan).
+Checks: `npx tsc --noEmit` exits 0. `npm run build` exits 0 and emits the full route table.
 
 Prior findings:
 - R1-1 (agent_id error dropped): FIXED in R2, and it is still fixed.
 - R1-2 (CPS row stuck at "no limit"): FIXED in R2, and it is still fixed.
-- R2-1 (progress card shows blank busy/declined counts): FIXED for the card. `get_progress` (`services/campaigns/campaigns.py:165-166`) now selects `busy` and `declined`. `campaigns/[id]/page.tsx:413-420` renders all 8 statuses, and these are exactly the 8 that the CHECK at `schema.sql:651-652` allows. So the per-status counts add up to Total. The `ContactStatus` half of the R2-1 fix was NOT applied, so it carries forward as finding 1 below.
+- R2-1 (progress card is missing busy/declined): FIXED in R3, and it is still fixed (`campaigns/[id]/page.tsx:420-421`).
+- R3-1 (`ContactStatus` is missing busy/declined): FIXED. `lib/api.ts:1597` now lists all 8 CHECK values, and `contactBadgeClass` (`campaigns/[id]/page.tsx:160-161`) maps both to red, which matches the progress card.
 
-1. [minor] `ContactStatus` leaves out `busy` and `declined`, so it no longer matches the schema CHECK (`schema.sql:652`, design line 176) — `admin-ui/lib/api.ts:1597`. Fails when: a contact's last attempt is busy or declined, which gives the contact a final `busy`/`declined` status (design line 488). In the contacts table, `contactBadgeClass` (`campaigns/[id]/page.tsx:152-166`) sends that status to `default` and draws a gray badge. Gray is the badge colour for `pending`, while the progress card shows the same status in red. tsc can't catch this because the type says these values never occur. Fix: add `"busy" | "declined"` to `ContactStatus` and add both to the `"failed"`/`"no_answer"` red case.
+Backend changes verified this round:
+- `caller_id_not_routed_to_agent` is no longer referenced anywhere under admin-ui/. `ReadinessPanel` renders `checks` generically and keys its links on `field` (`FIELD_TARGETS`), not on the check id. When a check id is unknown or has been removed, the check still renders. Nothing is left referring to the old id.
+- T47 cross-tenant 404: `getCampaign` rejects into `setError(errText(e))` (`page.tsx:234`). The `!campaign` branch (`page.tsx:315`) then shows the back link and the server's "campaign not found" detail. It does not load the sections or start polling, because both run only after `getCampaign` resolves. The screen looks the same as for a campaign id that does not exist, so the UI adds no tenant-boundary signal (lesson 2).
+
+No findings.

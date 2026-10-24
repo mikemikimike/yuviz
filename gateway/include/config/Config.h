@@ -220,6 +220,12 @@ struct CallMetadata {
     std::string ani;              // calling number — feeds SessionContext::caller_did
     std::string direction{"inbound"};
     std::string freeswitch_host;  // originating FS node (hostname/IP); routes ESL commands
+    std::string tenant_slug;      // outbound campaign calls only: the campaign's own route
+    std::string agent_slug;
+
+    // Outbound calls that name their own tenant and agent skip the did: lookup;
+    // `did` is then only the caller ID shown to the callee.
+    [[nodiscard]] std::optional<PhoneRoute> direct_route() const;
 
     // raw is nullopt when no frame arrived in time.
     [[nodiscard]] static CallMetadata parse(

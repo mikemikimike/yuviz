@@ -142,6 +142,30 @@ async def test_late_answer_supersedes_the_next_attempt(scratch_pool):
     assert (await _state(scratch_pool, second["id"]))["failure_reason"] == "superseded"
 
 
+async def test_late_answer_completes_contact_that_failed_on_last_attempt(scratch_pool):
+    _, cont, row = await _make(scratch_pool, "open_sent", max_attempts=1)
+    await _apply(row, "failed", closed_by_deadline=True)
+    assert await scratch_pool.fetchval("SELECT status FROM campaign_contacts WHERE id = $1", cont["id"]) == "failed"
+    await _apply(row, "answered")
+    assert await scratch_pool.fetchval("SELECT status FROM campaign_contacts WHERE id = $1", cont["id"]) == "completed"
+
+
+async def test_list_open_reaches_pending_attempt_beyond_the_answered_backlog(scratch_pool):
+    async with scratch_pool.acquire() as conn:
+        tenant_id = await seed.tenant(conn)
+        camp = await seed.campaign(conn, tenant_id)
+        for _ in range(3):
+            cont = await seed.contact(conn, camp["id"], status="calling", attempt_count=1)
+            await seed.attempt(conn, camp, cont, state="resolved", outcome="answered")
+        cont = await seed.contact(conn, camp["id"], status="calling", attempt_count=1)
+        pending = await seed.attempt(conn, camp, cont, state="pending")
+        await conn.execute("UPDATE campaign_attempts SET deadline_at = now() - interval '1 minute' WHERE id = $1", pending["id"])
+    unresolved = await scratch_pool.fetchval("SELECT count(*) FROM campaign_attempts WHERE state <> 'resolved'")
+    rows = await attempts.list_open(limit=unresolved)
+    assert all(r["state"] != "resolved" for r in rows)
+    assert next(r for r in rows if r["id"] == pending["id"])["past_deadline"] is True
+
+
 async def test_concurrent_apply_outcome_has_one_winner(scratch_pool):
     _, _, row = await _make(scratch_pool, "open_sent")
     results = await asyncio.gather(*(_apply(row, "busy") for _ in range(8)))

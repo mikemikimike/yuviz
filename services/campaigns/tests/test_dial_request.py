@@ -23,7 +23,7 @@ SECRET = b"dial-test-secret"
 def _intent(**overrides) -> DialIntent:
     fields = dict(
         key=KEY, tenant_id=str(uuid.uuid4()), campaign_id=str(uuid.uuid4()), contact_id=str(uuid.uuid4()),
-        call_uuid=str(uuid.uuid4()), callee="+919876543210", caller_id="+918065354620", agent_did="+918065354620",
+        call_uuid=str(uuid.uuid4()), callee="+919876543210", caller_id="+918065354620", tenant_slug="yuviz", agent_slug="sales",
         max_call_s=900, egress_secret=b"egress", now=1_900_000_000,
     )
     fields.update(overrides)
@@ -107,7 +107,7 @@ _INJECTION_SHAPES = [
 
 
 @pytest.mark.parametrize("bad", _INJECTION_SHAPES)
-@pytest.mark.parametrize("field", ["callee", "caller_id", "agent_did"])
+@pytest.mark.parametrize("field", ["callee", "caller_id"])
 def test_number_fields_reject_injection_shapes(field, bad):
     with pytest.raises(InvalidDialField):
         _intent(**{field: bad})
@@ -116,6 +116,13 @@ def test_number_fields_reject_injection_shapes(field, bad):
 @pytest.mark.parametrize("bad", ["x\n", "x\x00", KEY + "\r\n", "../etc", ""])
 @pytest.mark.parametrize("field", ["key", "tenant_id", "campaign_id", "contact_id", "call_uuid"])
 def test_identifier_fields_reject_injection_shapes(field, bad):
+    with pytest.raises(InvalidDialField):
+        _intent(**{field: bad})
+
+
+@pytest.mark.parametrize("bad", ["x\n", "Yuviz", "a b", "-a", "a" * 64, "", "a/../b", "a\"b"])
+@pytest.mark.parametrize("field", ["tenant_slug", "agent_slug"])
+def test_slug_fields_reject_injection_shapes(field, bad):
     with pytest.raises(InvalidDialField):
         _intent(**{field: bad})
 
@@ -219,7 +226,7 @@ async def test_body_and_signature_match_the_shared_vector(scratch_redis, monkeyp
     monkeypatch.setattr(dial_request.time, "time", lambda: vec["ts"])
     intent = _intent(
         key=vec["key"], campaign_id=vec["campaign_id"], contact_id=vec["contact_id"], callee=vec["callee"],
-        caller_id=vec["caller_id"], agent_did=vec["agent_did"],
+        caller_id=vec["caller_id"], tenant_slug=vec["tenant_slug"], agent_slug=vec["agent_slug"],
     )
     assert canonical_body(intent, vec["ts"]).decode() == vec["body"]
     await client.send(intent, first=True)

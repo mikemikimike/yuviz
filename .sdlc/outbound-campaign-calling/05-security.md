@@ -1,20 +1,31 @@
-# Security review: feature/outbound-campaign-calling (round 3, working tree on ee0402b)
-VERDICT: AMBER
+# Security review: feature/outbound-campaign-calling (round 4, `git diff origin/redesign...HEAD`)
+VERDICT: GREEN
 
-No open critical or high findings. Prior findings: 0 fixed, 2 carried, 0 accepted. The three changes since the last round add no new findings.
+0 critical, 0 high, 0 medium, 1 low. Prior findings: 2 fixed, 0 carried, 0 accepted.
+- R3-1 [medium] campaign existence oracle: FIXED. Every `/campaigns/{id}/*` route goes through `_campaign_for` → `get_campaign_for_caller`, which pins `tenant_id = $2` for tenant callers and returns the same 404 for foreign and missing ids (`campaigns.py:24-33`, `routers/campaigns.py:29-32`).
+- R3-2 [low] raw callee in the DNC log: FIXED. The log now uses `attempts._mask_callee` (`worker.py:252-255`). No other campaigns or telephony log line carries a callee.
+
+## Listeners and reach
+- Kamailio `udp:LAN_IP:5060`: any LAN peer. Campaign `X-*` headers are stripped (`kamailio.cfg.tpl:671`). PSTN egress requires the fs-egress digest plus a token.
+- Kamailio `tcp:127.0.0.1/[::1]:5071`: local processes only. It needs the source allow-list and an HMAC. SIP arriving on 5071 is dropped (`:619`).
+- FreeSWITCH `campaign_egress :5090` (LAN IP, `auth-calls=false`): the context refuses all inbound with 403.
+- FreeSWITCH public `:5080`: the trigger is gated by acl `kamailio` and by a single-use Redis intent.
+- Redis `127.0.0.1:6379`: per-service ACL, `default` user off.
+- Telephony HTTP is bound to `BIND_ADDR` (127.0.0.1). Webhooks arrive through the public tunnel and are signature-verified.
 
 ## Findings
-1. [medium] CARRIED, unchanged. Campaign existence oracle. `get_campaign` filters only on `id` and relies on RLS, which is inert under the superuser DSN. A campaign in another tenant gets 403; a missing id gets 404. — `services/campaigns/campaigns.py:14-21`; every `/campaigns/{id}/*` route in `routers/campaigns.py`
-   Attack: a tenant-A viewer who holds a campaign UUID calls `GET /campaigns/{uuid}/progress`. The 403-vs-404 difference tells them whether that campaign exists in another tenant.
-   Fix: for non-platform callers, add `AND tenant_id = <caller tenant>` to the `get_campaign` SQL, and return the same 404 for "not yours" and "missing" (lessons 2, 36).
-
-2. [low] CARRIED, unchanged. The worker logs the raw callee at INFO when it blocks a DNC contact. — `services/campaigns/worker.py:136`
-   Attack: anyone who can read Campaigns logs gets the full phone numbers of opted-out people, across all tenants.
-   Fix: log only `contact["id"]` and a masked number. Add a log tripwire test (lesson 42).
+1. [low] Telephony's Redis user can write and delete `did:*` and `agent:*` (`+set +del ~agent:* ~did:*`), because the inventory includes `services/config/cache.py` wholesale. Telephony only reads `agent:*` (`ownership.py:58`). — `deployment/docker/redis/users.acl.tpl:8`, `scripts/redis_acl_inventory.py:19`
+   Attack: an attacker with code execution in Telephony, the internet-facing webhook ingress, overwrites `did:{X}` for another tenant's DID. That tenant's inbound calls then go to an agent the attacker chose. The ACL exists to bound exactly this kind of compromise.
+   Fix: give Telephony `+get` only on `~agent:* ~did:*`. Have the inventory classify the commands Telephony actually calls, not every command of an imported module.
 
 ## Verified controls
-- `claim_next_pending`: the `next_attempt_at` predicate is ANDed onto `campaign_id = $1`, so the claim is still scoped to one campaign. The `campaign_id` comes from the worker's own scan of running campaigns, not from a request. Contacts can only belong to that campaign (FK plus RLS through the parent; `rls.sql:368-374`).
-- Writes to `next_attempt_at` come only from the server. `attempts._mirror_contact` (`attempts.py:219-226`) joins `c.id = cc.campaign_id`, so the retry gap is always read from the contact's own campaign. No API route sets `next_attempt_at`.
-- `get_progress`: the busy and declined counts come from the same campaign-pinned `LEFT JOIN`. The `tenants` join goes through `c.tenant_id`. The route calls `assert_tenant_access` before the query (`routers/campaigns.py:89-96`).
-- `no_healthy_sip_node` warning (lesson 49 trace): a warning no longer blocks `ready`, so start and resume can proceed. The worker still dials through ESL and checks `caller_id_owned` before dialing (`worker.py:150`), and the readiness ownership check still blocks. `DialRequestClient.send()` still has no production caller, so the empty-HMAC-secret default reaches nothing. This replaces last round's note that "an unset secret fails closed".
-- Every control listed as verified in round 2 was re-checked against the unchanged code and still holds: `campaign_attempts` RLS and composite FKs, the capacity platform-operator gate, assert-before-work on `/attempts`, `/readiness`, `/start` and `/resume`, tenant-pinned readiness SQL, `caller-ids` scoping, and the validation-error body.
+- Unanchored `$rU =~ "100[0-2]"` before route(AUTH) (`:733`), assessed as pre-existing. It sends unauthenticated INVITEs to FS public :5080, which is the same exposure that 788/500x already have by design. It cannot reach PSTN: `route(PSTN_EGRESS)` runs after AUTH and requires the fs-egress digest (`auth_check` flag 1 binds the From user) plus a valid token. It is a functional defect for the critics: an egress INVITE whose callee contains 1000–1002 is diverted to FS public, and the call fails.
+- Egress token: the HMAC covers key|$rU|caller|tenant|max|exp, the format is strictly regex-checked, expiry is checked, PAI must equal the caller, and `X-Egress-Token` is stripped before the carrier. Single use is an atomic `sht_lock`-guarded set. Replay-table TTL is 300 s and the token lives 180 s (`dial_request.py:23-24`). A Kamailio restart clears the table, but a replay still needs the fs-egress credential.
+- Dial handler: HMAC over raw `$rb`, then the body must byte-equal a canonical rebuild, so there is no JSON smuggling. ±30 s window, 1 KB cap, empty secret refuses. The `!=` comparison is not constant-time and the window allows replay, but neither gains anything: FS trusts only the key and `GETDEL`s the intent (`start_campaign_call.lua:30`).
+- Lua: key regex and length checks run before the `hiredis_raw` string build. Intent fields are pattern-matched before `originate`, so nothing can inject a comma or brace. `campaign_*` channel variables cannot be set from SIP.
+- Status webhook: the signature is verified before the nonce `SET NX`. `tenant_id` comes from the verified account, never the body. For Vobiz, `unconfirmed` fields are hints only: the CPaaS hangup re-reads the provider API, and when the attempt has no call id the consumer checks to/from (`outcome_events.py:117-143`).
+- Stream source comes from the stream name. The conv stream is allowed no kinds. `apply_outcome` and `get_attempt` are tenant-scoped.
+- reconcile/status/readiness: `resolve_caller_tenant` returns 404 for foreign and unknown alike. Lookups use the tenant's own default account, and the idempotency key is tenant-scoped.
+- Worker: `caller_id_owned` is tenant-pinned SQL and gates before dialing. `agent_did` is set to the owned caller_id. DIDs are canonical and globally unique, so there is no cross-tenant DID collision.
+- Kamailio script secrets: the config is `chmod 600`, and secret charsets are validated so they cannot break out of sed or a quoted string.
+- Clinic `esl_originate.py` is a move only. `fullmatch` dial-number validation is unchanged.

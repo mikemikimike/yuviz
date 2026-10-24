@@ -21,7 +21,7 @@ SECRET = b"egress-test-secret"
 def _intent(**override):
     fields = dict(key=KEY, tenant_id="0b6f1c8e-1111-4222-8333-444455556666", campaign_id="aaaaaaaa-0000-4000-8000-000000000001",
                   contact_id="bbbbbbbb-0000-4000-8000-000000000002", call_uuid="cccccccc-0000-4000-8000-000000000003",
-                  callee="+919876543210", caller_id="+918065354620", agent_did="+918065354621", max_call_s=900,
+                  callee="+919876543210", caller_id="+918065354620", tenant_slug="yuviz", agent_slug="sales", max_call_s=900,
                   egress_secret=SECRET)
     fields.update(override)
     return dial_request.build_intent(**fields)
@@ -128,7 +128,7 @@ def test_an_expired_intent_is_rejected():
     assert _result(_run(_as_redis_would(_intent(now=int(time.time()) - 3600)))) == "rejected"
 
 
-@pytest.mark.parametrize("field", ["callee", "caller_id", "agent_did", "tenant_id", "call_uuid", "egress_token"])
+@pytest.mark.parametrize("field", ["callee", "caller_id", "tenant_slug", "agent_slug", "tenant_id", "call_uuid", "egress_token"])
 def test_an_intent_missing_a_field_is_rejected(field):
     raw = asdict(_intent())
     del raw[field]

@@ -27,6 +27,7 @@ HTTP_TIMEOUT_S = 3.0
 _KEY = re.compile(r"[0-9a-f-]{36}_[0-9]{1,3}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _E164 = re.compile(r"\+[1-9][0-9]{6,14}")
+_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
 _MAX_CALL_S = re.compile(r"[1-9][0-9]{1,3}")
 
 SendResult = Literal["accepted", "duplicate", "rejected", "no_node", "timeout"]
@@ -77,7 +78,8 @@ class DialIntent:
     call_uuid: str
     callee: str
     caller_id: str
-    agent_did: str
+    tenant_slug: str
+    agent_slug: str
     exp: int
     egress_token: str
     max_call_s: int
@@ -86,7 +88,8 @@ class DialIntent:
         patterns = (
             ("key", self.key, _KEY), ("tenant_id", self.tenant_id, _UUID), ("campaign_id", self.campaign_id, _UUID),
             ("contact_id", self.contact_id, _UUID), ("call_uuid", self.call_uuid, _UUID),
-            ("callee", self.callee, _E164), ("caller_id", self.caller_id, _E164), ("agent_did", self.agent_did, _E164),
+            ("callee", self.callee, _E164), ("caller_id", self.caller_id, _E164),
+            ("tenant_slug", self.tenant_slug, _SLUG), ("agent_slug", self.agent_slug, _SLUG),
             ("max_call_s", str(self.max_call_s), _MAX_CALL_S),
         )
         for name, value, pattern in patterns:
@@ -96,7 +99,7 @@ class DialIntent:
 
 def build_intent(
     *, key: str, tenant_id: str, campaign_id: str, contact_id: str, call_uuid: str, callee: str, caller_id: str,
-    agent_did: str, max_call_s: int, egress_secret: bytes, now: int | None = None,
+    tenant_slug: str, agent_slug: str, max_call_s: int, egress_secret: bytes, now: int | None = None,
 ) -> DialIntent:
     exp = (int(time.time()) if now is None else now) + INTENT_TTL_S
     token = egress_token(
@@ -105,7 +108,8 @@ def build_intent(
     )
     return DialIntent(
         key=key, tenant_id=tenant_id, campaign_id=campaign_id, contact_id=contact_id, call_uuid=call_uuid,
-        callee=callee, caller_id=caller_id, agent_did=agent_did, exp=exp, egress_token=token, max_call_s=max_call_s,
+        callee=callee, caller_id=caller_id, tenant_slug=tenant_slug,
+        agent_slug=agent_slug, exp=exp, egress_token=token, max_call_s=max_call_s,
     )
 
 
@@ -113,7 +117,8 @@ def canonical_body(intent: DialIntent, ts: int) -> bytes:
     """Fixed key order and no whitespace: Kamailio rebuilds this and requires byte equality."""
     fields = {
         "key": intent.key, "campaign_id": intent.campaign_id, "contact_id": intent.contact_id,
-        "callee": intent.callee, "caller_id": intent.caller_id, "agent_did": intent.agent_did, "ts": ts,
+        "callee": intent.callee, "caller_id": intent.caller_id,
+        "tenant_slug": intent.tenant_slug, "agent_slug": intent.agent_slug, "ts": ts,
     }
     return json.dumps(fields, separators=(",", ":")).encode()
 

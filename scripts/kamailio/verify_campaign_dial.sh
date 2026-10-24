@@ -45,7 +45,7 @@ for spec in E["VERIFY_NODES"].split():
     name, sip, esl, log = spec.split("|")
     host, port = sip.rsplit(":", 1)
     NODES[name] = dict(sip=(host, int(port)), esl=esl, log=log)
-CALLER_ID, AGENT_DID, TENANT = "+15559990001", "+15558880001", str(uuid.uuid4())
+CALLER_ID, TENANT_SLUG, AGENT_SLUG, TENANT = "+15559990001", "rig-tenant", "rig-agent", str(uuid.uuid4())
 results: list[tuple[bool, str]] = []
 
 
@@ -93,7 +93,7 @@ def post(base, path, raw, sig=None, method="POST"):
 def new_intent(callee, *, max_call_s=10, caller_id=CALLER_ID):
     key = f"{uuid.uuid4()}_1"
     intent = dr.build_intent(key=key, tenant_id=TENANT, campaign_id=str(uuid.uuid4()), contact_id=str(uuid.uuid4()),
-                             call_uuid=str(uuid.uuid4()), callee=callee, caller_id=caller_id, agent_did=AGENT_DID,
+                             call_uuid=str(uuid.uuid4()), callee=callee, caller_id=caller_id, tenant_slug=TENANT_SLUG, agent_slug=AGENT_SLUG,
                              max_call_s=max_call_s, egress_secret=EGRESS_SECRET)
     return intent
 
@@ -399,7 +399,7 @@ sent = [dial(c) for c in callees]
 check("ten dials are accepted", all(st == 200 for _, st, _ in sent), [st for _, st, _ in sent])
 forks = lambda: "".join(read(p) for p in node_logs())
 check("each of the ten calls starts a conversation with direction=outbound, did=agent DID and ani=callee",
-      wait_for(lambda: all(re.search(rf'RIG_FORK \S+ start \S+ mono 16000 {{"did":"{re.escape(AGENT_DID)}","ani":"{re.escape(c)}","direction":"outbound"', forks()) for c in callees), 40),
+      wait_for(lambda: all(re.search(rf'RIG_FORK \S+ start \S+ mono 16000 {{"did":"{re.escape(CALLER_ID)}","ani":"{re.escape(c)}","direction":"outbound"', forks()) for c in callees), 40),
       "missing: " + ",".join(c for c in callees if c not in forks()))
 check("the ten calls were spread over both nodes by the dispatcher", all(count(n["log"], "RIG_FORK") > 0 for n in NODES.values()))
 

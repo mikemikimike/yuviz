@@ -93,7 +93,7 @@ async def list_for_campaign(campaign_id: UUID, tenant_id: UUID) -> list[dict[str
 
 
 async def list_open(limit: int = 200) -> list[dict[str, Any]]:
-    """Unresolved or still-answered attempts with what reconcile needs; time tests run in SQL on one clock."""
+    """Unresolved attempts first, then still-answered ones, with what reconcile needs; time tests run in SQL on one clock."""
     pool = await db.get_pool()
     async with platform_conn(pool, reason="campaign-dial-state") as conn:
         rows = await conn.fetch(
@@ -110,7 +110,7 @@ async def list_open(limit: int = 200) -> list[dict[str, Any]]:
             LEFT JOIN agents ag ON ag.id = c.agent_id AND ag.tenant_id = a.tenant_id
             LEFT JOIN calls cl ON cl.session_id = a.call_session_id AND cl.tenant_id = t.slug
             WHERE a.state <> 'resolved' OR a.outcome = 'answered'
-            ORDER BY a.created_at LIMIT $1
+            ORDER BY (a.state = 'resolved'), a.created_at LIMIT $1
             """,
             limit,
         )
@@ -211,7 +211,7 @@ async def _mirror_contact(conn: asyncpg.Connection, attempt: dict[str, Any]) -> 
         )
         await conn.execute(
             "UPDATE campaign_contacts SET status = 'completed', next_attempt_at = NULL, "
-            "call_session_id = COALESCE($2, call_session_id) WHERE id = $1 AND status IN ('pending', 'calling')",
+            "call_session_id = COALESCE($2, call_session_id) WHERE id = $1 AND status IN ('pending', 'calling', 'failed')",
             attempt["contact_id"], attempt["call_session_id"],
         )
         return

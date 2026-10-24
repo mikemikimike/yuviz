@@ -16,7 +16,7 @@ CLIENTS: dict[str, list[str]] = {
     "did": ["services/did"],
     "knowledge": ["services/knowledge"],
     "conversation": ["services/conversation", "libs/config_sdk", "libs/knowledge_sdk"],
-    "telephony": ["services/telephony", "libs/telephony_sdk/did_route.py", "services/config/cache.py"],
+    "telephony": ["services/telephony", "libs/telephony_sdk/did_route.py"],
     "campaigns": ["services/campaigns"],
 }
 

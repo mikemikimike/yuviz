@@ -39,3 +39,8 @@ def test_both_live_loop_guards_use_the_dispatcher_list_when_campaign_dial_is_on(
 
 def test_the_commented_out_guard_is_untouched():
     assert _COMMENTED_GUARD in _TPL
+
+
+def test_extension_and_did_matches_are_anchored_so_a_callee_number_cannot_contain_them():
+    assert not re.search(r'\$rU =~ "(?!\^)[^"]*(100\[0-2\]|500\[0-9\])', _TPL)
+    assert '$rU =~ "^500[0-9]$"' in _TPL and '$rU =~ "^100[0-2]$"' in _TPL

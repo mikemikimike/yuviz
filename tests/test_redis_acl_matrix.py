@@ -101,6 +101,14 @@ def test_default_user_is_off(port):
         redis.Redis(port=port, password="anything").ping()
 
 
+def _narrowed(client: str, cmd: str, key: str) -> bool:
+    """Telephony reads did:/agent: only, writes (never reads) its health keys, and never deletes health keys."""
+    if client != "telephony":
+        return False
+    return (key.startswith(("did:", "agent:")) and cmd != "get") or \
+           (key.startswith("telephony:health:") and cmd in {"get", "del"})
+
+
 def test_every_inventory_command_succeeds_for_its_own_client(port):
     exercised = 0
     for client, entry in inv_mod.inventory().items():
@@ -125,7 +133,7 @@ def test_every_inventory_command_succeeds_for_its_own_client(port):
                     exercised += 1
                 continue
             else:
-                for k in keys:
+                for k in (k for k in keys if not _narrowed(client, cmd, k)):
                     {"get": lambda: r.get(k), "mget": lambda: r.mget(k), "set": lambda: r.set(k, "v"),
                      "del": lambda: r.delete(k), "exists": lambda: r.exists(k)}[cmd]()
                     exercised += 1
@@ -139,5 +147,11 @@ def test_inventory_commands_are_denied_on_keys_outside_the_client(port):
         r = _as(port, client)
         assert _denied(lambda: r.set("campaign:cbprop:x", "v"))
         assert _denied(lambda: r.get("campaign:cbprop:x"))
+    tel = _as(port, "telephony")
+    for key in ("did:x", "agent:x"):
+        tel.get(key)
+        assert _denied(lambda: tel.set(key, "v"))
+        assert _denied(lambda: tel.delete(key))
+    assert _denied(lambda: tel.publish("provider_config_changed", "m"))
     assert _denied(lambda: _as(port, "did").get("did:x"))
     assert _denied(lambda: _as(port, "gateway").set("did:x", "v"))

@@ -730,7 +730,7 @@ if (is_method("INVITE")) {
    }    
 
     # Only target our internal extensions
-    if ($rU =~ "100[0-2]") {
+    if ($rU =~ "^100[0-2]$") {
 
         # --- BLOCK 1: THE GATEKEEPER (Call coming BACK from FreeSWITCH) ---
         # FreeSWITCH has completed control/media handling and wants to deliver the call
@@ -794,7 +794,7 @@ if (is_method("INVITE")) {
     }
 
     # 2. Check the destination (Callee)
-    if ($rU =~ "100[0-2]") {
+    if ($rU =~ "^100[0-2]$") {
         
         # Look up where the user is actually registered
         if (lookup("location")) {
@@ -818,7 +818,7 @@ if (is_method("INVITE")) {
               record_route();
 
               # Check if the dialed number ($rU) is 1000-1002
-              if ($rU =~ "100[0-2]") {
+              if ($rU =~ "^100[0-2]$") {
             
                  $du = "sip:__LAN_IP__:5080;transport=udp"; 
             
@@ -851,7 +851,7 @@ if (is_method("INVITE")) {
 
     # --- 2. THE DISPATCHER (Your Code) ---
     # If the call is NOT from FreeSWITCH, send it TO FreeSWITCH
-    if ($rU =~ "100[0-2]") {
+    if ($rU =~ "^100[0-2]$") {
         if (!ds_select_dst("1", "4")) {
             xlog("L_ERR", "Dispatcher: No nodes available for $rU\n");
             sl_send_reply("503", "Service Unavailable");
@@ -1512,7 +1512,8 @@ event_route[xhttp:request] {
 
 		if (!jansson_get("key", "$rb", "$var(key)") || !jansson_get("campaign_id", "$rb", "$var(campaign)")
 				|| !jansson_get("contact_id", "$rb", "$var(contact)") || !jansson_get("callee", "$rb", "$var(callee)")
-				|| !jansson_get("caller_id", "$rb", "$var(cid)") || !jansson_get("agent_did", "$rb", "$var(agent)")
+				|| !jansson_get("caller_id", "$rb", "$var(cid)") || !jansson_get("tenant_slug", "$rb", "$var(tslug)")
+				|| !jansson_get("agent_slug", "$rb", "$var(aslug)")
 				|| !jansson_get("ts", "$rb", "$var(ts)")) {
 			xhttp_reply("400", "Bad Request", "application/json", "{\"result\":\"bad_request\"}");
 			exit;
@@ -1526,13 +1527,14 @@ event_route[xhttp:request] {
 				|| !($var(campaign) =~ "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 				|| !($var(contact) =~ "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 				|| !($var(callee) =~ "^[+][1-9][0-9]{6,14}$") || !($var(cid) =~ "^[+][1-9][0-9]{6,14}$")
-				|| !($var(agent) =~ "^[+][1-9][0-9]{6,14}$")) {
+				|| !($var(tslug) =~ "^[a-z0-9][a-z0-9_-]{0,62}$") || !($var(aslug) =~ "^[a-z0-9][a-z0-9_-]{0,62}$")) {
 			xhttp_reply("400", "Bad Request", "application/json", "{\"result\":\"bad_request\"}");
 			exit;
 		}
 		$var(canon) = "{\"key\":\"" + $var(key) + "\",\"campaign_id\":\"" + $var(campaign)
 				+ "\",\"contact_id\":\"" + $var(contact) + "\",\"callee\":\"" + $var(callee)
-				+ "\",\"caller_id\":\"" + $var(cid) + "\",\"agent_did\":\"" + $var(agent)
+				+ "\",\"caller_id\":\"" + $var(cid) + "\",\"tenant_slug\":\"" + $var(tslug)
+				+ "\",\"agent_slug\":\"" + $var(aslug)
 				+ "\",\"ts\":" + $var(ts) + "}";
 		if ($var(canon) != $rb) {
 			xhttp_reply("400", "Bad Request", "application/json", "{\"result\":\"bad_request\"}");

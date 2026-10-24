@@ -137,7 +137,7 @@ def campaign_intent(attempt):
     return build_intent(
         key=attempt["idempotency_key"], tenant_id=str(attempt["tenant_id"]), campaign_id=str(attempt["campaign_id"]),
         contact_id=str(attempt["contact_id"]), call_uuid=attempt["call_session_id"], callee=attempt["callee"],
-        caller_id=attempt["caller_id"], agent_did=attempt["caller_id"], max_call_s=attempt["max_call_s"], egress_secret=b"e",
+        caller_id=attempt["caller_id"], tenant_slug="t", agent_slug="a", max_call_s=attempt["max_call_s"], egress_secret=b"e",
     )
 
 

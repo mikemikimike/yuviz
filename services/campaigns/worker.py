@@ -155,7 +155,7 @@ class CampaignWorker:
             await self._send_sip(row, first=False)
 
     async def _reconcile_cpaas(self, row: dict[str, Any]) -> None:
-        if row["state"] == "pending" and row["send_due"]:
+        if row["state"] == "pending" and row["send_due"] and row["resend_age"] and row["send_count"] < attempts.MAX_SENDS:
             try:
                 result = await telephony_originate.reconcile_call(
                     provider=row["provider"], tenant_slug=row["tenant_slug"], idempotency_key=row["idempotency_key"],
@@ -274,10 +274,11 @@ class CampaignWorker:
         if isinstance(claim, campaign_contacts.Waiting):
             return
         self._last_attempt_at[campaign_id] = now
+        attempt = {**claim.attempt, "tenant_slug": route["tenant_slug"], "agent_slug": route["agent_slug"]}
         if path == "sip":
-            await self._send_sip(claim.attempt, first=True)
+            await self._send_sip(attempt, first=True)
         else:
-            await self._send_cpaas({**claim.attempt, "tenant_slug": route["tenant_slug"], "agent_slug": route["agent_slug"]})
+            await self._send_cpaas(attempt)
 
     # ── send ─────────────────────────────────────────────────────────────
 
@@ -288,7 +289,8 @@ class CampaignWorker:
                 key=attempt["idempotency_key"], tenant_id=str(attempt["tenant_id"]),
                 campaign_id=str(attempt["campaign_id"]), contact_id=str(attempt["contact_id"]),
                 call_uuid=attempt["call_session_id"], callee=attempt["callee"], caller_id=attempt["caller_id"],
-                agent_did=attempt["caller_id"], max_call_s=attempt["max_call_s"], egress_secret=self._egress_secret,
+                tenant_slug=attempt["tenant_slug"], agent_slug=attempt["agent_slug"], max_call_s=attempt["max_call_s"],
+                egress_secret=self._egress_secret,
             )
             result = await self._dial.send(intent, first=first)
             if result in ("accepted", "duplicate"):

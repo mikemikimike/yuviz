@@ -163,7 +163,7 @@ async def test_a_live_claim_at_the_deadline_is_not_failed_and_after_expiry_it_re
 async def test_b_pending_reconcile_placed_adopts_the_provider_call(scratch_pool, redis_raw, monkeypatch):
     world = await _setup(scratch_pool, provider="fake")
     async with scratch_pool.acquire() as conn:
-        _, att = await w.open_attempt(conn, world, path="cpaas", provider="fake")
+        _, att = await w.open_attempt(conn, world, path="cpaas", provider="fake", age_s=30)
 
     async def placed(**kw):
         return {"outcome": "placed", "provider_call_id": "vendor-9"}
@@ -177,7 +177,7 @@ async def test_b_pending_reconcile_placed_adopts_the_provider_call(scratch_pool,
 async def test_b_pending_not_placed_sends_once_and_unknown_sends_nothing(scratch_pool, redis_raw, monkeypatch):
     world = await _setup(scratch_pool, provider="fake")
     async with scratch_pool.acquire() as conn:
-        _, att = await w.open_attempt(conn, world, path="cpaas", provider="fake")
+        _, att = await w.open_attempt(conn, world, path="cpaas", provider="fake", age_s=30)
     scripted = {"outcome": "unknown", "provider_call_id": None}
     sends = []
 
@@ -198,6 +198,30 @@ async def test_b_pending_not_placed_sends_once_and_unknown_sends_nothing(scratch
     await _reconcile(redis_raw)
     assert sends == [att["idempotency_key"]]
     assert (await _attempt(scratch_pool, att["idempotency_key"]))["provider_call_id"] == "vendor-1"
+
+
+async def test_b_unconfirmed_resend_is_capped_and_a_young_attempt_is_left_alone(scratch_pool, redis_raw, monkeypatch):
+    world = await _setup(scratch_pool, provider="fake")
+    async with scratch_pool.acquire() as conn:
+        _, young = await w.open_attempt(conn, world, path="cpaas", provider="fake")
+        _, old = await w.open_attempt(conn, world, path="cpaas", provider="fake", age_s=30)
+    reconciles, sends = [], []
+
+    async def reconcile(**kw):
+        reconciles.append(kw["idempotency_key"])
+        return {"outcome": "not_placed", "provider_call_id": None}
+
+    async def originate(**kw):
+        sends.append(kw["idempotency_key"])
+        raise telephony_originate.TelephonyOriginatePending("202")
+
+    monkeypatch.setattr(telephony_originate, "reconcile_call", reconcile)
+    monkeypatch.setattr(telephony_originate, "originate_call", originate)
+    for _ in range(5):
+        await _reconcile(redis_raw)
+    assert set(reconciles) == {old["idempotency_key"]} and len(reconciles) <= attempts.MAX_SENDS
+    assert sends == [old["idempotency_key"]]
+    assert (await _attempt(scratch_pool, old["idempotency_key"]))["send_count"] == attempts.MAX_SENDS
 
 
 async def test_b_rate_limited_send_holds_the_attempt_back_and_moves_the_deadline(scratch_pool, redis_raw, monkeypatch):

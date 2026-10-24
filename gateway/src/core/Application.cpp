@@ -220,8 +220,10 @@ void Application::wire_websocket_handlers() {
                         "Metadata frame resolved sid={} did={} ani={} direction={} fs_host={}",
                         sid, md.did, md.ani, md.direction, md.freeswitch_host);
 
-                    const auto [status, route] =
-                        resolve_route(*redis_client_, md.did, did_route_cache_);
+                    const auto direct = md.direct_route();
+                    const auto [status, route] = direct
+                        ? RouteResolution{RoutingStatus::Routed, *direct}
+                        : resolve_route(*redis_client_, md.did, did_route_cache_);
                     if (status == RoutingStatus::Routed) {
                         logger_->info(
                             "Route resolved sid={} status={} tenant={} agent={} version={}",

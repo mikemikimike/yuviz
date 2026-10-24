@@ -1,7 +1,7 @@
 -- start_campaign_call.lua — dialplan script for the trigger INVITE Kamailio sends for a campaign dial.
 --
 -- The intent in Redis (written only by Campaigns, consumed once here) is the sole source of the callee,
--- caller ID, tenant and time limit; the INVITE supplies only the key. Any doubt answers "rejected" and
+-- caller ID, tenant, agent and time limit; the INVITE supplies only the key. Any doubt answers "rejected" and
 -- dials nothing. The reply is a 603 whose X-Campaign-Result Kamailio logs: accepted, duplicate or rejected.
 
 local EGRESS_GRACE_S = 120   -- Campaigns' egress token outlives the intent by this much (dial_request.py)
@@ -36,12 +36,13 @@ local intent = {
     tenant_id = field(raw, "tenant_id", "[0-9a-f%-]+"),
     callee = field(raw, "callee", "%+[1-9]%d+"),
     caller_id = field(raw, "caller_id", "%+[1-9]%d+"),
-    agent_did = field(raw, "agent_did", "%+[1-9]%d+"),
+    tenant_slug = field(raw, "tenant_slug", "[a-z0-9][a-z0-9_%-]*"),
+    agent_slug = field(raw, "agent_slug", "[a-z0-9][a-z0-9_%-]*"),
     egress_token = field(raw, "egress_token", "[%w%._%+%-]+"),
     exp = tonumber(raw:match('"exp"%s*:%s*(%d+)')),
     max_call_s = raw:match('"max_call_s"%s*:%s*(%d+)'),
 }
-for _, name in ipairs({"key", "call_uuid", "tenant_id", "callee", "caller_id", "agent_did", "egress_token", "exp", "max_call_s"}) do
+for _, name in ipairs({"key", "call_uuid", "tenant_id", "callee", "caller_id", "tenant_slug", "agent_slug", "egress_token", "exp", "max_call_s"}) do
     if not intent[name] then return reject("intent lacks " .. name) end
 end
 if intent.key ~= key then return reject("intent is for another key") end
@@ -67,8 +68,10 @@ local vars = table.concat({
     "origination_caller_id_number=" .. intent.caller_id,
     "originate_timeout=45",
     "campaign_key=" .. key,
+    "campaign_caller_id=" .. intent.caller_id,
     "campaign_tenant_id=" .. intent.tenant_id,
-    "campaign_agent_did=" .. intent.agent_did,
+    "campaign_tenant_slug=" .. intent.tenant_slug,
+    "campaign_agent_slug=" .. intent.agent_slug,
     "campaign_callee=" .. intent.callee,
     "sip_h_X-Egress-Token=" .. intent.egress_token,
     "sip_cid_type=pid",

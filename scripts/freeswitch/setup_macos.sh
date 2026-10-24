@@ -134,6 +134,7 @@ _secret() {
   printf '%s' "$v"
 }
 
+"$HERE/install_campaign_config.sh" "$CONF"
 cp "$HERE/000_campaign_trigger.xml" "$CONF/dialplan/public/000_campaign_trigger.xml"
 cp "$HERE/campaign_egress_refuse.xml" "$CONF/dialplan/campaign_egress_refuse.xml"
 cp "$HERE/kamailio_egress.xml" "$CONF/sip_profiles/kamailio_egress.xml"
