@@ -755,6 +755,39 @@ async def test_invalid_grant_delivered_to_a_refresh_that_lost_the_race_does_not_
 
 
 @pytest.mark.asyncio
+async def test_concurrent_refreshes_under_strict_reuse_detection_all_use_the_winners_token(pool, tenants, fake):
+    """The provider honours a refresh token once: the first use succeeds after a delay, any later use
+    is refused with invalid_grant at once. Every concurrent caller must end up with the winner's token
+    and the row must stay connected."""
+    made, users = tenants
+    connection = await _connect(made["a"], users["a"], fake, refresh="rt-original")
+    await _expire_access_token(pool, connection["id"])
+    used: list[str] = []
+
+    async def _strict(request):
+        refresh_token = fake.form(request)["refresh_token"]
+        if refresh_token in used:
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        used.append(refresh_token)
+        await asyncio.sleep(0.2)
+        return httpx.Response(200, json={"access_token": "at-winner", "refresh_token": "rt-rotated", "expires_in": 3600})
+
+    fake.token = _strict
+    fake.requests.clear()
+    results = []
+    for _ in range(3):
+        results.append(asyncio.create_task(oauth.access_token_for(made["a"], str(connection["id"]))))
+        await asyncio.sleep(0.05)
+    tokens = [(await r)[0] for r in results]
+
+    assert tokens == ["at-winner"] * 3
+    assert len(fake.requests) == 1
+    row = await pool.fetchrow("SELECT * FROM oauth_connections WHERE id = $1", connection["id"])
+    assert row["status"] == "connected"
+    assert decrypt_tenant_secret(made["a"], row["refresh_token_ref"]) == "rt-rotated"
+
+
+@pytest.mark.asyncio
 async def test_a_5xx_refresh_leaves_the_status_unchanged(pool, tenants, fake):
     made, users = tenants
     connection = await _connect(made["a"], users["a"], fake)

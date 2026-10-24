@@ -18,6 +18,7 @@ platform CompositeSecretResolver, never the tenant resolver.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import datetime
 import hashlib
@@ -25,6 +26,7 @@ import json
 import logging
 import os
 import secrets
+import weakref
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
@@ -49,6 +51,7 @@ _EXPIRY_SKEW_SECONDS = 60
 _PROVIDER_TIMEOUT_S = 10.0
 _API_KEY_VERIFY_URLS = {"calcom": "https://api.cal.com/v2/me"}
 _REDIRECT_URI_ENV = "TOOLEXEC_OAUTH_REDIRECT_URI"
+_refresh_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 # What a connection row may reveal: no *_ref, no provider_sub.
 _PUBLIC_COLUMNS = "id, provider, status, account_label, scopes, updated_at"
@@ -487,24 +490,48 @@ async def post_json(tenant_id: str, connection_id: Any, url: str, body: Any) -> 
     return resp.json()
 
 
-async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAuthProvider, str | None, str]:
+def _expiring(row: Any) -> bool:
+    return (row["access_expires_at"] - datetime.datetime.now(datetime.timezone.utc)).total_seconds() <= _EXPIRY_SKEW_SECONDS
+
+
+async def _connection_row(tenant_id: str, connection_id: Any) -> Any:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
-        row = await conn.fetchrow(
+        return await conn.fetchrow(
             "SELECT * FROM oauth_connections WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL",
             tenant_id, connection_id,
         )
+
+
+async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAuthProvider, str | None, str]:
+    row = await _connection_row(tenant_id, connection_id)
     if row is None or row["status"] != "connected":
         raise ReconnectRequired
     spec = PROVIDERS[row["provider"]]
     # A static API key has no expiry and no refresh path: it never refreshes and never flips `status`.
-    if row["auth_kind"] == "api_key" or (
-        row["access_expires_at"] - datetime.datetime.now(datetime.timezone.utc)
-    ).total_seconds() > _EXPIRY_SKEW_SECONDS:
+    if row["auth_kind"] == "api_key" or not _expiring(row):
         token = await auth_schemes.resolve_tenant_ref(tenant_id, row["access_token_ref"])
     else:
-        token = await _refresh(tenant_id, row, spec)
+        token = await _refresh_serialized(tenant_id, row, spec)
     return token, spec, row["api_base_url"], row["auth_kind"]
+
+
+async def _refresh_serialized(tenant_id: str, row: Any, spec: OAuthProvider) -> str:
+    """Concurrent refreshes of one connection in this process run one at a time,
+    and each re-reads the row once it holds the lock. A provider that rejects a
+    reused refresh token (Salesforce with rotation on) answers a second
+    in-flight refresh with invalid_grant before the first has committed, which
+    would flip a healthy connection to reconnect_needed. Across replicas the
+    conditional writes in _refresh still arbitrate."""
+    key = str(row["id"])
+    lock = _refresh_locks.get(key) or _refresh_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        current = await _connection_row(tenant_id, row["id"])
+        if current is None or current["status"] != "connected":
+            raise ReconnectRequired
+        if not _expiring(current):
+            return await auth_schemes.resolve_tenant_ref(tenant_id, current["access_token_ref"])
+        return await _refresh(tenant_id, current, spec)
 
 
 async def _winners_token(tenant_id: str, connection_id: Any) -> str:

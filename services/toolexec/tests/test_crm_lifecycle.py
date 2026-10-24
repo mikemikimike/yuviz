@@ -180,12 +180,11 @@ async def test_two_concurrent_refreshes_leave_one_winner_and_the_row_keeps_a_ref
     first, second = await asyncio.gather(_lookup(tenant, agent), _lookup(tenant, agent))
 
     assert first.chain_status == second.chain_status == "success"
-    assert len(provider.calls("/token")) == 2
+    assert len(provider.calls("/token")) == 1                            # the loser waits, re-reads, reuses
     row = await _connection(pool, connection)
     stored_access = decrypt_tenant_secret(str(tenant["id"]), row["access_token_ref"])
     stored_refresh = decrypt_tenant_secret(str(tenant["id"]), row["refresh_token_ref"])
-    assert stored_refresh in {"rt-new-1", "rt-new-2"}                    # never lost, never the spent one
-    assert stored_access == f"at-new-{stored_refresh[-1]}"               # one winner's pair, not a mix
+    assert (stored_access, stored_refresh) == ("at-new-1", "rt-new-1")   # the one winner's pair, never the spent one
     assert {r.headers["authorization"] for r in upstream.requests} == {f"Bearer {stored_access}"}  # loser used it
 
 
