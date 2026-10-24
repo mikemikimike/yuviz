@@ -1044,6 +1044,14 @@ class PipelineConversationHandler:
                     yield HandlerResponse(tts_payloads=[tts_audio])
                 if cancel_event.is_set():
                     break
+        except (GeneratorExit, asyncio.CancelledError):
+            # Caller hung up mid-turn: nothing below this loop runs, so persist what the turn produced.
+            if self._transcripts is not None:
+                self._transcripts.record_turn(
+                    session_id, stt_result.text, stt_result.confidence,
+                    DirectiveParser.parse("".join(full_response)).clean_text.strip(), True,
+                )
+            raise
         finally:
             # Stop the model/voice task without awaiting it: awaiting here could swallow a cancellation aimed
             # at this turn itself. The callback reads its outcome so nothing is logged as never retrieved.

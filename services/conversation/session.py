@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import AsyncGenerator, Protocol
@@ -262,21 +263,23 @@ class ConversationSession:
         self._fsm.on_speech_ended(duration_ms, energy_db)
 
         first_tts = True
-        async for response in self._handler.on_speech_ended(
+        # aclosing: a hangup closes this generator, and the handler's turn must see it to persist.
+        async with aclosing(self._handler.on_speech_ended(
             self._ctx.session_id, audio, duration_ms, energy_db
-        ):
-            if response.tts_payloads:
-                self._tts_seq += len(response.tts_payloads)
+        )) as turn:
+            async for response in turn:
+                if response.tts_payloads:
+                    self._tts_seq += len(response.tts_payloads)
 
-            if response.stt_text:
-                self._fsm.on_stt_final(response.stt_text, response.stt_confidence)
+                if response.stt_text:
+                    self._fsm.on_stt_final(response.stt_text, response.stt_confidence)
 
-            if response.tts_payloads and first_tts:
-                self._fsm.on_text_ready()
-                self._fsm.on_first_audio_chunk()
-                first_tts = False
+                if response.tts_payloads and first_tts:
+                    self._fsm.on_text_ready()
+                    self._fsm.on_first_audio_chunk()
+                    first_tts = False
 
-            yield response
+                yield response
 
         # Turn didn't complete: return to LISTENING. SPEAKING too, since unsent
         # TTS means no playback_finished will ever arrive.

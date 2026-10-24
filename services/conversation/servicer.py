@@ -288,6 +288,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
 
         msg_fut: asyncio.Future | None = None
         out_fut: asyncio.Future | None = None
+        turn = None
 
         # Messages taken off msg_q while a turn runs, ahead of anything still queued.
         backlog: collections.deque[pb.GatewayMessage | None] = collections.deque()
@@ -403,9 +404,10 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     end_call_grace_period = 0
                     turn_transfer         = None
 
-                    turn_stream = _turn_responses(
-                        session.speech_ended(se.duration_ms, se.energy_db).__aiter__()
-                    )
+                    # Keep the inner turn: teardown must aclose() it (not only the wrapper) so the
+                    # pipeline's GeneratorExit handler records the interrupted turn.
+                    turn = session.speech_ended(se.duration_ms, se.energy_db)
+                    turn_stream = _turn_responses(turn.__aiter__())
                     async for response in turn_stream:
                         # Drain BEFORE sending so a cancel_generation that arrived
                         # during synthesis stops this turn's audio from being sent.
@@ -744,6 +746,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             except asyncio.CancelledError:
                 pass
 
+            # A hangup abandons the turn at a yield; close it so the pipeline persists the turn before close().
+            if turn is not None:
+                await turn.aclose()
             await session.close("stream_ended")
             # Drain the bus before stopping so SessionEnded and other close-path
             # events are delivered to subscribers.
