@@ -11,9 +11,22 @@ from typing import Any, Literal
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import attempts, capacity, db
+from .dial_request import is_e164
 
 _PHONE_SEPARATORS = str.maketrans("", "", " -().")
 _DIAL_NUMBER_RE = re.compile(r"\+?[0-9]{3,15}")
+
+
+def _normalize_to_e164(phone: str) -> str | None:
+    """Normalize a phone number to E.164 format. Returns None if normalization fails."""
+    phone = phone.translate(_PHONE_SEPARATORS)
+    if not _DIAL_NUMBER_RE.fullmatch(phone):
+        return None
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    if phone.startswith("+0"):
+        phone = "+" + phone[2:]
+    return phone if is_e164(phone) else None
 
 
 @dataclass(frozen=True)
@@ -30,7 +43,7 @@ class Waiting:
 def parse_contacts_csv(content: bytes) -> list[dict[str, str]]:
     """Parse a CSV with a 'phone_number' (and optional 'name') column; blank rows skipped.
 
-    Any invalid number fails the whole upload, naming spreadsheet rows (header = row 1)."""
+    Phone numbers are normalised to E.164 format. Any invalid number fails the whole upload, naming spreadsheet rows (header = row 1)."""
     text = content.decode("utf-8-sig")  # -sig: strips a BOM Excel-exported CSVs commonly carry
     reader = csv.DictReader(io.StringIO(text))
     if reader.fieldnames is None or "phone_number" not in [f.strip().lower() for f in reader.fieldnames]:
@@ -46,15 +59,15 @@ def parse_contacts_csv(content: bytes) -> list[dict[str, str]]:
         phone = (row.get(phone_col) or "").strip()
         if not phone:
             continue
-        phone = phone.translate(_PHONE_SEPARATORS)
-        if _DIAL_NUMBER_RE.fullmatch(phone) is None:
+        normalized = _normalize_to_e164(phone)
+        if normalized is None:
             invalid_rows.append(row_num)
             continue
-        contacts.append({"phone_number": phone, "name": (row.get(name_col) or "").strip() if name_col else ""})
+        contacts.append({"phone_number": normalized, "name": (row.get(name_col) or "").strip() if name_col else ""})
     if invalid_rows:
         shown = ", ".join(str(n) for n in invalid_rows[:10])
         more = f" (and {len(invalid_rows) - 10} more)" if len(invalid_rows) > 10 else ""
-        raise ValueError(f"invalid phone_number on row(s) {shown}{more}: use digits with an optional leading +")
+        raise ValueError(f"invalid phone_number on row(s) {shown}{more}: must normalize to E.164 format (e.g. +1-234-567-8900)")
     return contacts
 
 
