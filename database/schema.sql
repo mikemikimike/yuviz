@@ -1191,15 +1191,23 @@ ALTER TABLE tenants ADD  CONSTRAINT tenants_max_concurrent_calls_check
 -- Existing tenants get their home code from their own numbers, in the same block as the
 -- ADD COLUMN: a flat default of '1' would make every +91 destination "international" and
 -- break it on upgrade. It runs once (only when the column is added), so a code a
--- superadmin has set since is never overwritten. Evidence, best first: the country code
--- of the tenant's live DIDs (stored digits-only), else of its agents' transfer
--- destinations written +CC... or 00CC...; the commonest code wins. No evidence keeps '1'.
+-- superadmin has set since is never overwritten.
+-- Evidence is one vote per number, and only what names a country: a live DID written
+-- +CC.../00CC... or stored digits-only with 11-15 digits (normalize_did drops the +, and a
+-- national number is at most 10 digits or starts with the trunk 0), and an agent transfer
+-- destination written +CC... or 00CC.... A national-form DID (9876543210, (416) 555-0177)
+-- votes for nothing. The country code is the one in the calling-code list that prefixes
+-- the digits (the list is prefix-free, so there is exactly one).
+-- The code with the most votes wins. If the top count is shared, or there is no evidence,
+-- the tenant keeps the closed default '1' and a NOTICE names it for a superadmin to set.
+-- The code list is libs/config_sdk/calling_codes.py; a test keeps the two equal.
 -- row_security is switched off for the block because phone_numbers and agents are FORCE
 -- RLS: an owner without BYPASSRLS would otherwise read no rows and silently give every
 -- tenant '1'. With it off, such an owner gets an error and the block rolls back, so the
 -- next apply retries; apply schema.sql as a superuser or a BYPASSRLS role.
--- The code list is libs/config_sdk/calling_codes.py; a test keeps the two equal.
 DO $$
+DECLARE
+  leader record;
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -1207,7 +1215,7 @@ BEGIN
   ) THEN
     PERFORM set_config('row_security', 'off', true);
     ALTER TABLE tenants ADD COLUMN home_calling_code TEXT NOT NULL DEFAULT '1';
-    WITH codes(code) AS (
+    FOR leader IN WITH codes(code) AS (
       SELECT unnest(ARRAY[
         '1', '7', '20', '27', '30', '31', '32', '33', '34', '36', '39', '40', '41', '43', '44',
         '45', '46', '47', '48', '49', '51', '52', '53', '54', '55', '56', '57', '58', '60', '61',
@@ -1226,20 +1234,34 @@ BEGIN
         '964', '965', '966', '967', '968', '970', '971', '972', '973', '974', '975', '976', '977',
         '992', '993', '994', '995', '996', '998'
       ])
-    ), evidence(tenant_id, src, digits) AS (
-      SELECT tenant_id, 1, regexp_replace(did, '[^0-9]', '', 'g') FROM phone_numbers
-       WHERE deleted_at IS NULL AND did ~ '^\+?[0-9 ()-]{10,}$'
+    ), evidence(tenant_id, digits) AS (
+      SELECT tenant_id, digits
+        FROM (SELECT tenant_id,
+                     did ~ '^\s*(\+|00)' AS explicit,
+                     regexp_replace(regexp_replace(did, '[^0-9]', '', 'g'), '^00(?=.)', '') AS digits
+                FROM phone_numbers
+               WHERE deleted_at IS NULL AND did ~ '^\s*(\+|00)?[1-9][0-9 ()-]*$') d
+       WHERE length(digits) BETWEEN CASE WHEN explicit THEN 8 ELSE 11 END AND 15
       UNION ALL
-      SELECT tenant_id, 2, regexp_replace(transfer_destination, '^(\+|00)', '') FROM agents
-       WHERE deleted_at IS NULL AND transfer_destination ~ '^(\+|00)[1-9][0-9]+$'
+      SELECT tenant_id, regexp_replace(transfer_destination, '^(\+|00)', '') FROM agents
+       WHERE deleted_at IS NULL AND transfer_destination ~ '^(\+|00)[1-9][0-9]{6,14}$'
     ), counted AS (
-      SELECT e.tenant_id, e.src, c.code, count(*) AS n
+      SELECT e.tenant_id, c.code, count(*) AS n
         FROM evidence e JOIN codes c ON e.digits LIKE c.code || '%'
-       GROUP BY e.tenant_id, e.src, c.code
+       GROUP BY e.tenant_id, c.code
+    ), leaders AS (
+      SELECT tenant_id, array_agg(code) AS codes
+        FROM (SELECT *, rank() OVER (PARTITION BY tenant_id ORDER BY n DESC) AS rk FROM counted) r
+       WHERE rk = 1 GROUP BY tenant_id
     )
-    UPDATE tenants t SET home_calling_code = pick.code
-      FROM (SELECT DISTINCT ON (tenant_id) tenant_id, code FROM counted ORDER BY tenant_id, src, n DESC, code) pick
-     WHERE t.id = pick.tenant_id;
+    SELECT * FROM leaders LOOP
+      IF cardinality(leader.codes) = 1 THEN
+        UPDATE tenants SET home_calling_code = leader.codes[1] WHERE id = leader.tenant_id;
+      ELSE
+        RAISE NOTICE 'tenant % keeps home_calling_code 1: its numbers tie between %; a superadmin must set it',
+          leader.tenant_id, leader.codes;
+      END IF;
+    END LOOP;
   END IF;
 END $$;
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS allow_international_transfers BOOLEAN NOT NULL DEFAULT false;

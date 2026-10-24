@@ -83,8 +83,8 @@ async def conn(scratch_db):
     await c.close()
 
 
-def _upgrade(scratch_db: str) -> None:
-    _psql(scratch_db, "-f", str(SCHEMA))
+def _upgrade(scratch_db: str) -> str:
+    return _psql(scratch_db, "-f", str(SCHEMA)).stderr.decode()
 
 
 async def _tenant(conn, dids: tuple[str, ...] = (), destinations: tuple[str, ...] = ()) -> uuid.UUID:
@@ -116,8 +116,8 @@ async def test_indian_tenant_keeps_its_plus91_destinations(scratch_db, conn):
     assert transfer_policy_problem("+918012345678", TransferPolicy()) is not None
 
 
-async def test_home_code_comes_from_dids_first_then_destinations(scratch_db, conn):
-    from_dids = await _tenant(conn, dids=("+91 80-6535 4620", "918065354621", "442071234567"), destinations=("+442071234567",))
+async def test_home_code_votes_come_from_explicit_dids_and_destinations(scratch_db, conn):
+    from_dids = await _tenant(conn, dids=("+91 80-6535 4620", "918065354621", "442071234567"))
     from_dests = await _tenant(conn, destinations=("+442071234567", "0044207123456", "+918012345678"))
     only_extensions = await _tenant(conn, destinations=("1001", "sip:desk@pbx.example.com"))
     no_data = await _tenant(conn)
@@ -128,6 +128,40 @@ async def test_home_code_comes_from_dids_first_then_destinations(scratch_db, con
     assert await _home(conn, only_extensions) == "1"
     assert await _home(conn, no_data) == "1"
     assert await _home(conn, us) == "1"
+
+
+async def test_national_form_dids_vote_for_nothing(scratch_db, conn):
+    indian_mobile = await _tenant(conn, dids=("9876543210",))        # 98 is Iran
+    canadian = await _tenant(conn, dids=("4165550177", "(416) 555-0178", "7000000000"))  # 41, 7
+    national_dids_with_real_destinations = await _tenant(
+        conn, dids=("9876543211", "8065354620"), destinations=("+918012345678",)
+    )
+    _upgrade(scratch_db)
+    assert await _home(conn, indian_mobile) == "1"
+    assert await _home(conn, canadian) == "1"
+    assert await _home(conn, national_dids_with_real_destinations) == "91"
+
+
+async def test_explicit_destinations_combine_with_did_evidence(scratch_db, conn):
+    one_us_did_two_indian_destinations = await _tenant(
+        conn, dids=("14155550102",), destinations=("+918012345678", "00918098765432")
+    )
+    two_us_dids_one_indian_destination = await _tenant(
+        conn, dids=("14155550103", "14155550104"), destinations=("+918012345678",)
+    )
+    _upgrade(scratch_db)
+    assert await _home(conn, one_us_did_two_indian_destinations) == "91"
+    assert await _home(conn, two_us_dids_one_indian_destination) == "1"
+
+
+async def test_a_tie_keeps_the_default_and_names_the_tenant(scratch_db, conn):
+    tied = await _tenant(conn, dids=("918065354622",), destinations=("+442071234567",))
+    decided = await _tenant(conn, dids=("918065354623",), destinations=("+442071234567", "+918012345678"))
+    notices = _upgrade(scratch_db)
+    assert await _home(conn, tied) == "1"
+    assert str(tied) in notices
+    assert await _home(conn, decided) == "91"
+    assert str(decided) not in notices
 
 
 async def test_reapplying_schema_keeps_a_code_set_since(scratch_db, conn):
