@@ -74,23 +74,19 @@ async def update_tenant_concurrency(
 @router.patch("/{tenant_id}/transfer-policy")
 async def update_tenant_transfer_policy(
     tenant_id: str, body: TenantTransferPolicyUpdate,
-    current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
+    current_user: CurrentUser = Depends(require_role("superadmin")),
 ):
-    """Opt-in to international transfers; the same roles that edit an agent's transfer destination.
-    Scope comes from the freshly read users row, as for /concurrency."""
+    """Superadmin only: international transfers are billed to the platform, so a tenant
+    admin must not be able to switch them on or move what counts as domestic. The role is
+    re-read from the users row, as for /concurrency, so a stale token cannot carry it."""
     fields = body.model_dump(exclude_none=True)
     if not fields:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
     row = await users_service.get_user_by_id(current_user.id)
     if row is None:
         raise HTTPException(status_code=403, detail="account is no longer active")
-    if row["role"] not in ("superadmin", "admin"):
+    if row["role"] != "superadmin":
         raise HTTPException(status_code=403, detail=f"role {row['role']!r} cannot perform this action")
-    effective_tenant_id = str(row["tenant_id"]) if row["tenant_id"] is not None else None
-
-    if row["role"] != "superadmin" and effective_tenant_id != tenant_id:
-        raise HTTPException(status_code=404, detail=f"tenant {tenant_id!r} not found")
-
     return await tenants_service.update_tenant(
         tenant_id, user_id=row["id"], user_email=row["email"], **fields,
     )
