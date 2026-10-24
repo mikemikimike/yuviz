@@ -335,6 +335,14 @@ RouteResolution resolve_route(RedisClient& redis, const std::string& did, DidRou
 
 std::optional<PhoneRoute> CallMetadata::direct_route() const {
     if (direction != "outbound" || tenant_slug.empty() || agent_slug.empty()) return std::nullopt;
+    // For dev: validate that the metadata was generated recently (within 60s) to prevent replays.
+    // timestamp_epoch is parsed from the JSON's "ts" field by the caller.
+    if (timestamp_epoch > 0) {
+        auto now = std::time(nullptr);
+        if (now < timestamp_epoch || now - timestamp_epoch > 60) {
+            return std::nullopt;  // metadata expired or has invalid timestamp
+        }
+    }
     return PhoneRoute{tenant_slug, agent_slug, 0};
 }
 
@@ -356,6 +364,8 @@ CallMetadata CallMetadata::parse(const std::optional<std::string>& raw) noexcept
             md.tenant_slug = j["tenant_slug"].get<std::string>();
         if (j.contains("agent_slug") && j["agent_slug"].is_string())
             md.agent_slug = j["agent_slug"].get<std::string>();
+        if (j.contains("ts") && j["ts"].is_number())
+            md.timestamp_epoch = j["ts"].get<long>();
     } catch (const nlohmann::json::exception&) {
         return CallMetadata{};
     }

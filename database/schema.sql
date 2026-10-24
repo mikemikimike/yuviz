@@ -1533,3 +1533,12 @@ DO $$ BEGIN
       CHECK (direction IN ('inbound', 'outbound', 'both'));
   END IF;
 END $$;
+
+-- Backfill legacy campaign_contacts phone numbers to E.164 format.
+-- Numbers without a leading + are prepended with +, so they become valid E.164.
+-- This allows the worker to dial them instead of marking them failed.
+DO $$ BEGIN
+  UPDATE campaign_contacts
+  SET phone_number = '+' || phone_number
+  WHERE phone_number NOT LIKE '+%' AND phone_number ~ '^[0-9]{7,15}$';
+END $$;

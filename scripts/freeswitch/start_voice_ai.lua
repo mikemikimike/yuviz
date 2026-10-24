@@ -45,8 +45,15 @@ else
     agent_fields = ""
 end
 
-local meta = string.format('{"did":"%s","ani":"%s","direction":"%s","freeswitch_host":"%s"%s}',
-    sip_token(did), sip_token(ani), direction, sip_token(fs_host), agent_fields)
+-- For outbound calls with agent_fields, add a timestamp to prevent replays.
+-- The Gateway validates that outbound metadata was generated recently.
+local ts_field = ""
+if direction == "outbound" then
+    ts_field = string.format(',"ts":%d', os.time())
+end
+
+local meta = string.format('{"did":"%s","ani":"%s","direction":"%s","freeswitch_host":"%s"%s%s}',
+    sip_token(did), sip_token(ani), direction, sip_token(fs_host), agent_fields, ts_field)
 
 local result = freeswitch.API():execute("uuid_audio_fork",
     uuid .. " start " .. gateway_ws .. "/voice/" .. uuid .. " mono 16000 " .. meta)

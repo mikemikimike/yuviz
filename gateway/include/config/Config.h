@@ -222,9 +222,10 @@ struct CallMetadata {
     std::string freeswitch_host;  // originating FS node (hostname/IP); routes ESL commands
     std::string tenant_slug;      // outbound campaign calls only: the campaign's own route
     std::string agent_slug;
+    long timestamp_epoch{0};      // outbound calls: unix timestamp when metadata was created (for replay protection)
 
     // Outbound calls that name their own tenant and agent skip the did: lookup;
-    // `did` is then only the caller ID shown to the callee.
+    // `did` is then only the caller ID shown to the callee. Timestamp must be recent (<60s old).
     [[nodiscard]] std::optional<PhoneRoute> direct_route() const;
 
     // raw is nullopt when no frame arrived in time.

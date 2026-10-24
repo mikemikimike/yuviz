@@ -1,6 +1,9 @@
 """start_voice_ai.lua tells the Gateway a campaign call is outbound, with the caller ID, the campaign's agent slugs and the callee."""
 from __future__ import annotations
 
+import json
+import re
+
 from lua_harness import requires_lua, run
 
 pytestmark = requires_lua
@@ -22,14 +25,23 @@ def test_without_a_campaign_key_the_metadata_is_the_inbound_golden_string():
 
 
 def test_with_a_campaign_key_the_call_is_outbound_with_the_caller_id_the_agent_slugs_and_the_callee():
-    assert _metadata(CAMPAIGN) == (
-        '{"did":"+918065354620","ani":"+919876543210","direction":"outbound","freeswitch_host":"10.0.0.5",'
-        '"tenant_slug":"yuviz","agent_slug":"sales"}')
+    meta = json.loads(_metadata(CAMPAIGN))
+    assert meta["did"] == "+918065354620"
+    assert meta["ani"] == "+919876543210"
+    assert meta["direction"] == "outbound"
+    assert meta["freeswitch_host"] == "10.0.0.5"
+    assert meta["tenant_slug"] == "yuviz"
+    assert meta["agent_slug"] == "sales"
+    assert "ts" in meta and isinstance(meta["ts"], int)
 
 
 def test_a_hostile_callee_is_filtered_like_every_other_value():
-    meta = _metadata({**CAMPAIGN, "campaign_callee": '+1","did":"5009 x"}', "campaign_caller_id": "+9\n1 2",
-                     "campaign_agent_slug": 's","did":"5009'})
-    assert meta == (
-        '{"did":"+912","ani":"+1did5009x","direction":"outbound","freeswitch_host":"10.0.0.5",'
-        '"tenant_slug":"yuviz","agent_slug":"sdid5009"}')
+    meta = json.loads(_metadata({**CAMPAIGN, "campaign_callee": '+1","did":"5009 x"}', "campaign_caller_id": "+9\n1 2",
+                     "campaign_agent_slug": 's","did":"5009'}))
+    assert meta["did"] == "+912"
+    assert meta["ani"] == "+1did5009x"
+    assert meta["direction"] == "outbound"
+    assert meta["freeswitch_host"] == "10.0.0.5"
+    assert meta["tenant_slug"] == "yuviz"
+    assert meta["agent_slug"] == "sdid5009"
+    assert "ts" in meta and isinstance(meta["ts"], int)
