@@ -42,3 +42,19 @@ def test_campaign_capability_flags():
     assert VobizTelephonyProvider.supports_campaign_outbound is True
     assert FakeProvider.supports_campaign_outbound is True
     assert CloudonixProvider.supports_campaign_outbound is False
+
+
+@pytest.mark.parametrize("record, status", [
+    ({"call_state": "ringing"}, "ringing"),
+    ({"call_state": "in-progress", "answer_time": "2026-10-24 17:08:55"}, "in-progress"),
+    ({"call_state": None, "hangup_cause": "USER_BUSY", "end_time": "t"}, "busy"),
+    ({"call_state": None, "hangup_cause": "NO_ANSWER", "end_time": "t"}, "no-answer"),
+    ({"call_state": None, "hangup_cause": "CALL_REJECTED", "end_time": "t"}, "rejected"),
+    ({"call_state": None, "hangup_cause": "NORMAL_CLEARING", "answer_time": "t", "end_time": "t"}, "completed"),
+    ({"call_state": None, "hangup_cause": "NETWORK_OUT_OF_ORDER", "end_time": "t"}, "failed"),
+])
+async def test_vobiz_call_status_is_reported_in_the_platforms_terms(record, status):
+    body = {**record, "to_number": "918971188211", "from_number": "918065354620"}
+    provider = _provider(lambda req: httpx.Response(200, json=body))
+    result = await provider.get_call_status("c-1")
+    assert (result["status"], result["to"], result["from"]) == (status, "918971188211", "918065354620")

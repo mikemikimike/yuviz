@@ -433,8 +433,6 @@ CREATE TABLE IF NOT EXISTS phone_numbers (
     did                TEXT NOT NULL,  -- unique among live rows only (phone_numbers_did_live_key)
     tenant_id          UUID NOT NULL REFERENCES tenants(id),
     agent_id           UUID REFERENCES agents(id),  -- nullable: unassigned number
-    -- Used when agent_id is null or unavailable; resolved by config, not the Gateway.
-    fallback_agent_id  UUID REFERENCES agents(id),
     carrier_id         UUID REFERENCES carriers(id),
     status             TEXT NOT NULL DEFAULT 'active'
                            CHECK (status IN ('active', 'inactive', 'suspended')),
@@ -445,7 +443,7 @@ CREATE TABLE IF NOT EXISTS phone_numbers (
 );
 
 -- Columns added after the original CREATE TABLE, for existing databases.
-ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS fallback_agent_id UUID REFERENCES agents(id);
+ALTER TABLE phone_numbers DROP COLUMN IF EXISTS fallback_agent_id;  -- backup agents were removed
 ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
 DO $$ BEGIN
     ALTER TABLE phone_numbers ADD CONSTRAINT phone_numbers_status_check CHECK (status IN ('active', 'inactive', 'suspended'));
@@ -728,6 +726,22 @@ CREATE TABLE IF NOT EXISTS outbound_cps_limits (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by UUID
 );
+
+-- A superadmin turns on number buying per tenant; superadmins can always buy.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS number_purchase_enabled BOOLEAN NOT NULL DEFAULT false;
+
+-- Outbound caller ID lives on the agent; a campaign copies it when created.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS outbound_caller_id TEXT;
+
+-- "Schedule for later": the worker promotes scheduled -> running once scheduled_start_at has passed.
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS scheduled_start_at TIMESTAMPTZ;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;  -- first time it ran
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS description TEXT;
+DO $$ BEGIN
+  ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_status_check;
+  ALTER TABLE campaigns ADD CONSTRAINT campaigns_status_check
+    CHECK (status IN ('draft', 'scheduled', 'running', 'paused', 'completed', 'cancelled'));
+END $$;
 
 -- Live wait reason, written only when it changes.
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS wait_reason TEXT;
