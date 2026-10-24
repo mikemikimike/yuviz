@@ -1,0 +1,5 @@
+# Review: 01-prd.md (turn1-neutral-filler)
+VERDICT: GREEN
+
+1. [minor] Scope and criterion 10 bound the tool-filler path by turn number ("turns 2+"), which leaves a tool call made during turn 1 itself (pipeline.py:1362, separate from the turn-1 opener at pipeline.py:810-822) unspecified, so an implementer could route it to the neutral pool. Where: Scope "Out" and criterion 10. Fix: restate criterion 10 as "every tool-call filler (pipeline.py:1362 path), on any turn, comes from `TOOL_FILLERS` unchanged; only the pre-LLM turn-1 opener uses the neutral pool".
+2. [minor] Criterion 7 promises "no English phrase for a non-English language", but only covers a language that has an i18n module. A language registered with no module at all (only en.py and hi.py exist) still gets English through `shortest_tool_filler`'s `_SHORTEST["en"]` default (i18n/__init__.py:103), and the PRD does not say whether that is in scope. Where: criterion 7. Fix: add a line stating that a language with no i18n module keeps today's English fallback (out of scope), or add a criterion that defines its behaviour.

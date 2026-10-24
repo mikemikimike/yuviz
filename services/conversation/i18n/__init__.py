@@ -1,7 +1,8 @@
 """Spoken system strings (fillers, goodbyes, fallbacks) per language.
 
 One module per language (i18n/<code>.py) exposing STRINGS (key -> text) and
-TOOL_FILLERS ((phrase, approx spoken seconds), ...). They may also expose CLOSURE_PHRASES and
+TOOL_FILLERS ((phrase, approx spoken seconds), ...). They may also expose FIRST_TURN_FILLERS (same shape,
+neutral wording for the pre-LLM turn-1 opener) and CLOSURE_PHRASES and
 FAREWELL_PHRASES (tuples of phrases; required on en) for the end-call guard. Every module is discovered and
 validated at import, so a malformed one fails startup. Missing languages or keys
 fall back to English. Agent-level overrides (farewell_message, transfer_announcement) are
@@ -26,6 +27,25 @@ log = logging.getLogger(__name__)
 _PHRASE_TABLES = ("CLOSURE_PHRASES", "FAREWELL_PHRASES")
 
 
+def _validate_fillers(code: str, module: ModuleType, attr: str, *, required: bool) -> None:
+    """Raise ValueError unless the module's attr is a non-empty tuple of (phrase, seconds > 0) pairs."""
+    if not required and not hasattr(module, attr):
+        return
+    fillers = getattr(module, attr, None)
+    if not isinstance(fillers, tuple) or not fillers or not all(
+        isinstance(f, tuple)
+        and len(f) == 2
+        and isinstance(f[0], str)
+        and f[0]
+        and isinstance(f[1], (int, float))
+        and not isinstance(f[1], bool)
+        and math.isfinite(f[1])
+        and f[1] > 0
+        for f in fillers
+    ):
+        raise ValueError(f"i18n module {code!r}: {attr} must be a non-empty tuple of (phrase, seconds > 0) pairs")
+
+
 def _validate(code: str, module: ModuleType) -> None:
     """Raise ValueError naming the module when it breaks the language-table contract."""
     if normalize_language(code) != code:
@@ -38,21 +58,8 @@ def _validate(code: str, module: ModuleType) -> None:
     unknown = set(strings) - set(en.STRINGS)
     if code != "en" and unknown:
         raise ValueError(f"i18n module {code!r}: STRINGS keys not in en.STRINGS: {sorted(unknown)}")
-    fillers = getattr(module, "TOOL_FILLERS", None)
-    if not isinstance(fillers, tuple) or not fillers or not all(
-        isinstance(f, tuple)
-        and len(f) == 2
-        and isinstance(f[0], str)
-        and f[0]
-        and isinstance(f[1], (int, float))
-        and not isinstance(f[1], bool)
-        and math.isfinite(f[1])
-        and f[1] > 0
-        for f in fillers
-    ):
-        raise ValueError(
-            f"i18n module {code!r}: TOOL_FILLERS must be a non-empty tuple of (phrase, seconds > 0) pairs"
-        )
+    _validate_fillers(code, module, "TOOL_FILLERS", required=True)
+    _validate_fillers(code, module, "FIRST_TURN_FILLERS", required=False)
     for attr in _PHRASE_TABLES:
         phrases = getattr(module, attr, None)
         if phrases is None and code != "en":
@@ -83,6 +90,17 @@ _TABLES: dict[str, ModuleType] = _discover(__path__, __name__)
 _SHORTEST: dict[str, str] = {
     code: min(module.TOOL_FILLERS, key=lambda f: f[1])[0] for code, module in _TABLES.items()
 }
+# Same for the turn-1 pool; a module without FIRST_TURN_FILLERS uses its own shortest tool filler.
+def _shortest_first_turn(tables: dict[str, ModuleType], shortest: dict[str, str]) -> dict[str, str]:
+    return {
+        code: min(module.FIRST_TURN_FILLERS, key=lambda f: f[1])[0]
+        if getattr(module, "FIRST_TURN_FILLERS", None)
+        else shortest[code]
+        for code, module in tables.items()
+    }
+
+
+_SHORTEST_FIRST_TURN: dict[str, str] = _shortest_first_turn(_TABLES, _SHORTEST)
 
 
 def t(key: str, language: str | None) -> str:
@@ -101,6 +119,18 @@ def tool_fillers(language: str | None) -> tuple[tuple[str, float], ...]:
 def shortest_tool_filler(language: str | None) -> str:
     """The language's shortest tool filler, else English's."""
     return _SHORTEST.get(normalize_language(language) or "en", _SHORTEST["en"])
+
+
+def first_turn_fillers(language: str | None) -> tuple[tuple[str, float], ...] | None:
+    """The language's turn-1 filler pool (English's for a language with no module), or None when its module has
+    none, so a language with a module never gets English's."""
+    table = _TABLES.get(normalize_language(language) or "en", en)
+    return getattr(table, "FIRST_TURN_FILLERS", None)
+
+
+def shortest_first_turn_filler(language: str | None) -> str:
+    """The language's shortest turn-1 filler, else its shortest tool filler, else English's."""
+    return _SHORTEST_FIRST_TURN.get(normalize_language(language) or "en", _SHORTEST_FIRST_TURN["en"])
 
 
 def has_phrase_tables(language: str | None) -> bool:

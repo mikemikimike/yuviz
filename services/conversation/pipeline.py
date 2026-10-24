@@ -34,7 +34,7 @@ from .directives import (
 )
 from . import phrase_audio
 from .fillers import FillerSelector
-from .i18n import closure_phrases, farewell_phrases, has_phrase_tables, t, tool_fillers
+from .i18n import closure_phrases, farewell_phrases, first_turn_fillers, has_phrase_tables, t, tool_fillers
 from .guardrails import GuardrailCounter, GuardrailDetector
 from . import language as lang_state
 from .language import LanguageTracker, fixed_language_instruction, reply_language_instruction, script_language, utterance_language
@@ -733,9 +733,8 @@ class PipelineConversationHandler:
             self._latency_store.agent_average_ms(self._tenant_id, self._agent_id or "")
             if self._latency_store is not None else None
         )
-        phrase = self._filler_selector.select_tool_filler(
-            "first_turn", state.tool_call_filler_last_phrase, average_ms,
-            language=self._spoken_language(session_id),
+        phrase = self._filler_selector.select_first_turn_filler(
+            state.tool_call_filler_last_phrase, average_ms, language=self._spoken_language(session_id),
         )
         state.tool_call_filler_last_phrase = phrase
         return phrase
@@ -749,7 +748,8 @@ class PipelineConversationHandler:
         async def _run() -> None:
             for language in self._filler_languages():
                 spoken = language or self._strings_language
-                phrases = [phrase for phrase, _ms in tool_fillers(spoken)]
+                # Turn-1 phrases first: the opener is wanted right after the greeting, tool fillers only later.
+                phrases = [phrase for phrase, _ms in (*(first_turn_fillers(spoken) or ()), *tool_fillers(spoken))]
                 for phrase in phrases:
                     try:
                         async for _chunk in self._synthesize_sentence_stream(

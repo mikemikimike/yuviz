@@ -21,6 +21,16 @@ TOOL_FILLERS: tuple[tuple[str, float], ...] = (
     ("एक पल रुकिए, अभी इसे पूरा करते हैं।", 2.4),
 )
 
+# Neutral opener spoken before the LLM has decided anything, so no lookup or task wording.
+FIRST_TURN_FILLERS: tuple[tuple[str, float], ...] = (
+    ("जी, एक पल।", 1.0),
+    ("जी, बस एक सेकंड।", 1.0),
+    ("जी, बस एक पल रुकिए।", 1.5),
+    ("जी, एक पल दीजिए।", 1.5),
+    ("जी, कृपया एक पल रुकिए।", 2.0),
+    ("जी, कृपया ज़रा एक पल रुकिए।", 2.4),
+)
+
 # "नमस्ते" is a farewell only: callers also open with it, so it is not a closure.
 CLOSURE_PHRASES: tuple[str, ...] = ("बस इतना ही", "और कुछ नहीं", "अलविदा", "बाय", "धन्यवाद", "शुक्रिया")
 FAREWELL_PHRASES: tuple[str, ...] = ("नमस्ते", "अलविदा", "शुभ दिन", "दिन शुभ हो", "ध्यान रखिए", "कॉल करने के लिए धन्यवाद")

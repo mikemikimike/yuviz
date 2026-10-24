@@ -170,9 +170,13 @@ keep working unchanged.
   import) and `t(key, lang)`. Missing keys and unknown languages fall back to `en`. The strings that move there:
   - `_FALLBACK_GOODBYE`, `_MAX_DURATION_GOODBYE`, `_FALLBACK_LLM_ERROR`
   - `_TRANSFER_FAILED_FALLBACK`, `_BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT`
-  - the tool fillers (`FillerSelector.select_tool_filler(..., language=)`). The turn-1 filler uses
-    the same selector, so it follows the session language; with no latency history it takes the
-    tier at or below the default 1.6s target (the 1.5s phrases).
+  - the tool fillers (`FillerSelector.select_tool_filler(..., language=)`)
+  - the turn-1 fillers (`FillerSelector.select_first_turn_filler(..., language=)`). The pre-LLM opener
+    draws from `FIRST_TURN_FILLERS`, a neutral pool ("one moment") with no lookup wording, because
+    nothing has been asked yet. It follows the session language and uses the same tier rule as the
+    tool fillers: with no latency history it takes the tier at or below the default 1.6s target (the
+    1.5s phrases). A language with no `FIRST_TURN_FILLERS` speaks its own shortest tool filler.
+    Tool-call fillers on every turn still come from `TOOL_FILLERS`.
 
   The English text stays byte-identical. The agent's own `farewell_message` and
   `transfer_announcement` still take precedence.
@@ -180,6 +184,10 @@ keep working unchanged.
   **Adding a language.** Create `services/conversation/i18n/<code>.py` with:
   - `STRINGS`, a dict holding any subset of the `en` keys. Missing keys fall back to `en`.
   - `TOOL_FILLERS`, a non-empty tuple of `(phrase, seconds)` tuples, with phrase a non-empty string and seconds a finite number above 0 (not a bool).
+  - `FIRST_TURN_FILLERS`, optional, with the same shape and validation as `TOOL_FILLERS`. Keep the wording
+    neutral (no lookup or task verbs such as "check" or "look into") and include a phrase at or below the
+    shortest `TOOL_FILLERS` seconds, so fast agents get a short opener. When omitted, turn 1 speaks the
+    language's shortest `TOOL_FILLERS` phrase, never English's.
 
   `<code>` is the lowercase 2-3 letter base code (`pt.py`, not `pt_br.py`; regional callers like pt-BR resolve to it), and non-language helper modules or packages in `i18n/` must start with `_`. The file is picked up at import with no other edit. A malformed file fails startup and
   `test_i18n`. Translations need native-speaker review. This covers spoken system strings only.
