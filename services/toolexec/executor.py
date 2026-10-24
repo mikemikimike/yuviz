@@ -800,6 +800,7 @@ async def _run_steps(
         argument_sources: dict[str, str] | None = None
         arguments_hash: str | None = None
         injected_auth_keys: set[str] = set()
+        used_auth: dict[str, str] = {}   # which stored OAuth token the request carries (see the 401 retry)
         started = time.monotonic()
         step_timeout_ms = min(api_row.get("timeout_ms") or 6000, remaining_budget_ms)
         deadline = started + step_timeout_ms / 1000
@@ -820,7 +821,7 @@ async def _run_steps(
             hostname, allowed_ips = await resolve_and_validate_endpoint(url)
 
             injected_auth_keys = await _credential_work(
-                auth_schemes.apply(api_row, headers, query_params, effective_url=url), deadline,
+                auth_schemes.apply(api_row, headers, query_params, effective_url=url, used=used_auth), deadline,
             )
 
             # Exclude auth-injected keys: never persist credentials, and rotating tokens would break the hash dedupe.
@@ -884,13 +885,28 @@ async def _run_steps(
                     break
                 # The stored expiry can be wrong (Salesforce reports none): refresh once and retry.
                 # A 401 means the request was not processed, so the retry cannot repeat a side effect.
-                if not await _credential_work(
-                    oauth.refresh_after_unauthorized(tenant_id, api_row["oauth_connection_id"]), deadline,
-                ):
+                try:
+                    refreshed = await _credential_work(
+                        oauth.refresh_after_unauthorized(
+                            tenant_id, api_row["oauth_connection_id"], used_auth.get("access_token_ref"),
+                        ), deadline,
+                    )
+                    if refreshed:
+                        used_auth = {}
+                        injected_auth_keys = await _credential_work(
+                            auth_schemes.apply(api_row, headers, query_params, effective_url=url, used=used_auth),
+                            deadline,
+                        )
+                except _StepFailure:
+                    # The 401 proves the provider did not process the request, so a refresh that then fails
+                    # (reconnect needed, credential unavailable, step deadline) must free the claim, as the plain
+                    # 401 below does; held, it would refuse the same booking for the claim TTL after a reconnect.
+                    # Only the retried request's own timeout keeps the claim (it may have landed).
+                    if side_effecting:
+                        await _release_side_effect_claim(tenant_id, api_id, arguments_hash)
+                    raise
+                if not refreshed:
                     break
-                injected_auth_keys = await _credential_work(
-                    auth_schemes.apply(api_row, headers, query_params, effective_url=url), deadline,
-                )
 
             if truncated:
                 # Keep the claim: whether the mutation landed is unknown.

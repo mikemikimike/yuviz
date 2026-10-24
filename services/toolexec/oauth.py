@@ -519,6 +519,15 @@ async def _connection_row(tenant_id: str, connection_id: Any) -> Any:
 
 
 async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAuthProvider, str | None, str]:
+    token, spec, api_base_url, auth_kind, _ref = await access_token_and_ref_for(tenant_id, connection_id)
+    return token, spec, api_base_url, auth_kind
+
+
+async def access_token_and_ref_for(
+    tenant_id: str, connection_id: str,
+) -> tuple[str, OAuthProvider, str | None, str, str]:
+    """access_token_for plus the stored reference of the token that came back, so a caller whose request is
+    refused (401) can say which token was refused (see refresh_after_unauthorized)."""
     row = await _connection_row(tenant_id, connection_id)
     if row is None or row["status"] != "connected":
         raise ReconnectRequired
@@ -526,20 +535,30 @@ async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAu
     # A static API key has no expiry and no refresh path: it never refreshes and never flips `status`.
     if row["auth_kind"] == "api_key" or not _expiring(row):
         token = await auth_schemes.resolve_tenant_ref(tenant_id, row["access_token_ref"])
+        ref = row["access_token_ref"]
     else:
         token = await _refresh_serialized(tenant_id, row, spec)
-    return token, spec, row["api_base_url"], row["auth_kind"]
+        # The row now holds the token that was returned (or a newer one, which only makes a later 401 refresh less).
+        fresh = await _connection_row(tenant_id, connection_id)
+        ref = fresh["access_token_ref"] if fresh is not None else row["access_token_ref"]
+    return token, spec, row["api_base_url"], row["auth_kind"], ref
 
 
-async def refresh_after_unauthorized(tenant_id: str, connection_id: str) -> bool:
+async def refresh_after_unauthorized(tenant_id: str, connection_id: str, rejected_ref: str | None = None) -> bool:
     """The provider's API refused the access token (401) although the stored
     expiry said it was good: refresh now. False when there is nothing to
-    refresh (a static API key); ReconnectRequired when the refresh token is dead."""
+    refresh (a static API key); ReconnectRequired when the refresh token is dead.
+
+    `rejected_ref` is the stored reference of the token the refused request carried. When the row already holds a
+    different one, another caller has replaced it since: return True without a provider round trip and let the
+    retry pick up the current token, so N concurrent 401s cost one refresh rather than N."""
     row = await _connection_row(tenant_id, connection_id)
     if row is None or row["status"] != "connected":
         raise ReconnectRequired
     if row["auth_kind"] == "api_key":
         return False
+    if rejected_ref is not None and row["access_token_ref"] != rejected_ref:
+        return True
     await _refresh_serialized(tenant_id, row, PROVIDERS[row["provider"]], force=True)
     return True
 
