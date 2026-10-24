@@ -113,6 +113,37 @@ def test_non_us_canada_nanp_numbers_need_the_opt_in(value):
     assert transfer_policy_problem(value, OPEN) is None
 
 
+PREFIX_BYPASSES = [
+    "011882123456", "0118821234567890", "+088212345678", "000882123456789", "0011882123456",
+    "sip:011882123456@carrier.example", "sip:+088212345678@carrier.example",
+    "sip:000882123456789@carrier.example", "sip:011882123456;phone-context=x@carrier.example",
+    "\uff0b\uff18\uff18\uff12\uff11\uff12\uff13\uff14\uff15\uff16\uff17",  # fullwidth +8821234567
+    "\uff10\uff10\uff18\uff18\uff12\uff11\uff12\uff13\uff14\uff15\uff16",  # fullwidth 00882123456
+    "%2B882123456789", "sip:%2B882123456789@carrier.example", "tel:+882123456789",
+    "tel:011882123456", " +882123456789", "+882 123 456 789", "+882-123-456-789",
+    "+(882)123456789", "+882123456789\n", "sip:011882123456@carrier.example\r\nX: y",
+]
+
+
+@pytest.mark.parametrize("value", PREFIX_BYPASSES)
+def test_no_spelling_of_a_premium_number_gets_past_the_policy(value):
+    assert transfer_policy_problem(value, DEFAULT) is not None
+    assert transfer_policy_problem(value, OPEN) is not None
+
+
+@pytest.mark.parametrize("value", ["+0442071234567", "000442071234567", "sip:+0442071234567@carrier.example",
+    "+11882123456", "+1234",
+])
+def test_a_leading_zero_after_the_international_prefix_is_never_valid(value):
+    assert transfer_policy_problem(value, OPEN) is not None
+
+
+def test_011_is_only_an_international_prefix_where_the_home_country_is_the_nanp():
+    delhi = TransferPolicy(home_calling_code="91")
+    assert transfer_policy_problem("01123456789", delhi) is None
+    assert transfer_policy_problem("011882123456", TransferPolicy(home_calling_code="1")) is not None
+
+
 def test_nanp_area_codes_do_not_matter_when_another_country_is_home():
     assert transfer_policy_problem("+18765551234", TransferPolicy(home_calling_code="44")) is not None
     assert transfer_policy_problem("+442071234567", TransferPolicy(home_calling_code="44")) is None
