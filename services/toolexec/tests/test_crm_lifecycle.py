@@ -86,7 +86,7 @@ async def _setup(pool, tenant, agent, monkeypatch, upstream, **seed) -> str:
 
 
 async def _lookup(tenant, agent, **overrides):
-    return await executor.execute_chain(_request(tenant, agent, "crm_lookup_contact", **CALL, **overrides))
+    return await executor.execute_chain(_request(tenant, agent, "zoho_lookup_contact", **CALL, **overrides))
 
 
 async def _connection(pool, connection: str) -> dict:

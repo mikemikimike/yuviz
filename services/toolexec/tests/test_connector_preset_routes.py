@@ -343,7 +343,8 @@ async def test_a_hand_made_api_with_a_preset_rows_name_is_a_conflict_and_rolls_e
         await _connect(c, tenants["a"], h)
         r = await _apply(c, tenants["a"], h, CALENDAR)
 
-    assert (r.status_code, r.json()) == (400, {"detail": "preset_name_conflict: gcal_book"})
+    assert (r.status_code, r.json()) == (409, {"detail": (
+        "An API named 'gcal_book' already exists. Rename or remove it, then turn this on again.")})
     assert [row["name"] for row in await _rows(pool, tenants["a"])] == ["GCAL_BOOK"]   # nothing of the preset survived
 
 
