@@ -553,6 +553,12 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             )
                         )
 
+                    # TTS produced no audio for a transcribed turn (provider failure): still
+                    # close the turn, or the gateway waits in silence until the caller speaks again.
+                    if stt_sent and not tts_started_sent and not cancelled and turn_transfer is None:
+                        yield pb.ServiceMessage(tts_started=pb.TtsStarted(session_id=sid))
+                        tts_started_sent = True
+
                     # End-of-response marker: empty is_final chunk; the gateway
                     # holds playback_finished until the final frame drains.
                     if tts_started_sent and not cancelled:

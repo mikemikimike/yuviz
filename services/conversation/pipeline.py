@@ -88,6 +88,8 @@ class _SessionState:
     first_turn_filler_spoken:        bool = False
     fabrication_triggered_transfer:  bool = False
     confirmed_booking_slot:          str | None = None
+    # Sentences of this turn's reply whose TTS produced no audio, so the transcript and history leave them out.
+    unspoken_sentences:              list[str] = field(default_factory=list)
     # Multilingual agents only; None = single-language (fixed language).
     language:                        "LanguageTracker | None" = None
     unchecked_languages_logged:      set = field(default_factory=set)
@@ -264,6 +266,16 @@ def _phrase_tokens(text: str) -> str:
 def _last_sentence(reply_text: str) -> str:
     sentences = [p.strip().strip("\"'“”‘’") for p in _SENTENCE_RE.split(reply_text)]
     return next((p for p in reversed(sentences) if p), "")
+
+
+def _spoken_reply(raw_tokens: list[str], unspoken: list[str]) -> str:
+    """The reply text minus directives and the sentences whose TTS produced no audio."""
+    text = DirectiveParser.parse("".join(raw_tokens)).clean_text.strip()
+    if not unspoken:
+        return text
+    for sentence in unspoken:
+        text = text.replace(sentence, "")
+    return " ".join(text.split())
 
 
 def _end_call_rejection(reply_text: str, caller_text: str, language: str | None) -> str | None:
@@ -856,6 +868,7 @@ class PipelineConversationHandler:
         # Fresh per-turn event, replaced before any await: a cancel targets the prior response only.
         cancel_event = asyncio.Event()
         self._session(session_id).cancelled = cancel_event
+        self._session(session_id).unspoken_sentences.clear()
 
         # Free the shared call LLM before this turn's generate — a prior
         # turn's extract/summarize would otherwise queue behind Ollama.
@@ -1049,7 +1062,7 @@ class PipelineConversationHandler:
             if self._transcripts is not None:
                 self._transcripts.record_turn(
                     session_id, stt_result.text, stt_result.confidence,
-                    DirectiveParser.parse("".join(full_response)).clean_text.strip(), True,
+                    _spoken_reply(full_response, self._session(session_id).unspoken_sentences), True,
                 )
             raise
         finally:
@@ -1070,7 +1083,8 @@ class PipelineConversationHandler:
         voice_to_voice_ms = (first_audio_at - turn_start) * 1000 if first_audio_at else None
 
         # full_response holds raw tokens, so strip directives again.
-        assistant_text = DirectiveParser.parse("".join(full_response)).clean_text.strip()
+        unspoken = self._session(session_id).unspoken_sentences
+        assistant_text = _spoken_reply(full_response, unspoken)
 
         # Models sometimes claim a booking without calling a tool. Already spoken, so
         # correct the next turn and escalate repeats; a recap of the real slot is allowed.
@@ -1087,7 +1101,8 @@ class PipelineConversationHandler:
             and _claims_booking_without_tool_call(assistant_text, check_language)
         )
 
-        if full_response and not cancel_event.is_set():
+        # A reply whose every sentence failed TTS was never said, so it is not history either.
+        if full_response and not cancel_event.is_set() and (assistant_text or not unspoken):
             yield HandlerResponse(response_text=assistant_text)
             # Cancelled turns are discarded so history only holds complete pairs.
             history.append(ChatMessage(role="assistant", content=assistant_text))
@@ -1795,6 +1810,7 @@ class PipelineConversationHandler:
         replayed with no synthesis the next time. pin=True also asks a voice that can keep audio for the life of
         the process (pin_phrases) to do so. `language` forces one, for prewarming a language the session has not
         switched to yet."""
+        sentence = text
         # Every text source reaches TTS here, so strip markdown once for all of them.
         text = strip_markdown_chars(text)
         language = language or self._session_language(session_id) or self._tts_fixed_language
@@ -1820,6 +1836,7 @@ class PipelineConversationHandler:
         flight = phrase_audio.begin(tts, key) if cache else None
         collected: list[bytes] = []
         complete = False
+        got_audio = False
         try:
             pin_phrases = getattr(tts, "pin_phrases", None) if pin else None
             if pin_phrases is not None:
@@ -1828,12 +1845,15 @@ class PipelineConversationHandler:
                 except Exception:
                     log.warning("TTS pin failed session=%s", session_id, exc_info=True)
             async for chunk in tts.synthesize_stream(text, self._sample_rate, **kwargs):
+                got_audio = True
                 if cache:
                     collected.append(chunk)
                 yield chunk
             complete = True
         except Exception:
             log.exception("TTS streaming failed chars=%d session=%s", len(text), session_id)
+            if not got_audio:
+                self._session(session_id).unspoken_sentences.append(sentence)
         finally:
             if cache:
                 phrase_audio.finish(tts, key, flight, collected if complete else None)
