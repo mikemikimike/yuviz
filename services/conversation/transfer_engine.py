@@ -113,8 +113,9 @@ class TransferDecisionEngine:
             if trigger.directive is None:
                 return reject("missing_directive_payload")
             transfer_reason = TransferReason.CUSTOMER_REQUEST
-            transfer_type   = trigger.directive.transfer_type
-            destination     = trigger.directive.destination
+            # The model only signals intent; type and destination come from agent config.
+            transfer_type   = coerce_transfer_type(ctx.transfer_type)
+            destination     = ctx.transfer_destination or ""
             free_reason     = trigger.directive.reason
 
         elif trigger.type is TriggerType.ESCALATION:

@@ -1125,7 +1125,13 @@ class PipelineConversationHandler:
             transfer_directive = next(
                 (d for d in directives if isinstance(d, TransferDirective)), None,
             )
-            if transfer_directive is not None:
+            directive_problem = (
+                transfer_destination_problem(self._transfer_destination_default)
+                if transfer_directive is not None and self._transfer_type_default != "none" else None
+            )
+            if directive_problem is not None:
+                log.warning("Transfer directive rejected: %s session=%s", directive_problem, session_id)
+            elif transfer_directive is not None:
                 decision = self._transfer_engine.evaluate(
                     self._decision_context(session_id),
                     TransferTrigger(type=TriggerType.LLM_DIRECTIVE, directive=transfer_directive),
