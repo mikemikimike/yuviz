@@ -40,6 +40,9 @@ from .session_finalizer import FinalizationResult
 
 _SPEECH_ENDED_STATES = frozenset({CallFsmState.LISTENING, CallFsmState.RECOGNIZING})
 
+# Per-utterance cap on buffered inbound audio: 60 s of 16 kHz S16LE mono.
+MAX_UTTERANCE_BYTES = 60 * 16_000 * 2
+
 log = logging.getLogger(__name__)
 
 
@@ -226,7 +229,13 @@ class ConversationSession:
         if not self._fsm.can_accept_audio:
             return HandlerResponse()
 
-        self._audio_buffer.extend(payload)
+        room = MAX_UTTERANCE_BYTES - len(self._audio_buffer)
+        if 0 < room < len(payload):  # logged once, by the chunk that crosses the cap
+            log.warning(
+                "Utterance audio over cap, dropping excess: buffered=%d cap=%d session=%s",
+                len(self._audio_buffer), MAX_UTTERANCE_BYTES, self._ctx.session_id,
+            )
+        self._audio_buffer.extend(payload[:max(room, 0)])
         response = await self._handler.on_audio(self._ctx.session_id, payload)
 
         if response.tts_payloads:
