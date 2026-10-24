@@ -29,9 +29,9 @@ _PHRASE_TABLES = ("CLOSURE_PHRASES", "FAREWELL_PHRASES")
 
 def _validate_fillers(code: str, module: ModuleType, attr: str, *, required: bool) -> None:
     """Raise ValueError unless the module's attr is a non-empty tuple of (phrase, seconds > 0) pairs."""
-    fillers = getattr(module, attr, None)
-    if fillers is None and not required:
+    if not required and not hasattr(module, attr):
         return
+    fillers = getattr(module, attr, None)
     if not isinstance(fillers, tuple) or not fillers or not all(
         isinstance(f, tuple)
         and len(f) == 2

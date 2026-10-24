@@ -344,7 +344,7 @@ async def test_the_filler_waits_for_the_delay_and_not_longer(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_first_turn_filler_not_repeated_on_later_turns(monkeypatch):
+async def test_delayed_first_turn_filler_not_repeated_on_later_turns(monkeypatch):
     monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.02)
     tts = _timed_tts()
     handler = _make_handler(_make_stt("hi there"), _make_slow_llm(0.1), tts, system_prompt="Be helpful.")

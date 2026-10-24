@@ -90,6 +90,7 @@ def _make_package(tmp_path, monkeypatch, modules: dict[str, str]):
         ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", True),)', "TOOL_FILLERS must be a non-empty tuple"),
         ("xx", 'STRINGS = {"fallback_goodbye": ""}\nTOOL_FILLERS = (("xx", 1.0),)', "STRINGS must be a dict"),
         ("xx", 'STRINGS = {"fallback_godbye": "x"}\nTOOL_FILLERS = (("xx", 1.0),)', "keys not in en.STRINGS"),
+        ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = None', "FIRST_TURN_FILLERS must be a non-empty tuple"),
         ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = ()', "FIRST_TURN_FILLERS must be a non-empty tuple"),
         ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = [("a", 1.0)]', "FIRST_TURN_FILLERS must be a non-empty tuple"),
         ("xx", 'STRINGS = {}\nTOOL_FILLERS = (("xx", 1.0),)\nFIRST_TURN_FILLERS = (("", 1.0),)', "FIRST_TURN_FILLERS must be a non-empty tuple"),
