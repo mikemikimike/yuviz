@@ -122,7 +122,8 @@ def shortest_tool_filler(language: str | None) -> str:
 
 
 def first_turn_fillers(language: str | None) -> tuple[tuple[str, float], ...] | None:
-    """The language's own turn-1 filler pool, or None when its module has none (never English's)."""
+    """The language's turn-1 filler pool (English's for a language with no module), or None when its module has
+    none, so a language with a module never gets English's."""
     table = _TABLES.get(normalize_language(language) or "en", en)
     return getattr(table, "FIRST_TURN_FILLERS", None)
 

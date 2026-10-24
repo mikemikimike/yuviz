@@ -509,6 +509,7 @@ async def test_filler_phrases_are_prepared_after_the_greeting():
     assert any(x in _FIRST_TURN_PHRASES for x in texts)
     assert set(texts) & _TOOL_CALL_FILLERS          # at least one tool filler too
     assert texts[0] == "Hi."                        # the greeting always goes first
+    assert texts[1] in _FIRST_TURN_PHRASES          # then the turn-1 pool, which is wanted before any tool filler
 
 
 @pytest.mark.asyncio
