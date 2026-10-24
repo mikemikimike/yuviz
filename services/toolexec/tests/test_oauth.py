@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import uuid
+import weakref
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -790,6 +791,41 @@ async def test_concurrent_refreshes_under_strict_reuse_detection_all_use_the_win
     tokens = [(await r)[0] for r in results]
 
     assert tokens == ["at-winner"] * 3
+    assert len(fake.requests) == 1
+    row = await pool.fetchrow("SELECT * FROM oauth_connections WHERE id = $1", connection["id"])
+    assert row["status"] == "connected"
+    assert decrypt_tenant_secret(made["a"], row["refresh_token_ref"]) == "rt-rotated"
+
+
+@pytest.mark.asyncio
+async def test_refreshes_from_two_processes_under_strict_reuse_detection_use_the_winners_token(
+    pool, tenants, fake, monkeypatch,
+):
+    """Same provider as above, but the second caller is another process: it has its own asyncio locks
+    and its own DB session, so only the database can order the two. The loser must wait, re-read and
+    use the winner's token, not present the spent refresh token and flip the row to reconnect_needed."""
+    made, users = tenants
+    connection = await _connect(made["a"], users["a"], fake, refresh="rt-original")
+    await _expire_access_token(pool, connection["id"])
+    used: list[str] = []
+
+    async def _strict(request):
+        refresh_token = fake.form(request)["refresh_token"]
+        if refresh_token in used:
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        used.append(refresh_token)
+        await asyncio.sleep(0.3)
+        return httpx.Response(200, json={"access_token": "at-winner", "refresh_token": "rt-rotated", "expires_in": 3600})
+
+    fake.token = _strict
+    fake.requests.clear()
+    first = asyncio.create_task(oauth.access_token_for(made["a"], str(connection["id"])))
+    await asyncio.sleep(0.1)                                    # the first caller is mid-refresh
+    monkeypatch.setattr(oauth, "_refresh_locks", weakref.WeakValueDictionary())   # the other process's locks
+    second = asyncio.create_task(oauth.access_token_for(made["a"], str(connection["id"])))
+    tokens = [(await first)[0], (await second)[0]]
+
+    assert tokens == ["at-winner"] * 2
     assert len(fake.requests) == 1
     row = await pool.fetchrow("SELECT * FROM oauth_connections WHERE id = $1", connection["id"])
     assert row["status"] == "connected"
