@@ -906,8 +906,8 @@ class PipelineConversationHandler:
                 # own transcript confidence (Deepgram; Whisper reports 1.0 and gates on no_speech_prob).
                 if stt_result.confidence < lang_state.SHORT_MIN_SPEECH_CONFIDENCE or not tracker.accept_short(heard):
                     log.debug(
-                        "Skipping short utterance %r lang=%s conf=%s stt_conf=%.2f (session language %s) session=%s",
-                        stt_result.text, heard.language, heard.confidence, stt_result.confidence,
+                        "Skipping short utterance chars=%d lang=%s conf=%s stt_conf=%.2f (session language %s) session=%s",
+                        len(stt_result.text), heard.language, heard.confidence, stt_result.confidence,
                         tracker.current, session_id,
                     )
                     return
@@ -916,13 +916,13 @@ class PipelineConversationHandler:
 
         if tracker is not None:
             log.info(
-                "STT result=%r language=%s conf=%s session_language=%s session=%s",
-                stt_result.text, heard.language,
+                "STT result chars=%d language=%s conf=%s session_language=%s session=%s",
+                len(stt_result.text), heard.language,
                 f"{heard.confidence:.2f}" if heard.confidence is not None else None,
                 tracker.current, session_id,
             )
         else:
-            log.info("STT result=%r session=%s", stt_result.text, session_id)
+            log.info("STT result chars=%d session=%s", len(stt_result.text), session_id)
         yield HandlerResponse(stt_text=stt_result.text, stt_confidence=stt_result.confidence)
 
         # A breach only stores a pending transfer; the agent still answers this turn first.
@@ -933,8 +933,7 @@ class PipelineConversationHandler:
         violation = GuardrailDetector.check(stt_result.text, check_language)
         if violation is not None:
             log.info(
-                "Guardrail violation category=%s matched=%r session=%s",
-                violation.category, violation.matched, session_id,
+                "Guardrail violation category=%s session=%s", violation.category, session_id,
             )
             self.record_guardrail_violation(session_id)
         else:
@@ -1081,7 +1080,7 @@ class PipelineConversationHandler:
             if fabricated_booking_claim:
                 log.warning(
                     "Possible fabricated booking claim (no tool call this turn) "
-                    "session=%s text=%r", session_id, assistant_text,
+                    "session=%s chars=%d", session_id, len(assistant_text),
                 )
                 history.append(ChatMessage(
                     role="system",
@@ -1800,7 +1799,7 @@ class PipelineConversationHandler:
                 yield chunk
             complete = True
         except Exception:
-            log.exception("TTS streaming failed text=%r session=%s", text, session_id)
+            log.exception("TTS streaming failed chars=%d session=%s", len(text), session_id)
         finally:
             if cache:
                 phrase_audio.finish(tts, key, flight, collected if complete else None)

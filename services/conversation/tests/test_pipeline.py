@@ -901,6 +901,24 @@ async def test_pipeline_marker_only_reply_without_closure_stays_open(caplog):
 
 
 @pytest.mark.asyncio
+async def test_caller_and_reply_words_are_never_logged(caplog):
+    """Caller utterances (STT result, guardrail hit) and reply text on a TTS failure stay out of logs."""
+    caller = "This is useless, my card is 4111111111111111"
+    reply = "Your balance is 9876 dollars."
+    tts = _make_tts()
+    tts.synthesize = AsyncMock(side_effect=RuntimeError("tts down"))
+
+    handler = _make_handler(_make_stt(caller), _make_llm([reply]), tts)
+    with caplog.at_level("DEBUG", logger=pipeline_module.log.name):
+        [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert "Guardrail violation" in caplog.text
+    assert "TTS streaming failed" in caplog.text
+    for secret in ("4111111111111111", "useless", "9876"):
+        assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_legacy_free_text_agent_language_keeps_the_end_call_guard():
     """agents.language='English' normalizes to nothing but must not switch the guard off: the English
     phrase tables apply, so a marker after a non-farewell to a non-closing caller is rejected."""
