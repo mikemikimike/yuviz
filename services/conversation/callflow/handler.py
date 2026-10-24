@@ -50,6 +50,8 @@ class CallFlowConversationHandler:
         voice_for: Callable[[str], Awaitable[Any | None]],
         agent_slugs: dict[str, str],
         transfer_policy: TransferPolicy,
+        transcripts: Any | None = None,
+        call_row: dict[str, Any] | None = None,
     ) -> None:
         self._runner = runner
         self._default_tts = tts
@@ -62,6 +64,12 @@ class CallFlowConversationHandler:
         self._voice_for = voice_for
         self._agent_slugs = agent_slugs
         self._transfer_policy = transfer_policy
+        self._transcripts = transcripts
+
+        # The call row starts here, ahead of the driver, so it covers the IVR and names the flow's
+        # agent; a delegate's own begin_call() at handoff is then a no-op (ON CONFLICT DO NOTHING).
+        if transcripts is not None:
+            transcripts.begin_call(session_id, tenant_id, call_id, **(call_row or {}))
 
         self._delegate: Any | None = None
         self._events: asyncio.Queue[_FlowEvent] = asyncio.Queue()
@@ -234,6 +242,8 @@ class CallFlowConversationHandler:
             await asyncio.gather(*pending, return_exceptions=True)
         if self._delegate is not None:
             await self._delegate.on_session_end(session_id, reason, final_state=final_state)
+        elif self._transcripts is not None:
+            self._transcripts.end_call(session_id, reason, final_state=final_state, score_sentiment=False)
 
     def on_transfer_failed(
         self, session_id: str, destination: str, reason: str,
