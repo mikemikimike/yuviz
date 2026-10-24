@@ -207,6 +207,23 @@ def test_home_calling_code_makes_a_country_domestic(value):
     assert transfer_policy_problem("+12125550100", TransferPolicy(home_calling_code="44")) is not None
 
 
+@pytest.mark.parametrize("value", [
+    "sip:+447911123456@pbx.acme.example", "sip:+18765551234@pbx.acme.example",
+    "sip:00447911123456@pbx.acme.example", "sip:011882123456@pbx.acme.example",
+    "sip:+882123456789@pbx.acme.example",
+])
+def test_allowlisted_sip_host_does_not_exempt_the_user_part(monkeypatch, value):
+    monkeypatch.setenv("VOICEAI_TRANSFER_SIP_HOSTS", "pbx.acme.example")
+    assert transfer_policy_problem(value, DEFAULT) is not None
+
+
+def test_allowlisted_sip_host_still_takes_extensions_and_home_numbers(monkeypatch):
+    monkeypatch.setenv("VOICEAI_TRANSFER_SIP_HOSTS", "pbx.acme.example")
+    for value in ("sip:desk@pbx.acme.example", "sip:1001@pbx.acme.example", "sip:+14155550100@pbx.acme.example"):
+        assert transfer_policy_problem(value, DEFAULT) is None
+    assert transfer_policy_problem("sip:+447911123456@pbx.acme.example", OPEN) is None
+
+
 def test_allowlisted_sip_host_needs_no_opt_in(monkeypatch):
     monkeypatch.setenv("VOICEAI_TRANSFER_SIP_HOSTS", "pbx.acme.example, other.example")
     assert transfer_policy_problem("sip:desk@pbx.acme.example", DEFAULT) is None

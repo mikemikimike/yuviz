@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import socket
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 _DIAL_NUMBER_RE = re.compile(r"\+?[0-9]{2,15}")
 _SIP_URI_RE = re.compile(r"sips?:[A-Za-z0-9._+:;=~-]+@[A-Za-z0-9._+:;=~-]+")
@@ -169,9 +169,10 @@ def transfer_policy_problem(value: str, policy: TransferPolicy) -> str | None:
         )
     if value.lower().startswith(("sip:", "sips:")):
         user = re.split(r"[:;]", value.split(":", 1)[1].split("@", 1)[0], maxsplit=1)[0]
+        # The user part is dialled onward whatever the host, so an allowlisted host
+        # does not exempt it.
         if is_dial_number(user):
-            # Premium and malformed only; the host decides whether it may leave the platform.
-            problem = _number_problem(user, replace(policy, allow_international=True))
+            problem = _number_problem(user, policy)
             if problem is not None:
                 return problem
         if not policy.allow_international and not _sip_host_allowed(_sip_uri_host(value)):
