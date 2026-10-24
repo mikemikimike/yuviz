@@ -60,6 +60,9 @@ class FakeCall:
     def cancel(self) -> None:
         self.cancelled = True
 
+    async def done_writing(self) -> None:
+        pass
+
     def __aiter__(self):
         return self._replies()
 
