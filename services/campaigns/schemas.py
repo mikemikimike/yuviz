@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, field_validator
 
-CampaignStatus = Literal["draft", "running", "paused", "completed"]
+CampaignStatus = Literal["draft", "scheduled", "running", "paused", "completed", "cancelled"]
 
 
 def _valid_timezone(name: str | None) -> str | None:
@@ -22,7 +23,8 @@ def _valid_timezone(name: str | None) -> str | None:
 class CampaignCreate(BaseModel):
     agent_id:               str
     name:                   str
-    caller_id:              str | None = None
+    description:            str | None = Field(None, max_length=1000)
+    scheduled_start_at:     datetime | None = None
     max_concurrent_calls:   int = Field(1, ge=1)
     pacing_seconds:         int = 5
     max_attempts:           int = Field(1, ge=1)
@@ -37,7 +39,7 @@ class CampaignCreate(BaseModel):
 
 class CampaignUpdate(BaseModel):
     name:                   str | None = None
-    caller_id:              str | None = None
+    description:            str | None = Field(None, max_length=1000)
     max_concurrent_calls:   int | None = Field(None, ge=1)
     pacing_seconds:         int | None = None
     max_attempts:           int | None = Field(None, ge=1)
@@ -74,3 +76,8 @@ class CpsLimitUpdate(BaseModel):
 class TenantCapUpdate(BaseModel):
     model_config = {"strict": True}
     max_outbound_concurrent_calls: int | None
+
+
+class RecallRequest(BaseModel):
+    contact_ids: list[str] = Field(min_length=1, max_length=5000)
+    name: str | None = Field(None, max_length=200)

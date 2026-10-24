@@ -81,7 +81,7 @@ async def check(
         checks.append(_block("timezone_invalid", "calling_hours_timezone", "the calling-hours timezone is not valid"))
 
     if not campaign.get("caller_id"):
-        checks.append(_block("caller_id_missing", "caller_id", "choose a caller ID for this campaign"))
+        checks.append(_block("caller_id_missing", "caller_id", "set an outbound caller ID on the campaign's agent"))
     else:
         checks += await _caller_id_checks(campaign, tenant_id, dial_client)
 
@@ -113,7 +113,7 @@ async def _caller_id_checks(campaign: dict, tenant_id: UUID, dial_client: DialRe
         return [_block("caller_id_not_owned", "caller_id", "the caller ID is not a number owned by this account")]
 
     provider = route["provider"]
-    if provider is None:
+    if provider is None or provider == "native":
         return await _sip_checks(campaign, route, dial_client)
     provider_cls = TelephonyProviderRegistry.all().get(provider)
     if provider_cls is None or not provider_cls.supports_campaign_outbound:

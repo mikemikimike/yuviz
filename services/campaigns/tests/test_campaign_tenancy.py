@@ -29,6 +29,9 @@ _REQUESTS = {
     ("POST", "/campaigns/{campaign_id}/start"): {},
     ("POST", "/campaigns/{campaign_id}/pause"): {},
     ("POST", "/campaigns/{campaign_id}/resume"): {},
+    ("POST", "/campaigns/{campaign_id}/cancel"): {},
+    ("DELETE", "/campaigns/{campaign_id}"): {},
+    ("POST", "/campaigns/{campaign_id}/recall"): {"json": {"contact_ids": [str(uuid.uuid4())]}},
 }
 
 
@@ -59,7 +62,7 @@ async def api(scratch_pool):
 
 
 def test_the_table_covers_every_campaign_id_route():
-    assert len(_routes()) == len(_REQUESTS) == 10
+    assert len(_routes()) == len(_REQUESTS) == 13
     assert _routes() == set(_REQUESTS)
 
 

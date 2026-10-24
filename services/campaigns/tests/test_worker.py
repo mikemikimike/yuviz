@@ -260,6 +260,20 @@ async def test_tick_holds_no_transaction_between_scan_iterations(scratch_pool, s
         assert idle == []
 
 
+async def test_tick_starts_a_scheduled_campaign_only_once_its_time_has_passed(scratch_pool, scratch_redis_raw):
+    due = await _world(scratch_pool, status="scheduled")
+    later = await _world(scratch_pool, status="scheduled")
+    await scratch_pool.execute(
+        "UPDATE campaigns SET scheduled_start_at = now() - interval '1 minute' WHERE id = $1", due["campaign"]["id"],
+    )
+    await scratch_pool.execute(
+        "UPDATE campaigns SET scheduled_start_at = now() + interval '1 hour' WHERE id = $1", later["campaign"]["id"],
+    )
+    await w.worker(scratch_redis_raw)._tick()
+    assert (await w.refreshed(scratch_pool, due["campaign"]["id"]))["status"] == "running"
+    assert (await w.refreshed(scratch_pool, later["campaign"]["id"]))["status"] == "scheduled"
+
+
 # ── calling-hours guardrail ──────────────────────────────────────────────
 
 def test_within_calling_hours_unrestricted_when_unset():
@@ -308,3 +322,14 @@ async def test_set_wait_reason_writes_only_on_change(scratch_pool):
     since = (await w.refreshed(scratch_pool, campaign_id))["wait_since"]
     await campaigns.set_wait_reason(campaign_id, "pacing")
     assert (await w.refreshed(scratch_pool, campaign_id))["wait_since"] == since
+
+
+async def test_a_scheduled_campaign_that_is_not_ready_at_its_time_waits_and_is_not_paused(scratch_pool, scratch_redis_raw):
+    async with scratch_pool.acquire() as conn:
+        world = await w.make(conn, status="scheduled")
+    await scratch_pool.execute(
+        "UPDATE campaigns SET scheduled_start_at = now() - interval '1 minute' WHERE id = $1", world["campaign"]["id"],
+    )
+    await w.worker(scratch_redis_raw)._tick()
+    campaign = await w.refreshed(scratch_pool, world["campaign"]["id"])
+    assert campaign["status"] == "scheduled"

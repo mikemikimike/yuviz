@@ -244,8 +244,10 @@ void Application::wire_websocket_handlers() {
                     ctx.obs.tenant_id  = route.tenant_slug;
                     ctx.obs.call_id    = call_id;
                     ctx.script_id      = route.agent_slug;
-                    ctx.called_did     = md.did;
-                    ctx.caller_did     = md.ani;
+                    // md.did is our number and md.ani the other party; caller/called are from/to.
+                    const bool outbound = md.direction == "outbound";
+                    ctx.caller_did     = outbound ? md.did : md.ani;
+                    ctx.called_did     = outbound ? md.ani : md.did;
                     ctx.direction      = md.direction;
                     ctx.freeswitch_host = md.freeswitch_host;
                     ctx.routing_status  = status;

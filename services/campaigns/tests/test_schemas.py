@@ -39,7 +39,7 @@ def test_defaults_apply():
 def test_the_new_campaign_form_payload_still_validates():
     # Initial state of admin-ui/app/(console)/campaigns/new/page.tsx, plus the values a user can pick there.
     payload = {
-        "agent_id": "a", "name": "Renewals", "caller_id": "+14155550100", "max_concurrent_calls": 1,
+        "agent_id": "a", "name": "Renewals", "scheduled_start_at": None, "max_concurrent_calls": 1,
         "pacing_seconds": 5, "max_attempts": 1, "calling_hours_start": None, "calling_hours_end": None,
         "calling_hours_timezone": "UTC",
     }

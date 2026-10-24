@@ -19,7 +19,7 @@ from libs.tenancy import platform_conn
 from libs.telephony_sdk.exceptions import TelephonyRateLimited
 
 from . import (
-    attempts, campaign_contacts, campaigns, capacity, db, dnc, outcome_events, telephony_originate,
+    attempts, campaign_contacts, campaigns, capacity, db, dnc, outcome_events, readiness, telephony_originate,
 )
 from .billing import BillingAdmission
 from .dial_request import DialRequestClient, InvalidDialField, build_intent, is_e164
@@ -31,6 +31,7 @@ _TICK_INTERVAL_S = 2.0
 _REGISTRY_TIMEOUT_S = 2.0
 _RATE_LIMIT_BACKOFF_S = 30
 _RATE_LIMIT_MAX_S = 300
+_SCHEDULE_RECHECK_S = 60
 
 
 def _parse_hhmm(value: str) -> dtime:
@@ -58,6 +59,7 @@ class CampaignWorker:
         if billing.enabled:
             raise NotImplementedError("billing admission is not wired into the dial path yet")
         self._dial = dial_client
+        self._billing = billing
         self._redis = redis_client
         self._egress_secret = egress_secret
         self._registry = registry or AllowAllRegistry()
@@ -66,6 +68,7 @@ class CampaignWorker:
         self._stopped = False
         self._task: asyncio.Task | None = None
         self._last_attempt_at: dict[str, float] = {}     # campaign_id -> monotonic time
+        self._schedule_checked_at: dict[str, float] = {}  # scheduled campaign_id -> monotonic time of last check
         self._sending: set[uuid.UUID] = set()             # attempt ids with a send in progress in this process
 
     def start(self) -> None:
@@ -98,10 +101,44 @@ class CampaignWorker:
         await self._reconcile()
         pool = await db.get_pool()
         # Loop stays outside the connection so no transaction spans the tick.
+        await self._start_due_scheduled()
         async with platform_conn(pool, reason="campaign-worker-scan") as conn:
             running = await conn.fetch("SELECT * FROM campaigns WHERE status = 'running' AND deleted_at IS NULL")
         for row in running:
             await self._dial_next(dict(row))
+
+    async def _start_due_scheduled(self) -> None:
+        """A scheduled campaign starts only if the same readiness check that Start uses passes now; otherwise it waits."""
+        pool = await db.get_pool()
+        async with platform_conn(pool, reason="campaign-worker-scan") as conn:
+            due = await conn.fetch(
+                "SELECT * FROM campaigns WHERE status = 'scheduled' AND scheduled_start_at <= now() AND deleted_at IS NULL"
+            )
+        for row in due:
+            campaign = dict(row)
+            key = str(campaign["id"])
+            now = time.monotonic()
+            if now - self._schedule_checked_at.get(key, -_SCHEDULE_RECHECK_S) < _SCHEDULE_RECHECK_S:
+                continue
+            self._schedule_checked_at[key] = now
+            try:
+                result = await readiness.check(
+                    campaign, tenant_id=campaign["tenant_id"], dial_client=self._dial, billing=self._billing,
+                )
+            except Exception:
+                log.exception("CampaignWorker: readiness check failed for scheduled campaign=%s", key)
+                continue
+            if not result.ready:
+                blocks = [c.message for c in result.checks if c.level == "block"]
+                log.warning("CampaignWorker: scheduled campaign=%s waits, not ready: %s", key, "; ".join(blocks))
+                continue
+            async with platform_conn(pool, reason="campaign-dial-state") as conn:
+                await conn.execute(
+                    "UPDATE campaigns SET status = 'running', started_at = COALESCE(started_at, now()), updated_at = now() "
+                    "WHERE id = $1 AND status = 'scheduled'",
+                    campaign["id"],
+                )
+            log.info("CampaignWorker: scheduled campaign=%s started", key)
 
     async def _drain_events(self) -> None:
         await outcome_events.drain(self._redis, self._consumer)
@@ -230,7 +267,7 @@ class CampaignWorker:
             await self._pause(campaign_id, "caller ID is not owned by its tenant or the agent is unavailable")
             return
         provider = route["provider"]
-        if provider is None:
+        if provider is None or provider == "native":
             path, cps_scope = "sip", capacity.SIP_TRUNK_SCOPE
         elif provider in TelephonyProviderRegistry.all():
             path, cps_scope = "cpaas", capacity.provider_scope(route["telephony_config_id"])

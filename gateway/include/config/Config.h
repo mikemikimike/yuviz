@@ -217,7 +217,7 @@ struct RouteResolution {
 // Missing or malformed input degrades gracefully; never throws.
 struct CallMetadata {
     std::string did;              // called number — feeds resolve_route()
-    std::string ani;              // calling number — feeds SessionContext::caller_did
+    std::string ani;              // the other party's number (the callee on an outbound call)
     std::string direction{"inbound"};
     std::string freeswitch_host;  // originating FS node (hostname/IP); routes ESL commands
     std::string tenant_slug;      // outbound campaign calls only: the campaign's own route

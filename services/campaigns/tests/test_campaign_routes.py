@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import typing
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -283,3 +284,169 @@ async def test_caller_ids_lists_own_dids_with_their_path_badge(scratch_pool, api
     paths = {row["did"]: row["path"] for row in resp.json()}
     assert paths[native_did] == "native" and set(paths.values()) == {"native", "fake"}
     assert "19990000001" not in paths
+
+
+# ── create: caller ID comes from the agent, optional scheduled start ─────
+
+async def _agent_dials_as(pool, world, caller_id, direction="outbound"):
+    await pool.execute(
+        "UPDATE agents SET outbound_caller_id = $2, direction = $3 WHERE id = $1",
+        world["campaign"]["agent_id"], caller_id, direction,
+    )
+
+
+async def _create(api, world, **body):
+    return await api.post(
+        f"/tenants/{world['tenant_id']}/campaigns",
+        json={"agent_id": str(world["campaign"]["agent_id"]), "name": "n", **body}, headers=_as(world),
+    )
+
+
+async def test_create_takes_the_caller_id_from_the_agent_and_ignores_one_in_the_body(scratch_pool, api):
+    world = await _world(scratch_pool)
+    await _agent_dials_as(scratch_pool, world, world["campaign"]["caller_id"])
+    resp = await _create(api, world, caller_id="+19999999999")
+    assert resp.status_code == 201, resp.text
+    assert (resp.json()["caller_id"], resp.json()["status"]) == (world["campaign"]["caller_id"], "draft")
+
+
+@pytest.mark.parametrize("caller_id, direction, detail", [
+    (None, "outbound", "no outbound caller ID"),
+    ("owned", "inbound", "inbound-only"),
+    ("+14155550999", "outbound", "no longer owned"),
+])
+async def test_create_refuses_an_agent_that_cannot_dial(scratch_pool, api, caller_id, direction, detail):
+    world = await _world(scratch_pool)
+    await _agent_dials_as(
+        scratch_pool, world, world["campaign"]["caller_id"] if caller_id == "owned" else caller_id, direction,
+    )
+    resp = await _create(api, world)
+    assert resp.status_code == 422, resp.text
+    assert detail in resp.json()["detail"]
+
+
+async def test_a_scheduled_campaign_is_created_scheduled_and_must_be_a_future_aware_time(scratch_pool, api):
+    world = await _world(scratch_pool)
+    await _agent_dials_as(scratch_pool, world, world["campaign"]["caller_id"])
+    now = datetime.now(timezone.utc)
+
+    ok = await _create(api, world, scheduled_start_at=(now + timedelta(hours=1)).isoformat())
+    assert ok.status_code == 201, ok.text
+    assert ok.json()["status"] == "scheduled"
+
+    past = await _create(api, world, scheduled_start_at=(now - timedelta(minutes=1)).isoformat())
+    naive = await _create(api, world, scheduled_start_at="2099-01-01T10:00:00")
+    assert (past.status_code, naive.status_code) == (422, 422)
+
+
+async def test_start_picks_up_the_agents_current_caller_id(scratch_pool, api):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    owned = world["campaign"]["caller_id"]
+    await scratch_pool.execute("UPDATE campaigns SET caller_id = NULL WHERE id = $1", cid)
+    await _agent_dials_as(scratch_pool, world, owned)
+    resp = await api.post(f"/campaigns/{cid}/start", headers=_as(world))
+    assert resp.status_code == 200, resp.text
+    assert (resp.json()["status"], resp.json()["caller_id"]) == ("running", owned)
+
+
+async def test_a_description_is_saved_on_create_and_can_be_edited(scratch_pool, api):
+    world = await _world(scratch_pool)
+    await _agent_dials_as(scratch_pool, world, world["campaign"]["caller_id"])
+    created = await _create(api, world, description="Remind patients of tomorrow's appointments")
+    assert created.status_code == 201, created.text
+    assert created.json()["description"] == "Remind patients of tomorrow's appointments"
+    edited = await api.patch(f"/campaigns/{created.json()['id']}", json={"description": "Updated"}, headers=_as(world))
+    assert edited.json()["description"] == "Updated"
+    too_long = await _create(api, world, description="x" * 1001)
+    assert too_long.status_code == 400
+
+
+async def test_a_cancelled_campaign_cannot_be_started_or_resumed_again(scratch_pool, api):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    await scratch_pool.execute("UPDATE campaigns SET status = 'running' WHERE id = $1", cid)
+    cancelled = await api.post(f"/campaigns/{cid}/cancel", headers=_as(world))
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+    assert (await api.post(f"/campaigns/{cid}/start", headers=_as(world))).status_code == 409
+    assert (await api.post(f"/campaigns/{cid}/resume", headers=_as(world))).status_code == 409
+
+
+async def test_a_finished_campaign_cannot_be_cancelled(scratch_pool, api):
+    world = await _world(scratch_pool)
+    await scratch_pool.execute("UPDATE campaigns SET status = 'completed' WHERE id = $1", world["campaign"]["id"])
+    resp = await api.post(f"/campaigns/{world['campaign']['id']}/cancel", headers=_as(world))
+    assert resp.status_code == 409
+
+
+async def test_only_a_draft_can_be_deleted_and_it_leaves_the_list(scratch_pool, api):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    await scratch_pool.execute("UPDATE campaigns SET status = 'running' WHERE id = $1", cid)
+    assert (await api.delete(f"/campaigns/{cid}", headers=_as(world))).status_code == 409
+    await scratch_pool.execute("UPDATE campaigns SET status = 'draft' WHERE id = $1", cid)
+    assert (await api.delete(f"/campaigns/{cid}", headers=_as(world))).status_code == 204
+    listed = await api.get(f"/tenants/{world['tenant_id']}/campaigns", headers=_as(world))
+    assert all(c["id"] != str(cid) for c in listed.json())
+
+
+async def test_call_again_makes_a_draft_with_only_the_chosen_unreached_leads(scratch_pool, api):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    await scratch_pool.execute("UPDATE campaigns SET status = 'completed' WHERE id = $1", cid)
+    async with scratch_pool.acquire() as conn:
+        missed = await seed.contact(conn, cid, status="no_answer", phone="+14155550201")
+        answered = await seed.contact(conn, cid, status="completed", phone="+14155550202")
+    resp = await api.post(
+        f"/campaigns/{cid}/recall", json={"contact_ids": [str(missed["id"]), str(answered["id"])]}, headers=_as(world),
+    )
+    assert resp.status_code == 201, resp.text
+    new = resp.json()
+    assert (new["status"], new["caller_id"], new["agent_id"]) == (
+        "draft", world["campaign"]["caller_id"], str(world["campaign"]["agent_id"]),
+    )
+    contacts = await scratch_pool.fetch("SELECT phone_number FROM campaign_contacts WHERE campaign_id = $1", new["id"])
+    assert [r["phone_number"] for r in contacts] == ["+14155550201"]
+
+
+async def test_the_call_log_lists_campaign_calls_and_filters_by_status(scratch_pool, api):
+    from services.campaigns import attempts as attempts_service
+
+    world = await _world(scratch_pool)
+    async with scratch_pool.acquire() as conn:
+        campaign = dict(await conn.fetchrow("SELECT * FROM campaigns WHERE id = $1", world["campaign"]["id"]))
+        for outcome in ("no_answer", "busy"):
+            contact = await seed.contact(conn, world["campaign"]["id"], phone=f"+1415555{len(outcome):04d}")
+            row = await attempts_service.create_attempt(
+                conn, campaign=campaign, contact=dict(contact), path="sip", provider=None, cps_scope="sip_trunk:pstn",
+            )
+            await conn.execute(
+                "UPDATE campaign_attempts SET state = 'resolved', outcome = $2, resolved_at = now() WHERE id = $1",
+                row["id"], outcome,
+            )
+    base = f"/tenants/{world['tenant_id']}/campaigns/call-attempts"
+    everything = (await api.get(base, headers=_as(world))).json()
+    assert {a["outcome"] for a in everything} >= {"no_answer", "busy"}
+    assert all("•" in a["callee_masked"] for a in everything)
+    busy = (await api.get(base, params={"status": "busy"}, headers=_as(world))).json()
+    assert [a["outcome"] for a in busy] == ["busy"]
+    assert all(isinstance(a["can_call_again"], bool) for a in everything)
+    inbound = (await api.get(base, params={"direction": "inbound"}, headers=_as(world))).json()
+    assert inbound == []
+
+
+async def test_cancelling_closes_attempts_that_were_never_sent(scratch_pool, api):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    await scratch_pool.execute("UPDATE campaigns SET status = 'running' WHERE id = $1", cid)
+    async with scratch_pool.acquire() as conn:
+        from services.campaigns import attempts as attempts_service
+        campaign = dict(await conn.fetchrow("SELECT * FROM campaigns WHERE id = $1", cid))
+        contact = await conn.fetchrow("SELECT * FROM campaign_contacts WHERE campaign_id = $1 LIMIT 1", cid)
+        row = await attempts_service.create_attempt(
+            conn, campaign=campaign, contact=dict(contact), path="sip", provider=None, cps_scope="sip_trunk:pstn",
+        )
+    assert (await api.post(f"/campaigns/{cid}/cancel", headers=_as(world))).status_code == 200
+    state = await scratch_pool.fetchrow("SELECT state, outcome, failure_reason FROM campaign_attempts WHERE id = $1", row["id"])
+    assert (state["state"], state["outcome"], state["failure_reason"]) == ("resolved", "failed", "campaign_cancelled")
