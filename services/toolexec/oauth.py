@@ -383,6 +383,12 @@ async def _upsert_connection(
 ) -> dict[str, Any]:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
+        # require_live_tenant ran before the provider exchange. Re-check under a row lock that
+        # soft_delete_tenant's UPDATE also needs: a delete that committed during the exchange
+        # refuses here, and one that starts after this lock waits and then disconnects what we store.
+        live = await conn.fetchval("SELECT true FROM tenants WHERE id = $1 AND deleted_at IS NULL FOR SHARE", tenant_id)
+        if not live:
+            raise LookupError("tenant deleted")
         row = await conn.fetchrow(
             "INSERT INTO oauth_connections (tenant_id, provider, status, account_label, scopes, accounts_server, "
             "                               access_token_ref, access_expires_at, refresh_token_ref, connected_by, "
