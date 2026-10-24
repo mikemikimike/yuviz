@@ -233,6 +233,19 @@ def _id_token_claims(id_token: str) -> dict[str, Any]:
     return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
 
 
+async def require_live_tenant(tenant_id: str) -> None:
+    """A soft-deleted tenant can start no authorization, store no tokens and
+    apply no preset. assert_tenant_access is shared with other services and
+    does not look at tenants.deleted_at, so the connector routes check here."""
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        live = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1 AND deleted_at IS NULL)", tenant_id,
+        )
+    if not live:
+        raise LookupError("tenant deleted")
+
+
 async def start_authorization(*, tenant_id: str, user_id: str, provider: str, preset_key: str | None) -> str:
     if provider not in configured_providers() or PROVIDERS[provider].auth_kind != "oauth2":
         raise ValueError("oauth_provider_unavailable")

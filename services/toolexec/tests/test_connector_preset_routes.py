@@ -496,3 +496,15 @@ async def test_sheets_apply_creates_the_sheet_once_and_the_row_appends_caller_te
     assert append.url.params["valueInputOption"] == "RAW"
     assert json.loads(append.content) == {"values": [[formula, "+91 98123 45678"]]}   # the text is untouched
     assert append.headers["authorization"] == "Bearer at"
+
+
+@pytest.mark.asyncio
+async def test_a_soft_deleted_tenant_cannot_apply_a_preset(pool, world, provider):
+    tenants, users, _agents = world
+    headers = users["admin_a"]["headers"]
+    async with _client() as c:
+        await _connect(c, tenants["a"], headers)
+        await pool.execute("UPDATE tenants SET deleted_at = now() WHERE id = $1", uuid.UUID(tenants["a"]))
+        r = await _apply(c, tenants["a"], headers, CALENDAR)
+    assert r.status_code == 404
+    assert await _rows(pool, tenants["a"]) == []
