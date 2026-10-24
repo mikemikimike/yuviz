@@ -89,12 +89,23 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         self, handler_factory: Callable[[SessionContext], Awaitable[IConversationHandler]],
     ) -> None:
         self._handler_factory = handler_factory
+        self._stream_tasks: set[asyncio.Task] = set()
+
+    async def wait_closed(self, timeout: float) -> None:
+        """Wait for open streams to finish their teardown, so end-of-call writes are queued
+        before the caller closes the transcript pool. Call after the server has stopped."""
+        if self._stream_tasks:
+            await asyncio.wait(self._stream_tasks, timeout=timeout)
 
     async def Converse(
         self,
         request_iterator: AsyncIterator[pb.GatewayMessage],
         context: grpc.aio.ServicerContext,
     ) -> AsyncIterator[pb.ServiceMessage]:
+
+        stream_task = asyncio.current_task()
+        self._stream_tasks.add(stream_task)
+        stream_task.add_done_callback(self._stream_tasks.discard)
 
         # ── 1. Handshake ───────────────────────────────────────────────────────
         try:
