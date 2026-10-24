@@ -38,6 +38,9 @@ class ResolvedToolPolicy:
     # execute_api only — lower-cased names of offered APIs whose whole chain is read-only
     # (custom_apis.side_effecting = false). Anything not listed is treated as a write.
     read_only_apis:          frozenset[str] = frozenset()
+    # execute_api only — every offered write API takes the caller's number from the call itself
+    # (custom_api_params.source = 'caller_id'), so the model never has to confirm or pass one.
+    writes_use_call_number:  bool = False
 
 
 class ToolPolicyResolver:
@@ -130,9 +133,10 @@ class ToolPolicyResolver:
             if specialized is None:
                 del resolved[i]
             else:
-                defn, sensitive_arg_keys, read_only_apis = specialized
+                defn, sensitive_arg_keys, read_only_apis, writes_use_call_number = specialized
                 resolved[i] = replace(
                     policy, definition=defn, sensitive_arg_keys=sensitive_arg_keys, read_only_apis=read_only_apis,
+                    writes_use_call_number=writes_use_call_number,
                 )
             return
 
@@ -188,6 +192,11 @@ class ToolPolicyResolver:
                            JOIN custom_apis ca3 ON ca3.id = c3.api_id
                            WHERE c3.root_id = e.id AND ca3.side_effecting
                        ) AS chain_side_effecting,
+                       EXISTS (
+                           SELECT 1 FROM chain c4
+                           JOIN custom_api_params p4 ON p4.custom_api_id = c4.api_id AND p4.source = 'caller_id'
+                           WHERE c4.root_id = e.id
+                       ) AS chain_uses_caller_id,
                        p.name        AS param_name,
                        p.description AS param_description,
                        p.json_type, p.required,
@@ -215,6 +224,7 @@ class ToolPolicyResolver:
         apis: dict[str, dict[str, Any]] = {}
         sensitive_arg_keys: set[str] = set()
         read_only_apis: set[str] = set()
+        writes_without_call_number: set[str] = set()
         for row in rows:
             if row["name"] not in offerable:
                 continue
@@ -222,6 +232,8 @@ class ToolPolicyResolver:
             # .get: a row without the column is treated as a write (fail closed).
             if not row.get("chain_side_effecting", True):
                 read_only_apis.add(row["name"].lower())
+            elif not row.get("chain_uses_caller_id", False):
+                writes_without_call_number.add(row["name"].lower())
             # Dedup: a diamond in the chain reaches the same leaf twice.
             if row["param_name"] is not None and row["param_name"] not in api["params"]:
                 api["params"][row["param_name"]] = row
@@ -247,7 +259,9 @@ class ToolPolicyResolver:
                 },
             },
         )
-        return specialized, frozenset(sensitive_arg_keys), frozenset(read_only_apis)
+        writes = {name.lower() for name in apis} - read_only_apis
+        writes_use_call_number = bool(writes) and not (writes & writes_without_call_number)
+        return specialized, frozenset(sensitive_arg_keys), frozenset(read_only_apis), writes_use_call_number
 
 
 def _narrow(

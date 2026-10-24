@@ -27,6 +27,12 @@ public:
     // Duration of the current speech segment in ms (0 if not speaking).
     [[nodiscard]] virtual uint32_t speech_duration_ms() const noexcept = 0;
 
+    // Length of the segment the last SpeechEnd closed (speech_duration_ms() is already 0 by then).
+    [[nodiscard]] virtual uint32_t last_segment_ms() const noexcept { return speech_duration_ms(); }
+
+    // Silence that must pass before SpeechEnd: the end-of-speech wait every turn pays.
+    [[nodiscard]] virtual uint32_t end_hold_ms() const noexcept { return 0; }
+
     virtual void reset() noexcept = 0;
 };
 

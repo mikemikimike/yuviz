@@ -16,6 +16,7 @@ import datetime
 import logging
 import re
 import secrets
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -348,7 +349,9 @@ async def availability(
     offers.sort(key=lambda o: (o[0] is None, o[0] or clinic.now))
     doctors = [entry for _, entry in offers[:_MAX_DOCTORS_OFFERED]]
     any_slots = any(d["slots"] for d in doctors)
+    spoken = _offer_sentence(clinic, doctors, language, single_doctor=bool(doctor)) if any_slots else None
     return {
+        **({"spoken": spoken} if spoken else {}),
         "ok": True,
         "today": clinic.today.isoformat(),
         **({"requested_day": day.isoformat(), "requested_day_spoken": speech.spoken_date(day, clinic.today, language)}
@@ -362,6 +365,31 @@ async def availability(
             "Offer next_available if present, or another doctor in the department."
         ),
     }
+
+
+def _times_phrase(clinic: Clinic, starts: list[datetime.datetime], language: str) -> str:
+    """'tomorrow at 5 PM or 5:15 PM' — the day said once when the times share it."""
+    joiner = " या " if language == "hi" else " or "
+    if len({s.date() for s in starts}) == 1:
+        day = speech.spoken_date(starts[0].date(), clinic.today, language)
+        times = joiner.join(speech.spoken_time(s, language) for s in starts)
+        return f"{day} {times}" if language == "hi" else f"{day} at {times}"
+    return joiner.join(clinic.when(s, language) for s in starts)
+
+
+def _offer_sentence(clinic: Clinic, doctors: list[dict], language: str, *, single_doctor: bool) -> str:
+    """The options read straight to the caller (the tool's success template), so a tool turn
+    needs no second model call: up to two doctors with two times each, or three for one doctor."""
+    per_doctor = 3 if single_doctor else 2
+    parts = []
+    for entry in [d for d in doctors if d["slots"]][: 1 if single_doctor else 2]:
+        starts = [datetime.datetime.fromisoformat(s["slot_start"]) for s in entry["slots"][:per_doctor]]
+        parts.append((entry["name"], _times_phrase(clinic, starts, language)))
+    if language == "hi":
+        offers = " और ".join(f"{name} {times}" for name, times in parts)
+        return f"{offers} उपलब्ध हैं। आपके लिए कौन सा समय ठीक रहेगा?"
+    offers = ", and ".join(f"{name} {times}" for name, times in parts)
+    return f"{offers} {'is' if len(parts) == 1 else 'are'} available. Which time suits you?"
 
 
 # ── shared checks ────────────────────────────────────────────────────────
@@ -459,8 +487,8 @@ async def prepare_booking(
     caller = phones.normalize_phone(caller_phone)
     patient = phones.normalize_phone(patient_phone) or caller
     name = (patient_name or "").strip()
-    if not name:
-        return _refusal("मरीज़ का पूरा नाम क्या है?" if language == "hi" else "What is the patient's full name?", **nothing)
+    if is_placeholder_name(name):
+        return _refusal(_ask_name(language), **nothing)
     if patient is None:
         return _refusal("बुकिंग के लिए 10 अंकों का मोबाइल नंबर बताइए।" if language == "hi"
                         else "Could you give me a 10-digit mobile number for the booking?", **nothing)
@@ -521,6 +549,34 @@ async def prepare_booking(
     }
 
 
+# Words a model fills in when it never asked for the name. A booking under "Patient" is
+# useless to the front desk, so these are refused and the caller is asked instead.
+_PLACEHOLDER_NAMES = frozenset({
+    "patient", "the patient", "caller", "customer", "user", "unknown", "name", "patient name",
+    "full name", "na", "n a", "none", "test", "sir", "madam", "mr", "mrs", "ms",
+    "मरीज़", "मरीज", "रोगी", "ग्राहक", "नाम",
+})
+
+
+def _name_key(text: str) -> str:
+    """Case, punctuation and nukta/diacritic spelling variants folded away (ज़ = ज + ़)."""
+    decomposed = unicodedata.normalize("NFKD", (text or "").casefold())
+    stripped = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+    return " ".join(re.sub(r"[^\w\s]", " ", stripped).split())
+
+
+_PLACEHOLDER_KEYS = frozenset(_name_key(n) for n in _PLACEHOLDER_NAMES)
+
+
+def is_placeholder_name(name: str) -> bool:
+    key = _name_key(name)
+    return not key or key in _PLACEHOLDER_KEYS
+
+
+def _ask_name(language: str) -> str:
+    return "मरीज़ का पूरा नाम क्या है?" if language == "hi" else "What is the patient's full name?"
+
+
 def _new_reference() -> str:
     return str(secrets.randbelow(900_000) + 100_000)
 
@@ -536,6 +592,8 @@ async def book(
     matches = await find_doctors(conn, clinic, doctor=doctor_code) if doctor_code and doctor_code != NOTHING else []
     doc = matches[0] if len(matches) == 1 and matches[0]["code"].lower() == doctor_code.lower() else None
     name = (patient_name or "").strip()
+    if is_placeholder_name(name):
+        return {"ok": False, "spoken": _ask_name(language)}
     if doc is None or start is None or patient is None or not name:
         return {"ok": False, "spoken": ("वह बुकिंग नहीं हो सकी। चलिए कोई दूसरा समय देखते हैं।" if language == "hi"
                                         else "I couldn't make that booking. Let's look at another time.")}

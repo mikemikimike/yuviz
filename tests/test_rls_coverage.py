@@ -250,6 +250,10 @@ _BYPASS_REASONS = {
     "identity-resolution", "users-null-tenant-listing", "users-admin-by-id",
     "users-create", "users-change-password", "users-email-change",
     "tenants-out-of-rls-scope", "phone-numbers-prewarm",
+    # Config startup and tenant update: a read-only SELECT of the live tenants (a table outside RLS), written to
+    # Redis as tenant:{slug} because the Gateway cannot fall back to Postgres for its VAD and timer settings.
+    # Nothing read here is returned to a caller.
+    "tenants-prewarm",
     "agents-by-id", "call-flow-by-id", "carriers-by-id", "phone-numbers-by-id", "phone-numbers-did-lookup",
     "provider-configs-by-id", "telephony-configs-by-id", "tool-provider-configs-by-id",
     "calls-platform-read", "audit-log-platform-read",

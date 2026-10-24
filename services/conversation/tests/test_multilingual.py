@@ -432,7 +432,7 @@ class _SlowLLM(_LLM):
 
 
 async def test_first_turn_filler_follows_session_language(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.02)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "20")
     rc = await _runtime({"language": "en", "supported_languages": ("en", "hi")})
     tts = _RecordingTTS()
     stt = _RecordingSTT([SttResult(text="नमस्ते जी", language="hi", language_confidence=1.0)])
@@ -444,7 +444,7 @@ async def test_first_turn_filler_follows_session_language(monkeypatch):
 
 
 async def test_first_turn_filler_for_language_without_a_table_falls_back_to_english(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.02)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "20")
     rc = await _runtime({"language": "fr", "supported_languages": ("fr", "en")})
     tts = _RecordingTTS()
     stt = _RecordingSTT([SttResult(text="bonjour", language="fr", language_confidence=1.0)])

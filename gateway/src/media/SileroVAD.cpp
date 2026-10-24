@@ -91,6 +91,9 @@ VADEvent SileroVAD::process(const int16_t* samples, size_t count) noexcept {
     ++speech_windows_;
     if (prob < cfg_.silence_threshold) {
         if (++silence_windows_ >= hold_needed_) {
+            // Voiced part only: the hold windows counted into speech_windows_ were silence.
+            last_segment_ms_ = (speech_windows_ > silence_windows_ ? speech_windows_ - silence_windows_ : 0u)
+                               * kWindowMs;
             in_speech_       = false;
             silence_windows_ = 0;
             speech_windows_  = 0;
@@ -152,6 +155,7 @@ void SileroVAD::reset() noexcept {
     onset_windows_   = 0;
     silence_windows_ = 0;
     speech_windows_  = 0;
+    last_segment_ms_ = 0;
     last_energy_db_  = -96.0f;
     accum_.clear();
     context_.fill(0.0f);

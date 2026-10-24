@@ -19,6 +19,8 @@ public:
 
     [[nodiscard]] float    last_energy_db()    const noexcept override { return last_energy_db_; }
     [[nodiscard]] uint32_t speech_duration_ms() const noexcept override;
+    [[nodiscard]] uint32_t last_segment_ms()    const noexcept override { return last_segment_ms_; }
+    [[nodiscard]] uint32_t end_hold_ms()        const noexcept override { return hold_frames_ * cfg_.frame_ms; }
 
     void reset() noexcept override;
 
@@ -30,6 +32,7 @@ private:
     bool            in_speech_{false};
     uint32_t        silence_frames_{0};   // consecutive silent frames since last speech
     uint32_t        speech_frames_{0};    // frames accumulated in current speech segment
+    uint32_t        last_segment_ms_{0};  // voiced length of the segment the last SpeechEnd closed
     uint32_t        onset_frames_{0};     // consecutive loud frames while not in speech
     float           last_energy_db_{-96.0f};
     uint32_t        hold_frames_{0};      // silence_threshold in frames (derived from cfg)

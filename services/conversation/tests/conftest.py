@@ -16,3 +16,10 @@ def _clear_graph_cache():
     yield
     _GRAPH_CACHE.clear()
     _FLOW_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _filler_without_delay(monkeypatch):
+    """Most tests check which filler is said and in what order, with instant fakes: run them
+    with the delay off (always, immediately). The delay itself is tested with it set."""
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "0")

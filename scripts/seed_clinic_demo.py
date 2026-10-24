@@ -160,10 +160,15 @@ async def ensure_providers(conn, tenant_id, args) -> tuple[str, str, str | None]
     else:
         tts = await ensure("tts", "cartesia", "Cartesia Sana (Hindi + English)", voice=HINDI_ENGLISH_VOICE,
                            extra={"model": "sonic-2"})
-    llm = await conn.fetchval(
-        "SELECT default_llm_config_id FROM tenants WHERE id = $1", tenant_id,
-    )
-    print(f"  voices: stt={stt} tts={tts} llm={'tenant default' if llm else 'none'}")
+    if args.llm_model:
+        # An OpenAI model for these agents only; the key ref is copied from the tenant's OpenAI row.
+        llm = await ensure("llm", "openai", f"OpenAI {args.llm_model}", model=args.llm_model,
+                           extra={"temperature": 0.7})
+    else:
+        llm = await conn.fetchval(
+            "SELECT default_llm_config_id FROM tenants WHERE id = $1", tenant_id,
+        )
+    print(f"  voices: stt={stt} tts={tts} llm={args.llm_model or ('tenant default' if llm else 'none')}")
     return stt, tts, (str(llm) if llm else None)
 
 
@@ -232,7 +237,9 @@ APIS = [
       _p("date", "Only this day: YYYY-MM-DD, or the caller's words such as \"thursday\", \"tomorrow\", "
                  "\"कल\". Leave out to get the earliest times."),
       _p("part_of_day", '"morning", "afternoon" or "evening", if the caller has a preference.'), LANG],
-     None, None, ("reception", "reminders")),
+     # The options are read straight to the caller when there are any (no second model call);
+     # when there are none the sentence is absent, the template can't fill, and the model answers.
+     None, _parts("$.spoken"), ("reception", "reminders")),
     ("clinic_prepare_booking", "/bookings/prepare", False, "Checks and holds a slot before booking (internal step).",
      [_p("doctor", "The doctor_code of the chosen doctor.", required=True),
       _p("slot_start", "The chosen slot_start, exactly as clinic_check_availability returned it.", required=True),
@@ -388,6 +395,7 @@ async def main() -> None:
     parser.add_argument("--reminder-caller-id", help="Caller ID shown to patients on reminder calls")
     parser.add_argument("--tts", choices=("cartesia", "sarvam"), default="cartesia",
                         help="Voice provider for both agents (sarvam needs SARVAM_API_KEY in .env)")
+    parser.add_argument("--llm-model", help="OpenAI model for both agents, e.g. gpt-4.1-mini (default: tenant's)")
     parser.add_argument("--sarvam-speaker", default="simran_enhi_customer",
                         help="bulbul:v4-flash persona, e.g. simran_enhi_customer, ishita_enhi_customer")
     args = parser.parse_args()
