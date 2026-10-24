@@ -67,6 +67,7 @@ export interface Tenant {
   default_tts_config_id: string | null;
   // NULL = not configured; never default it client-side (drives the utilization KPI).
   max_concurrent_calls: number | null;
+  number_purchase_enabled?: boolean;
   config_version: number;
   created_at: string;
   updated_at: string;
@@ -83,6 +84,7 @@ export interface TenantUpdate {
   region?: string;
   transfer_timeout_ms?: number | null;
   no_speech_timeout_ms?: number | null;
+  number_purchase_enabled?: boolean;
 }
 
 export const listTenants = () => request<Tenant[]>("/tenants");
@@ -266,6 +268,7 @@ export interface Agent {
   caller_id_policy: "original" | "platform" | "custom";
   platform_did: string | null;      // used when caller_id_policy = "platform"
   custom_caller_id: string | null;  // used when caller_id_policy = "custom"
+  outbound_caller_id: string | null;
   // What the caller hears while a warm transfer's agent leg rings.
   transfer_waiting_experience: "announcement_moh" | "announcement_silence";
   // Published graph on agent GET/cache (call-setup). List responses omit
@@ -342,6 +345,7 @@ export interface AgentUpdate {
   caller_id_policy?: "original" | "platform" | "custom";
   platform_did?: string | null;
   custom_caller_id?: string | null;
+  outbound_caller_id?: string | null;
   transfer_waiting_experience?: "announcement_moh" | "announcement_silence";
   end_call_prompt?: string | null;
   transfer_prompt?: string | null;
@@ -471,7 +475,6 @@ export interface PhoneNumber {
   tenant_id: string;
   did: string;
   agent_id: string | null;
-  fallback_agent_id: string | null;
   carrier_id: string | null;
   telephony_config_id: string | null;
   status: PhoneNumberStatus;
@@ -492,7 +495,6 @@ export interface ProviderSync {
 export interface PhoneNumberCreate {
   did: string;
   agent_id?: string;
-  fallback_agent_id?: string;
   carrier_id?: string;
   telephony_config_id?: string;
   region?: string;
@@ -502,7 +504,6 @@ export interface PhoneNumberCreate {
 export interface PhoneNumberUpdate {
   did?: string;
   agent_id?: string | null;
-  fallback_agent_id?: string | null;
   carrier_id?: string | null;
   telephony_config_id?: string | null;
   region?: string;
@@ -1533,13 +1534,14 @@ async function campaignsRequest<T>(path: string, options?: RequestInit): Promise
   return res.json();
 }
 
-export type CampaignStatus = "draft" | "running" | "paused" | "completed";
+export type CampaignStatus = "draft" | "scheduled" | "running" | "paused" | "completed" | "cancelled";
 
 export interface Campaign {
   id: string;
   tenant_id: string;
   agent_id: string;
   name: string;
+  description?: string | null;
   status: CampaignStatus;
   caller_id: string | null;
   max_concurrent_calls: number;
@@ -1549,6 +1551,8 @@ export interface Campaign {
   calling_hours_start: string | null;
   calling_hours_end: string | null;
   calling_hours_timezone: string;
+  scheduled_start_at?: string | null;
+  started_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1556,7 +1560,8 @@ export interface Campaign {
 export interface CampaignCreate {
   agent_id: string;
   name: string;
-  caller_id?: string | null;
+  description?: string | null;
+  scheduled_start_at?: string | null;
   max_concurrent_calls?: number;
   pacing_seconds?: number;
   max_attempts?: number;
@@ -1568,7 +1573,7 @@ export interface CampaignCreate {
 
 export interface CampaignUpdate {
   name?: string;
-  caller_id?: string | null;
+  description?: string;
   max_concurrent_calls?: number;
   pacing_seconds?: number;
   max_attempts?: number;
@@ -1779,4 +1784,45 @@ export const addDncNumber = (tenantId: string, phoneNumber: string, reason?: str
 
 export const removeDncNumber = (dncId: string) =>
   campaignsRequest<void>(`/dnc/${dncId}`, { method: "DELETE" });
+
+export const cancelCampaign = (campaignId: string) =>
+  campaignsRequest<Campaign>(`/campaigns/${campaignId}/cancel`, { method: "POST" });
+
+export const deleteCampaign = (campaignId: string) =>
+  campaignsRequest<void>(`/campaigns/${campaignId}`, { method: "DELETE" });
+
+export const recallCampaign = (campaignId: string, body: { contact_ids: string[]; name?: string }) =>
+  campaignsRequest<Campaign>(`/campaigns/${campaignId}/recall`, { method: "POST", body: JSON.stringify(body) });
+
+export type CampaignCallOutcome =
+  | "answered" | "ended" | "no_answer" | "busy" | "declined" | "failed" | "blocked" | "in_progress";
+
+export interface CampaignCallAttempt {
+  id: string;
+  contact_id: string;
+  campaign_id: string;
+  campaign_name: string;
+  attempt: number;
+  state: string;
+  outcome: CampaignCallOutcome | null;
+  failure_reason: string | null;
+  callee_masked: string;
+  caller_id: string | null;
+  agent_name: string | null;
+  can_call_again: boolean;
+  created_at: string;
+  answered_at: string | null;
+  ended_at: string | null;
+}
+
+export const listCallAttempts = (
+  tenantId: string,
+  params: { direction?: "outbound" | "inbound" | "all"; status?: string; q?: string; limit?: number; offset?: number },
+) => {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== "") query.set(key, String(value));
+  }
+  return campaignsRequest<CampaignCallAttempt[]>(`/tenants/${tenantId}/campaigns/call-attempts?${query}`);
+};
 

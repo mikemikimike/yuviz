@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import {
   Agent,
@@ -13,13 +13,13 @@ import {
   CampaignProgress,
   CampaignReadiness,
   CampaignStatus,
-  CallerIdOption,
-  getAgent,
+  listAgents,
   getCampaign,
   getCampaignProgress,
+  cancelCampaign,
+  deleteCampaign,
   getCampaignReadiness,
   listCampaignAttempts,
-  listCampaignCallerIds,
   listCampaignContacts,
   listTenants,
   pauseCampaign,
@@ -34,10 +34,14 @@ import {
   CampaignDialingFields,
   DEFAULT_RETRY_GAP_MINUTES,
   DialingValues,
+  pacingFromRate,
+  rateFromPacing,
   serverFieldError,
   validateDialing,
 } from "@/components/campaigns/CampaignDialingFields";
 import { ReadinessPanel } from "@/components/campaigns/ReadinessPanel";
+import { Modal } from "@/components/Modal";
+import { TimezoneSelect } from "@/components/TimezoneSelect";
 import { useConnectionAccess } from "@/lib/useConnectionAccess";
 
 const POLL_MS = 5000;
@@ -46,26 +50,18 @@ const errText = (e: unknown) => (e instanceof ApiError ? e.detail : String(e));
 
 function SettingsSection({ campaign, onSaved }: { campaign: Campaign; onSaved: (c: Campaign) => void }) {
   const [name, setName] = useState(campaign.name);
+  const [description, setDescription] = useState(campaign.description ?? "");
   const [timezone, setTimezone] = useState(campaign.calling_hours_timezone);
   const [dialing, setDialing] = useState<DialingValues>({
-    caller_id: campaign.caller_id ?? "",
+    calls_per_minute: rateFromPacing(campaign.pacing_seconds),
     max_attempts: campaign.max_attempts,
     retry_gap_minutes: campaign.retry_gap_minutes ?? "",
     max_concurrent_calls: campaign.max_concurrent_calls,
   });
-  const [callerIds, setCallerIds] = useState<CallerIdOption[] | null>(null);
-  const [callerIdsError, setCallerIdsError] = useState<string | null>(null);
   const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    listCampaignCallerIds(campaign.tenant_id).then(setCallerIds).catch((e) => {
-      setCallerIds([]);
-      setCallerIdsError(errText(e));
-    });
-  }, [campaign.tenant_id]);
 
   const valid = Object.keys(validateDialing(dialing)).length === 0 && name.trim() !== "";
 
@@ -77,7 +73,8 @@ function SettingsSection({ campaign, onSaved }: { campaign: Campaign; onSaved: (
       onSaved(
         await updateCampaign(campaign.id, {
           name: name.trim(),
-          caller_id: dialing.caller_id || null,
+          description: description.trim(),
+          pacing_seconds: pacingFromRate(dialing.calls_per_minute),
           max_attempts: dialing.max_attempts,
           retry_gap_minutes: dialing.retry_gap_minutes === "" ? DEFAULT_RETRY_GAP_MINUTES : dialing.retry_gap_minutes,
           max_concurrent_calls: dialing.max_concurrent_calls,
@@ -101,10 +98,20 @@ function SettingsSection({ campaign, onSaved }: { campaign: Campaign; onSaved: (
         <div className="card-title">Edit settings</div>
       </div>
       <div style={{ padding: 16 }}>
-        {callerIdsError && <div className="form-hint" style={{ color: "var(--red)" }}>Caller IDs unavailable: {callerIdsError}</div>}
         <div className="form-group">
           <label className="form-label" htmlFor="campaign-field-name">Name</label>
           <input id="campaign-field-name" className="form-input" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="form-group">
+          <label className="form-label" htmlFor="campaign-field-description">Description</label>
+          <textarea
+            id="campaign-field-description"
+            className="form-input"
+            rows={3}
+            maxLength={1000}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
         </div>
         <CampaignDialingFields
           values={dialing}
@@ -113,18 +120,11 @@ function SettingsSection({ campaign, onSaved }: { campaign: Campaign; onSaved: (
             setServerErrors({});
             setSaved(false);
           }}
-          callerIds={callerIds}
           errors={serverErrors}
         />
         <div className="form-group">
-          <label className="form-label" htmlFor="campaign-field-calling_hours_timezone">Calling-hours timezone</label>
-          <input
-            id="campaign-field-calling_hours_timezone"
-            className="form-input"
-            style={{ fontFamily: "var(--mono)" }}
-            value={timezone}
-            onChange={(e) => setTimezone(e.target.value)}
-          />
+          <label className="form-label" htmlFor="campaign-field-calling_hours_timezone">Lead&apos;s timezone</label>
+          <TimezoneSelect id="campaign-field-calling_hours_timezone" value={timezone} onChange={setTimezone} />
         </div>
         {error && <div className="error-banner" style={{ marginBottom: 8 }}>{error}</div>}
         <button className="btn btn-primary btn-sm" disabled={saving || !valid} onClick={save}>
@@ -187,6 +187,8 @@ export default function CampaignDetailPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const [actionSubmitting, setActionSubmitting] = useState(false);
+  const [confirming, setConfirming] = useState<"cancel" | "delete" | null>(null);
+  const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const status = campaign?.status;
@@ -226,7 +228,8 @@ export default function CampaignDetailPage() {
           .then((tenants) => {
             const t = tenants.find((t) => t.id === c.tenant_id) || null;
             setTenant(t);
-            return t ? getAgent(t.slug, c.agent_id) : null;
+            // The agent API looks agents up by slug; a campaign stores the agent's id.
+            return t ? listAgents(t.slug).then((agents) => agents.find((a) => a.id === c.agent_id) ?? null) : null;
           })
           .then(setAgent)
           .catch(() => {});
@@ -288,6 +291,26 @@ export default function CampaignDetailPage() {
 
   const blocked = readiness?.checks.some((c) => c.level === "block") ?? false;
 
+  const confirmAndRun = async () => {
+    if (!campaign || !confirming) return;
+    setActionSubmitting(true);
+    setError(null);
+    try {
+      if (confirming === "delete") {
+        await deleteCampaign(campaign.id);
+        router.push("/campaigns");
+        return;
+      }
+      setCampaign(await cancelCampaign(campaign.id));
+      setConfirming(null);
+      load();
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setActionSubmitting(false);
+    }
+  };
+
   const runAction = async (action: (id: string) => Promise<Campaign>) => {
     if (!campaign) return;
     setActionSubmitting(true);
@@ -319,6 +342,27 @@ export default function CampaignDetailPage() {
 
   return (
     <>
+      {confirming && (
+        <Modal
+          open
+          title={confirming === "delete" ? "Delete this draft?" : "Cancel this campaign?"}
+          onClose={() => !actionSubmitting && setConfirming(null)}
+          footer={
+            <>
+              <button className="btn btn-ghost btn-sm" disabled={actionSubmitting} onClick={() => setConfirming(null)}>Keep it</button>
+              <button className="btn btn-danger btn-sm" disabled={actionSubmitting} onClick={confirmAndRun}>
+                {actionSubmitting ? "Working…" : confirming === "delete" ? "Delete draft" : "Cancel campaign"}
+              </button>
+            </>
+          }
+        >
+          <p style={{ fontSize: ".85rem", color: "var(--text-2)", margin: 0 }}>
+            {confirming === "delete"
+              ? "The draft is removed from the list. Nothing has been called."
+              : "No new calls start. Calls already in progress finish. The campaign stays in history and can't be restarted. Use Call again in Call logs to reach the same leads."}
+          </p>
+        </Modal>
+      )}
       <div style={{ marginBottom: 18 }}>
         <Link href="/campaigns" className="detail-back">
           <ArrowLeft size={13} /> Campaigns
@@ -329,8 +373,19 @@ export default function CampaignDetailPage() {
         </div>
         <div style={{ fontSize: ".8rem", color: "var(--text-3)", marginTop: 2 }}>
           {tenant?.name || campaign.tenant_id} ·{" "}
-          <span id="campaign-agent" tabIndex={-1}>{agent?.name || campaign.agent_id}</span>
+          {agent && tenant ? (
+            <Link id="campaign-agent" href={`/agents/${tenant.slug}/${agent.slug}`} style={{ color: "var(--cyan)", fontWeight: 600, textDecoration: "none" }}>
+              {agent.name}
+            </Link>
+          ) : (
+            <span id="campaign-agent" tabIndex={-1}>{campaign.agent_id}</span>
+          )}
         </div>
+        {campaign.description && (
+          <p style={{ fontSize: ".85rem", color: "var(--text-2)", margin: "8px 0 0", maxWidth: "65ch", whiteSpace: "pre-wrap" }}>
+            {campaign.description}
+          </p>
+        )}
       </div>
 
       {error && <div className="error-banner">{error}</div>}
@@ -350,13 +405,23 @@ export default function CampaignDetailPage() {
           {writable && (
             <div className="card-sub" style={{ display: "flex", gap: 8 }}>
               {campaign.status === "draft" && (
+                <button className="btn btn-danger btn-sm" disabled={actionSubmitting} onClick={() => setConfirming("delete")}>
+                  Delete
+                </button>
+              )}
+              {["draft", "scheduled", "running", "paused"].includes(campaign.status) && (
+                <button className="btn btn-ghost btn-sm" disabled={actionSubmitting} onClick={() => setConfirming("cancel")}>
+                  Cancel campaign
+                </button>
+              )}
+              {(campaign.status === "draft" || campaign.status === "scheduled") && (
                 <button
                   className="btn btn-primary btn-sm"
                   disabled={actionSubmitting || blocked}
                   title={blocked ? "Resolve the blocking checks below first" : undefined}
                   onClick={() => runAction(startCampaign)}
                 >
-                  Start
+                  {campaign.status === "scheduled" ? "Start now" : "Start"}
                 </button>
               )}
               {campaign.status === "running" && (
@@ -379,10 +444,25 @@ export default function CampaignDetailPage() {
         </div>
         <div style={{ padding: 16, display: "flex", gap: 20, flexWrap: "wrap" }}>
           <span>
-            Caller ID <strong className="mono" style={{ color: "var(--text)" }}>{campaign.caller_id || "not set"}</strong>
+            Agent{" "}
+            {agent && tenant ? (
+              <Link href={`/agents/${tenant.slug}/${agent.slug}`} style={{ color: "var(--cyan)", fontWeight: 700, textDecoration: "none" }}>
+                {agent.name}
+              </Link>
+            ) : (
+              <strong style={{ color: "var(--text)" }}>…</strong>
+            )}
           </span>
           <span>
-            Pacing <strong style={{ color: "var(--text)" }}>{campaign.pacing_seconds}s gap</strong>
+            Caller ID <strong className="mono" style={{ color: "var(--text)" }}>{campaign.caller_id || "not set"}</strong>
+          </span>
+          {campaign.status === "scheduled" && campaign.scheduled_start_at && (
+            <span>
+              Starts <strong style={{ color: "var(--text)" }}>{new Date(campaign.scheduled_start_at).toLocaleString()}</strong>
+            </span>
+          )}
+          <span>
+            Calls per minute <strong style={{ color: "var(--text)" }}>{rateFromPacing(campaign.pacing_seconds)}</strong>
           </span>
           <span>
             Concurrency <strong style={{ color: "var(--text)" }}>{campaign.max_concurrent_calls}</strong>

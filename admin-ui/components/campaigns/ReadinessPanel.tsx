@@ -18,7 +18,7 @@ const WAIT_REASONS: Record<string, string> = {
 
 // Targets on the detail page; an unknown field, or a viewer (no write controls), gets text without a link.
 const FIELD_TARGETS: Record<string, string> = {
-  caller_id: "campaign-field-caller_id",
+  caller_id: "campaign-agent",
   max_concurrent_calls: "campaign-field-max_concurrent_calls",
   calling_hours_timezone: "campaign-field-calling_hours_timezone",
   contacts: "campaign-upload-csv",
