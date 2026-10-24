@@ -297,7 +297,7 @@ def _timed_tts(pcm: bytes = b"\x00" * 320):
 
 @pytest.mark.asyncio
 async def test_a_model_that_answers_within_the_delay_needs_no_filler(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.5)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "500")
     tts = _timed_tts()
     handler = _make_handler(_make_stt("hi there"), _make_llm(["Real", " response", "."]), tts, system_prompt="Be helpful.")
 
@@ -309,7 +309,7 @@ async def test_a_model_that_answers_within_the_delay_needs_no_filler(monkeypatch
 
 @pytest.mark.asyncio
 async def test_a_slow_model_gets_a_filler_before_its_answer_and_is_not_held_up_by_it(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.05)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "50")
     started: list[float] = []
     tts = _timed_tts()
     handler = _make_handler(
@@ -331,7 +331,7 @@ async def test_a_slow_model_gets_a_filler_before_its_answer_and_is_not_held_up_b
 
 @pytest.mark.asyncio
 async def test_the_filler_waits_for_the_delay_and_not_longer(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.15)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "150")
     started: list[float] = []
     tts = _timed_tts()
     handler = _make_handler(_make_stt("hi"), _make_slow_llm(0.5, started=started), tts)
@@ -345,7 +345,7 @@ async def test_the_filler_waits_for_the_delay_and_not_longer(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_delayed_first_turn_filler_not_repeated_on_later_turns(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.02)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "20")
     tts = _timed_tts()
     handler = _make_handler(_make_stt("hi there"), _make_slow_llm(0.1), tts, system_prompt="Be helpful.")
 
@@ -360,7 +360,7 @@ async def test_delayed_first_turn_filler_not_repeated_on_later_turns(monkeypatch
 @pytest.mark.asyncio
 async def test_a_fast_first_turn_does_not_use_up_the_filler_for_a_later_slow_one(monkeypatch):
     """The filler is for the first turn only, whether or not it was needed."""
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.2)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "200")
     tts = _timed_tts()
     delays = iter([0.0, 0.5])
 
@@ -381,9 +381,10 @@ async def test_a_fast_first_turn_does_not_use_up_the_filler_for_a_later_slow_one
 
 
 @pytest.mark.asyncio
-async def test_the_filler_does_not_count_as_the_first_audio_of_the_answer(monkeypatch):
-    """voice_to_voice must still measure the real answer, not the filler."""
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.02)
+async def test_a_filler_is_the_first_audio_the_caller_hears_so_it_counts_for_voice_to_voice(monkeypatch):
+    """voice_to_voice measures when the caller first hears something, and a filler is that. It still does not
+    count as a reply (a marker-only turn after a filler still gets its goodbye)."""
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "20")
     transcripts = MagicMock()
     handler = _make_handler(
         _make_stt("hi"), _make_slow_llm(0.3), _timed_tts(), transcripts=transcripts,
@@ -393,12 +394,12 @@ async def test_the_filler_does_not_count_as_the_first_audio_of_the_answer(monkey
         pass
 
     latency = transcripts.record_turn.call_args.kwargs["latency"]
-    assert latency.voice_to_voice_ms >= 300     # the model's own time, not the ~20 ms to the filler
+    assert latency.voice_to_voice_ms is not None and latency.voice_to_voice_ms < 250   # the filler, ~20 ms in
 
 
 @pytest.mark.asyncio
 async def test_the_filler_audio_is_synthesized_once_per_voice_and_replayed_on_the_next_call(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.02)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "20")
     tts = _timed_tts()          # one TTS instance shared by two calls, as the provider cache does
 
     async def _call(session):
@@ -512,7 +513,7 @@ async def test_filler_phrases_are_prepared_after_the_greeting():
 
 @pytest.mark.asyncio
 async def test_a_caller_who_interrupts_while_the_model_thinks_stops_the_model_call(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 5.0)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "5000")
     state = {"started": False, "closed": False}
 
     async def _gen(messages):
@@ -545,7 +546,7 @@ async def test_a_caller_who_interrupts_while_the_model_thinks_stops_the_model_ca
 
 @pytest.mark.asyncio
 async def test_first_turn_filler_spoken_before_the_real_response(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.01)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "10")
     stt = _make_stt("hi there")
     llm = _make_slow_llm(0.1, ["Real", " response", "."])
     tts = _make_tts()
@@ -562,7 +563,7 @@ async def test_first_turn_filler_spoken_before_the_real_response(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_first_turn_filler_not_repeated_on_later_turns(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.01)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "10")
     stt = _make_stt("hi there")
     llm = _make_slow_llm(0.1, ["Real", " response", "."])
     tts = _make_tts()
@@ -596,7 +597,7 @@ def _tier(seconds: float) -> set[str]:
 
 @pytest.mark.asyncio
 async def test_first_turn_filler_tier_follows_the_agents_own_latency(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.01)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "10")
     store = ToolLatencyStore()
     _seed_latency(store, "fast", 1000)
     _seed_latency(store, "slow", 2400)
@@ -617,7 +618,7 @@ async def test_first_turn_filler_tier_follows_the_agents_own_latency(monkeypatch
 @pytest.mark.asyncio
 @pytest.mark.parametrize("latency_store", [None, ToolLatencyStore()], ids=["no_store", "empty_store"])
 async def test_first_turn_filler_without_latency_history_uses_default_tier(latency_store, monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.01)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "10")
     tts = _make_tts()
     handler = _make_handler(
         _make_stt("hi there"), _make_slow_llm(0.1, ["Real", " response", "."]), tts,
@@ -633,7 +634,7 @@ async def test_first_turn_filler_without_latency_history_uses_default_tier(laten
 
 @pytest.mark.asyncio
 async def test_first_turn_without_a_latency_store_asks_the_selector_once_for_the_default_tier(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.01)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "10")
     selector = FillerSelector()
     calls = []
     real = selector.select_first_turn_filler
@@ -663,7 +664,7 @@ async def test_first_turn_without_a_latency_store_asks_the_selector_once_for_the
 async def test_first_turn_filler_selector_failure_still_speaks_one_filler_and_logs_once(
     monkeypatch, caplog,
 ):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.01)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "10")
     def _boom(_seq):
         raise RuntimeError("selector broke")
 
@@ -685,7 +686,7 @@ async def test_first_turn_filler_selector_failure_still_speaks_one_filler_and_lo
 
 @pytest.mark.asyncio
 async def test_barge_in_after_first_turn_filler_plays_stops_audio_and_never_replays_the_filler(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.01)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "10")
     """Cancel arrives once the filler chunk is yielded; the filler loop has no mid-chunk cancel check
     (the base code had none either), so this proves no replay and no later audio, not mid-filler stop."""
     tts = _make_tts()
@@ -718,7 +719,7 @@ async def test_barge_in_after_first_turn_filler_plays_stops_audio_and_never_repl
 
 @pytest.mark.asyncio
 async def test_concurrent_agents_sharing_selector_and_store_get_their_own_tier_filler(monkeypatch):
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.01)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "10")
     store = ToolLatencyStore()
     _seed_latency(store, "fast", 1000)
     _seed_latency(store, "slow", 2400)
@@ -2843,8 +2844,10 @@ async def test_tool_call_filler_burst_within_one_turn_speaks_only_once():
 
 @pytest.mark.asyncio
 async def test_turn1_and_tool_call_fillers_come_from_their_own_pools(monkeypatch):
-    """The turn-1 opener is neutral; the tool call on the same turn still speaks a lookup filler."""
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 0.01)
+    """The turn-1 opener is neutral; the tool call on the same turn still speaks a lookup filler. (The gap that stops
+    two fillers playing back to back is switched off here so the pool rule is what is tested.)"""
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "10")
+    monkeypatch.setattr(pipeline_module, "_TOOL_CALL_FILLER_MIN_GAP_S", 0.0)
     from ..tool_latency import _MIN_SAMPLES, ToolLatencyStore
     from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
     from ..tools.llm_adapter import ToolCallStartedEvent
@@ -2852,10 +2855,10 @@ async def test_turn1_and_tool_call_fillers_come_from_their_own_pools(monkeypatch
     store = ToolLatencyStore()
     for _ in range(_MIN_SAMPLES):
         store.record("t1", "a1", "book_appointment", 2400.0)
-    orchestrator = _FakeToolOrchestrator([
-        ToolCallStartedEvent(tool_name="book_appointment"),
-        ToolTokenEvent(text="Done."),
-    ], delay_s=0.1)
+    # Real pauses between events: the first reply is slow, then the tool is slow, so both fillers fall due.
+    orchestrator = _PacedToolOrchestrator([
+        0.1, ToolCallStartedEvent(tool_name="book_appointment"), 0.1, ToolTokenEvent(text="Done."),
+    ])
     tts = _make_tts(b"\x00" * 640)
     handler = _make_handler(
         _make_stt("book something"), _make_slow_llm(0.1, ["unused"]), tts,
@@ -3459,7 +3462,7 @@ async def test_a_speech_to_text_prewarm_that_rejects_its_arguments_does_not_brea
 @pytest.mark.asyncio
 async def test_cancelling_the_turn_while_it_waits_is_not_swallowed(monkeypatch):
     """A cancellation aimed at the turn must propagate; stopping the model call must not hide it."""
-    monkeypatch.setattr(pipeline_module, "_FILLER_DELAY_S", 5.0)
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "5000")
 
     async def _gen(messages):
         await asyncio.sleep(30)
@@ -3520,3 +3523,156 @@ async def test_concurrent_calls_on_a_cold_cache_synthesize_a_phrase_once():
 
     assert requests == ["One moment."]
     assert a == b == [b"\x01" * 320]
+
+
+# ── Filler only when the caller would otherwise wait (VOICEAI_FILLER_DELAY_MS) ──
+
+class _PacedToolOrchestrator(_FakeToolOrchestrator):
+    """Yields its events with a pause before each one marked with a float delay."""
+
+    async def run_turn(self, *args, **kwargs):
+        for e in self._events:
+            if isinstance(e, float):
+                await asyncio.sleep(e)
+            else:
+                yield e
+
+
+def _spoken(tts) -> list[str]:
+    return [call.args[0] for call in tts.synthesize.await_args_list]
+
+
+@pytest.mark.asyncio
+async def test_fast_answers_get_no_filler(monkeypatch):
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "200")
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _PacedToolOrchestrator([
+        ToolCallStartedEvent(tool_name="execute_api"), 0.02, ToolTokenEvent(text="Dr. Rao is free at 10."),
+    ])
+    handler = _make_handler(_make_stt("book me"), _make_llm(["x"]), tts, system_prompt="s",
+                            tool_orchestrator=orchestrator)
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    spoken = _spoken(tts)
+    assert not any(t in _TOOL_CALL_FILLERS for t in spoken)
+    assert spoken == ["Dr. Rao is free at 10."]
+
+
+@pytest.mark.asyncio
+async def test_slow_tool_gets_one_filler_before_the_answer(monkeypatch):
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "50")
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _PacedToolOrchestrator([
+        ToolTokenEvent(text="Let me look. "), ToolCallStartedEvent(tool_name="execute_api"), 0.25,
+        ToolTokenEvent(text="Dr. Rao is free at 10."),
+    ])
+    handler = _make_handler(_make_stt("book me"), _make_llm(["x"]), tts, system_prompt="s",
+                            tool_orchestrator=orchestrator)
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    spoken = _spoken(tts)
+    fillers = [i for i, t in enumerate(spoken) if t in _TOOL_CALL_FILLERS]
+    assert len(fillers) == 1
+    assert spoken.index("Dr. Rao is free at 10.") > fillers[0]
+    # exactly one filler (the tool's); the reply began before the first-turn wait ran out
+
+
+@pytest.mark.asyncio
+async def test_slow_first_reply_gets_the_first_turn_filler(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "50")
+
+    async def _slow(messages):
+        await asyncio.sleep(0.25)
+        yield "Hello there."
+
+    llm = MagicMock()
+    llm.generate = _slow
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(_make_stt("hi"), llm, tts, system_prompt="s")
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    spoken = _spoken(tts)
+    assert spoken[0] in _FIRST_TURN_PHRASES and spoken[1:] == ["Hello there."]
+
+
+@pytest.mark.asyncio
+async def test_marker_only_reply_after_a_filler_still_says_goodbye(monkeypatch):
+    """A filler is not a reply: a turn whose only output was the end-call marker still gets
+    the fallback goodbye, which the servicer needs to send EndCall."""
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "50")
+
+    async def _slow(messages):
+        await asyncio.sleep(0.2)
+        yield _END_CALL_MARKER
+
+    llm = MagicMock()
+    llm.generate = _slow
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(_make_stt("bye"), llm, tts)
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    assert any(r.end_call for r in responses)
+    tts.synthesize.assert_any_call(_FALLBACK_GOODBYE, 16_000)
+
+
+@pytest.mark.asyncio
+async def test_first_turn_filler_and_a_tool_filler_are_not_back_to_back(monkeypatch):
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "50")
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _PacedToolOrchestrator([
+        0.12, ToolCallStartedEvent(tool_name="execute_api"), 0.12, ToolTokenEvent(text="Found it."),
+    ])
+    handler = _make_handler(_make_stt("cancel it"), _make_llm(["x"]), tts, system_prompt="s",
+                            tool_orchestrator=orchestrator)
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    spoken = _spoken(tts)
+    # The first-turn filler comes from the neutral pool, and the tool filler is held back by the minimum gap.
+    assert spoken[0] in _FIRST_TURN_PHRASES
+    assert sum(t in _FIRST_TURN_PHRASES for t in spoken) == 1
+    assert not any(t in _TOOL_CALL_FILLERS for t in spoken)
+
+
+# ── First clause of a reply goes to TTS without waiting for the full stop ──
+
+async def _spoken_for_tokens(tokens: list[str]) -> list[str]:
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(_make_stt("hi"), _make_llm(tokens), tts, system_prompt="s")
+    handler._session("s1").first_turn_filler_spoken = True
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    return _spoken(tts)
+
+
+@pytest.mark.asyncio
+async def test_long_first_sentence_starts_on_its_first_clause():
+    spoken = await _spoken_for_tokens([
+        # Streamed a few words at a time, as a model does.
+        "For knee pain our", " Orthopaedics department", " is right", ",", " because", " they treat",
+        " joints and bones.", " Dr. Bhatia is free", " tomorrow,", " at 5 PM or 5:15 PM.",
+    ])
+    assert spoken == [
+        "For knee pain our Orthopaedics department is right,",
+        "because they treat joints and bones.",
+        "Dr. Bhatia is free tomorrow, at 5 PM or 5:15 PM.",      # later sentences stay whole
+    ]
+
+
+@pytest.mark.asyncio
+async def test_short_lead_ins_and_numbers_are_not_split():
+    spoken = await _spoken_for_tokens(["Sure, I can book that for you today.", " The fee is 1,000 rupees."])
+    assert spoken == ["Sure, I can book that for you today.", "The fee is 1,000 rupees."]
+
+
+@pytest.mark.asyncio
+async def test_hindi_first_clause():
+    spoken = await _spoken_for_tokens(["घुटनों के दर्द के लिए Orthopaedics सही रहेगा, ", "वहाँ जोड़ों का इलाज होता है।"])
+    assert spoken == ["घुटनों के दर्द के लिए Orthopaedics सही रहेगा,", "वहाँ जोड़ों का इलाज होता है।"]

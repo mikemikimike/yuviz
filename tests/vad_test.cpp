@@ -199,3 +199,26 @@ TEST(EnergyVADTest, LastEnergyDbIsAboveThresholdForTone) {
 }
 
 } // namespace
+
+// The gateway reads the closed segment's length after SpeechEnd, when speech_duration_ms()
+// is already 0: last_segment_ms() keeps it (silence frames excluded), end_hold_ms() is the
+// end-of-speech wait the turn paid.
+TEST(EnergyVADTest, LastSegmentKeptAfterEnd) {
+    EnergyVAD vad{tight_cfg()};
+    auto loud  = tone_frame(0.8f);
+    auto quiet = silence_frame();
+
+    feed(vad, loud);
+    feed(vad, loud);
+    feed(vad, loud);                                  // 60 ms voiced
+    feed(vad, quiet);
+    feed(vad, quiet);
+    EXPECT_EQ(vad.process(quiet.data(), quiet.size()), VADEvent::SpeechEnd);
+
+    EXPECT_EQ(vad.speech_duration_ms(), 0u);
+    EXPECT_EQ(vad.last_segment_ms(), 60u);
+    EXPECT_EQ(vad.end_hold_ms(), 60u);
+
+    vad.reset();
+    EXPECT_EQ(vad.last_segment_ms(), 0u);
+}

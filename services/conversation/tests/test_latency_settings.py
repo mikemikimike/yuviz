@@ -33,43 +33,26 @@ def test_env_count_is_at_least_one_and_defaults_on_blank_or_garbage(monkeypatch,
     assert env_count("VOICEAI_TEST_COUNT", 64) == expected
 
 
-@pytest.mark.parametrize("module", ["services.conversation.pipeline", "services.conversation.tools.orchestrator",
-                                    "services.conversation.phrase_audio"])
+@pytest.mark.parametrize("module", ["services.conversation.pipeline", "services.conversation.phrase_audio"])
 def test_a_blank_or_malformed_setting_never_stops_the_service_importing(monkeypatch, module):
-    for name in ("VOICEAI_FILLER_DELAY_MS", "VOICEAI_TOOL_FILLER_DELAY_MS", "VOICEAI_PHRASE_CACHE_ENTRIES"):
+    for name in ("VOICEAI_FILLER_DELAY_MS", "VOICEAI_PHRASE_CACHE_ENTRIES"):
         monkeypatch.setenv(name, "")
     importlib.reload(importlib.import_module(module))
-    for name in ("VOICEAI_FILLER_DELAY_MS", "VOICEAI_TOOL_FILLER_DELAY_MS", "VOICEAI_PHRASE_CACHE_ENTRIES"):
+    for name in ("VOICEAI_FILLER_DELAY_MS", "VOICEAI_PHRASE_CACHE_ENTRIES"):
         monkeypatch.setenv(name, "not-a-number")
     importlib.reload(importlib.import_module(module))
 
 
-def test_the_defaults_are_a_400_ms_delay_for_both_fillers(monkeypatch):
-    for name in ("VOICEAI_FILLER_DELAY_MS", "VOICEAI_TOOL_FILLER_DELAY_MS"):
-        monkeypatch.delenv(name, raising=False)
+@pytest.mark.parametrize("raw,expected", [(None, 1.2), ("", 1.2), ("abc", 1.2), ("-5", 1.2), ("0", 0.0),
+                                          ("300", 0.3), ("1500", 1.5)])
+def test_the_filler_delay_defaults_to_1200_ms_and_reads_the_environment(monkeypatch, raw, expected):
     from .. import pipeline
-    from ..tools import orchestrator
-    importlib.reload(orchestrator)
-    importlib.reload(pipeline)
+    if raw is None:
+        monkeypatch.delenv("VOICEAI_FILLER_DELAY_MS", raising=False)
+    else:
+        monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", raw)
 
-    assert pipeline._FILLER_DELAY_S == pytest.approx(0.4)
-    assert orchestrator.SLOW_TOOL_FILLER_AFTER_S == pytest.approx(0.4)
-
-
-def test_the_delays_can_be_set_from_the_environment(monkeypatch):
-    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "300")
-    monkeypatch.setenv("VOICEAI_TOOL_FILLER_DELAY_MS", "500")
-    from .. import pipeline
-    from ..tools import orchestrator
-    importlib.reload(orchestrator)
-    importlib.reload(pipeline)
-
-    assert pipeline._FILLER_DELAY_S == pytest.approx(0.3)
-    assert orchestrator.SLOW_TOOL_FILLER_AFTER_S == pytest.approx(0.5)
-    monkeypatch.delenv("VOICEAI_FILLER_DELAY_MS")
-    monkeypatch.delenv("VOICEAI_TOOL_FILLER_DELAY_MS")
-    importlib.reload(orchestrator)
-    importlib.reload(pipeline)
+    assert pipeline._filler_delay_s() == pytest.approx(expected)
 
 
 # ── Deepgram endpointing from the provider config ────────────────────────────────────────────────

@@ -352,6 +352,8 @@ async def _make_sarvam_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
         model=cfg.extra.get("model") or cfg.model or DEFAULT_MODEL,
         pace=voice_speed(cfg),
         language=cfg.language,
+        # extra.streaming = false falls back to whole-sentence REST synthesis.
+        streaming=cfg.extra.get("streaming", True) is not False,
     )
 
 

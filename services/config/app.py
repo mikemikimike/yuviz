@@ -127,6 +127,12 @@ _ROUTES_CHECK_INTERVAL_S = 15
 
 
 async def _prewarm_routes(*, overwrite: bool) -> None:
+    # Tenants first: the Gateway reads tenant:{slug} for VAD/timer settings on every routed call.
+    try:
+        warmed = await tenants_service.prewarm_tenants(overwrite=overwrite)
+        log.info("Prewarmed %d tenant(s) into Redis", warmed)
+    except Exception:
+        log.exception("Tenant prewarm failed; retrying every %ds", _ROUTES_CHECK_INTERVAL_S)
     try:
         warmed = await phone_numbers_service.prewarm(overwrite=overwrite)
         log.info("Prewarmed %d active phone number(s) into Redis", warmed)

@@ -376,6 +376,10 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 runtime_config.agent.id, runtime_config.tenant.slug,
             )
             has_booking_tool = any(p.definition.name == "execute_api" for p in enabled_policies)
+            # Reading the caller ID back only helps when the model passes a phone number itself.
+            confirm_caller_number = has_booking_tool and not all(
+                p.writes_use_call_number for p in enabled_policies if p.definition.name == "execute_api"
+            )
 
             return PipelineConversationHandler(
                 runtime_config, bundle,
@@ -391,6 +395,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 called_number=ctx.called_did,
                 knowledge=knowledge,
                 has_booking_tool=has_booking_tool,
+                confirm_caller_number=confirm_caller_number,
                 initial_variables=initial_variables,
                 latency_store=tool_latency_store,
                 filler_selector=filler_selector,
