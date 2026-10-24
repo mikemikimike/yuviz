@@ -19,7 +19,7 @@
   <settings>
     <param name="sip-ip" value="$${local_ip_v4}"/>
     <param name="rtp-ip" value="$${local_ip_v4}"/>
-    <param name="sip-port" value="5090"/>
+    <param name="sip-port" value="5091"/>
     <param name="context" value="campaign_egress_refuse"/>
     <param name="dialplan" value="XML"/>
     <param name="auth-calls" value="false"/>

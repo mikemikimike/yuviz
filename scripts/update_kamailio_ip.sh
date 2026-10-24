@@ -32,6 +32,14 @@ EGRESS_HMAC="${CAMPAIGNS_EGRESS_HMAC_SECRET:-$(_dotenv CAMPAIGNS_EGRESS_HMAC_SEC
 PSTN_GW_URI="${PSTN_GW_URI:-$(_dotenv PSTN_GW_URI)}"
 FS_EGRESS_PASSWORD="${KAMAILIO_FS_EGRESS_PASSWORD:-$(_dotenv KAMAILIO_FS_EGRESS_PASSWORD)}"
 DIAL_SRC="${CAMPAIGNS_DIAL_SRC-$(_dotenv_or CAMPAIGNS_DIAL_SRC '127.0.0.1 ::1')}"
+DEV_LOCAL_EGRESS="${KAMAILIO_DEV_LOCAL_EGRESS:-$(_dotenv KAMAILIO_DEV_LOCAL_EGRESS)}"
+DEV_LOCAL_EGRESS_DEFINE="# dev local egress off"
+[[ "$DEV_LOCAL_EGRESS" == "1" ]] && DEV_LOCAL_EGRESS_DEFINE="#!define WITH_DEV_LOCAL_EGRESS"
+# The dev branch answers admitted campaign calls on local extensions; it must never sit beside a real trunk.
+if [[ "$DEV_LOCAL_EGRESS" == "1" && ! "$PSTN_GW_URI" =~ ^(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?$ ]]; then
+  echo "ERROR: KAMAILIO_DEV_LOCAL_EGRESS=1 is for development only; PSTN_GW_URI must be on loopback, got '$PSTN_GW_URI'" >&2
+  exit 1
+fi
 # These land inside quoted Kamailio strings and a sed expression: refuse anything that could break out.
 for spec in "CAMPAIGNS_KAMAILIO_HMAC_SECRET:$DIAL_HMAC" "CAMPAIGNS_EGRESS_HMAC_SECRET:$EGRESS_HMAC" \
             "KAMAILIO_FS_EGRESS_PASSWORD:$FS_EGRESS_PASSWORD"; do
@@ -128,7 +136,8 @@ for name in kamailio.cfg dispatcher.list; do
       -e "s|__CAMPAIGNS_DIAL_SRC__|$(sed_escape "$DIAL_SRC_RE")|g" \
       -e "s|__CAMPAIGNS_DIAL_HMAC__|$(sed_escape "$DIAL_HMAC")|g" \
       -e "s|__CAMPAIGNS_EGRESS_HMAC__|$(sed_escape "$EGRESS_HMAC")|g" \
-      -e "s|__PSTN_GW_URI__|$(sed_escape "$PSTN_GW_URI")|g" "$TPL_DIR/$name.tpl" > "$tmp"
+      -e "s|__PSTN_GW_URI__|$(sed_escape "$PSTN_GW_URI")|g" \
+      -e "s|__DEV_LOCAL_EGRESS_DEFINE__|$(sed_escape "$DEV_LOCAL_EGRESS_DEFINE")|g" "$TPL_DIR/$name.tpl" > "$tmp"
   if cmp -s "$tmp" "$KAMAILIO_DIR/$name"; then
     rm -f "$tmp"
   else

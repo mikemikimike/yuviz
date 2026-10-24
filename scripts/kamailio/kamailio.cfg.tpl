@@ -53,6 +53,11 @@
 #!ifdef WITH_CAMPAIGN_DIAL
 #!trydef WITH_XHTTP
 #!endif
+# *** Dev only (KAMAILIO_DEV_LOCAL_EGRESS=1): admitted egress to a dbaliases number rings that local phone
+__DEV_LOCAL_EGRESS_DEFINE__
+#!ifdef WITH_DEV_LOCAL_EGRESS
+#!trydef WITH_ALIASDB
+#!endif
 #!ifdef WITH_JSONRPC
 #!trydef WITH_XHTTP
 #!endif
@@ -1244,6 +1249,14 @@ route[PSTN_EGRESS] {
 	sht_unlock("egress=>$var(mac)");
 
 	remove_hf("X-Egress-Token");
+#!ifdef WITH_DEV_LOCAL_EGRESS
+	if (alias_db_lookup("dbaliases")) {
+		setflag(FLT_ACC);
+		xlog("L_INFO", "EGRESS_ADMIT_LOCAL key=$var(key) to=$rU\n");
+		route(LOCATION);
+		exit;
+	}
+#!endif
 	$ru = "sip:" + $rU + "@" + $var(gw);
 	setflag(FLT_ACC);
 	xlog("L_INFO", "EGRESS_ADMIT key=$var(key)\n");

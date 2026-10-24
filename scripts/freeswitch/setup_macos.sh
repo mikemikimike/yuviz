@@ -120,30 +120,14 @@ cp "$HERE/00_voice_ai.xml" "$CONF/dialplan/public/00_voice_ai.xml"
 echo "  dialplan: public/00_voice_ai.xml (788, 5000-5009 -> start_voice_ai.lua)"
 
 # ── Campaign outbound dialing ───────────────────────────────────────────────
-# Lua is read in place (start_freeswitch passes -scripts scripts/freeswitch).
-for f in start_voice_ai.lua start_campaign_call.lua campaign_event.lua; do
-  [[ -f "$HERE/$f" ]] || { echo "ERROR: $HERE/$f missing" >&2; exit 1; }
-done
-
-_secret() {
-  local v="${!1:-$(_dotenv "$1")}"
-  if [[ ! "$v" =~ ^[A-Za-z0-9_.~-]+$ ]]; then
-    echo "ERROR: $1 must be set (in .env or the environment) using only A-Za-z0-9_.~-" >&2
-    exit 1
-  fi
-  printf '%s' "$v"
-}
-
-"$HERE/install_campaign_config.sh" "$CONF"
-cp "$HERE/000_campaign_trigger.xml" "$CONF/dialplan/public/000_campaign_trigger.xml"
-cp "$HERE/campaign_egress_refuse.xml" "$CONF/dialplan/campaign_egress_refuse.xml"
-cp "$HERE/kamailio_egress.xml" "$CONF/sip_profiles/kamailio_egress.xml"
+# Lua is read in place from the repo, so the installer does not copy it.
+"$HERE/install_campaign_files.sh" "$FS_PREFIX" "$CONF" "$HERE"
 others=$(grep -rl 'name="kamailio_egress"' "$CONF/sip_profiles" "$CONF/directory" 2>/dev/null | grep -v '/sip_profiles/kamailio_egress.xml$' || true)
 if [[ -n "$others" ]]; then
   echo "ERROR: gateway kamailio_egress must be defined only by campaign_egress; also found in: $others" >&2
   exit 1
 fi
-echo "  campaign: dialplan trigger + refuse context, sip_profiles/kamailio_egress.xml (campaign_egress :5090)"
+echo "  campaign: dialplan trigger + refuse context, sip_profiles/kamailio_egress.xml (campaign_egress :5091)"
 
 egress_pw="$(_secret KAMAILIO_FS_EGRESS_PASSWORD)"
 sed -i '' '/data="kamailio_fs_egress_password=/d' "$vars"

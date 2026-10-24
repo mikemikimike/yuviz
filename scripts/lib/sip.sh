@@ -102,6 +102,8 @@ _fs_start() {
     "$prefix/bin/freeswitch" "$@" -nonat -conf "$fs_home/conf" -log "$fs_home/log" \
       -db "$fs_home/db" -run "$fs_home/run" -scripts "$REPO/scripts/freeswitch"
   else
+    # An install without our config dir reads Lua from its own scripts directory; keep those copies current.
+    "$REPO/scripts/freeswitch/install_campaign_files.sh" "$prefix" || return 1
     "$prefix/bin/freeswitch" "$@" -nonat
   fi
 }
