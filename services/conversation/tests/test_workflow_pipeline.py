@@ -374,6 +374,61 @@ async def test_transfer_rejects_injected_destination_from_extracted_variable():
     assert handler._workflow.node.name == "greeting"
 
 
+def _templated_transfer_graph(destination: str) -> dict:
+    graph = {**TRANSFER_GRAPH, "nodes": [dict(n) for n in TRANSFER_GRAPH["nodes"]]}
+    graph["nodes"][2] = {"id": "n2", "type": "transfer", "data": {
+        "name": "to_human", "prompt": "Connect.", "transfer_destination": destination}}
+    return graph
+
+
+async def _transfers_for(graph: dict, extracted: dict | None = None, **handler_kw):
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_a_human", arguments={})],
+        [TokenEvent(text="One moment.")],
+    ])
+    handler = _handler(
+        llm, _RecordingPolicyResolver(), workflow=graph,
+        transfer_type="warm", transfer_destination="+15550001111", **handler_kw,
+    )
+    handler._workflow.update_variables(extracted or {})
+    return [
+        r.transfer_request
+        async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)
+        if r.transfer_request
+    ]
+
+
+async def test_templated_destination_from_extracted_variable_is_refused_even_when_well_formed():
+    graph = _templated_transfer_graph("{{ extension }}")
+    transfers = await _transfers_for(graph, extracted={"extension": "+882345678901"})
+    assert transfers == []
+
+
+async def test_templated_destination_from_call_flow_handoff_is_refused(caplog):
+    graph = _templated_transfer_graph("{{ extension }}")
+    with caplog.at_level("WARNING"):
+        transfers = await _transfers_for(
+            graph, initial_variables={"extension": "+882345678901"},
+        )
+    assert transfers == []
+    assert "882345678901" not in caplog.text
+
+
+async def test_templated_destination_built_from_call_context_still_transfers():
+    graph = _templated_transfer_graph("{{ called_number }}")
+    transfers = await _transfers_for(graph, called_number="+15557654321")
+    assert [t.destination for t in transfers] == ["+15557654321"]
+
+
+async def test_handoff_value_cannot_override_call_context_in_a_destination():
+    graph = _templated_transfer_graph("{{ called_number }}")
+    transfers = await _transfers_for(
+        graph, called_number="+15557654321",
+        initial_variables={"called_number": "+882345678901"},
+    )
+    assert [t.destination for t in transfers] == ["+15557654321"]
+
+
 async def test_next_turn_interrupts_background_extract_before_live_generate():
     """Nothing background may hold the shared LLM while generate_with_tools runs."""
     extract_started = asyncio.Event()

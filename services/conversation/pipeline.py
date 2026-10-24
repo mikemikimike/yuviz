@@ -591,21 +591,22 @@ class PipelineConversationHandler:
             self._llm, threshold_msgs=summary_threshold_for(max_history),
         )
         graph = graph_for(runtime_config)
+        call_context = {
+            "caller_number": caller_number,
+            "called_number": called_number,
+            "direction":     direction,
+            "agent_name":    runtime_config.agent.name,
+            "business_name": runtime_config.tenant.name,
+            "current_date":  now.strftime("%Y-%m-%d"),
+            "current_time":  now.strftime("%H:%M"),
+        }
         self._workflow = WorkflowRunner(
             graph,
             base_suffix=self._prompt_suffix,
             default_global=self._default_system_prompt,
             # Call-flow handoff values override the call-context defaults.
-            variables={
-                "caller_number": caller_number,
-                "called_number": called_number,
-                "direction":     direction,
-                "agent_name":    runtime_config.agent.name,
-                "business_name": runtime_config.tenant.name,
-                "current_date":  now.strftime("%Y-%m-%d"),
-                "current_time":  now.strftime("%H:%M"),
-                **(initial_variables or {}),
-            },
+            variables={**call_context, **(initial_variables or {})},
+            context_variables=call_context,
             extractor=self._extractor,
             summarizer=self._summarizer,
         )
@@ -1392,8 +1393,16 @@ class PipelineConversationHandler:
                     "routing with variables collected so far; stragglers left running",
                     session_id,
                 )
-        destination = self._workflow.render(node.transfer_destination or "") or None
-        problem = transfer_destination_problem(destination)
+        destination = self._workflow.render_transfer_destination(
+            node.transfer_destination or "",
+        ) or None
+        # Category only: a rendered destination is caller-derived, so never logged.
+        if destination is None:
+            problem = "destination is empty or not built from call-context variables"
+        elif transfer_destination_problem(destination) is not None:
+            problem = "rendered destination failed the transfer allowlist"
+        else:
+            problem = None
         if problem is not None:
             log.warning(
                 "Workflow transfer node %r rejected: %s session=%s",
