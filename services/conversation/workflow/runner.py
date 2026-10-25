@@ -263,13 +263,19 @@ def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> Workflow
     if draft and runtime_config.conversation.workflow_draft:
         raw = runtime_config.conversation.workflow_draft
     if not raw:
-        if not draft:
-            log.error(
-                "workflow: agent %s has no published graph — running starter "
-                "seeded from greeting/system_prompt",
-                runtime_config.agent.slug,
-            )
-        return _fallback_graph(runtime_config, raw=None)
+        if draft:
+            return _fallback_graph(runtime_config, raw=None)
+        cached = _cache_get(runtime_config)
+        if cached is not None:
+            return cached
+        log.info(
+            "workflow: agent %s has no published graph — running starter "
+            "seeded from greeting/system_prompt",
+            runtime_config.agent.slug,
+        )
+        graph = _fallback_graph(runtime_config, raw=None)
+        _cache_put(runtime_config, graph)
+        return graph
     if not draft:
         cached = _cache_get(runtime_config)
         if cached is not None:
