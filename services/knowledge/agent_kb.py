@@ -92,6 +92,22 @@ async def list_for_kb(kb_id: Any, *, platform_scoped: bool = False) -> list[dict
     return [dict(row) for row in rows]
 
 
+async def list_for_document(document_id: Any, *, platform_scoped: bool = False) -> list[dict[str, Any]]:
+    """Live agents linked to one document; platform_scoped must come from deps.is_platform_scoped()."""
+    pool = await db.get_pool()
+    conn_cm = platform_conn(pool, reason="document-by-id") if platform_scoped else tenant_conn(pool)
+    async with conn_cm as conn:
+        rows = await conn.fetch(
+            "SELECT a.id AS agent_id, a.slug AS agent_slug, a.name AS agent_name, a.tenant_id "
+            "FROM agent_documents ad "
+            "JOIN agents a ON a.id = ad.agent_id AND a.deleted_at IS NULL "
+            "JOIN kb_documents d ON d.id = ad.document_id AND d.tenant_id = a.tenant_id "
+            "WHERE ad.document_id = $1 ORDER BY a.name",
+            document_id,
+        )
+    return [dict(row) for row in rows]
+
+
 async def replace_documents(
     agent_id: Any, document_ids: list[str], *, user_id: Any | None = None, user_email: str | None = None,
 ) -> list[dict[str, Any]]:

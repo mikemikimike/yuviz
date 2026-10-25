@@ -13,6 +13,7 @@ from services.config.deps import (
     assert_tenant_access, bind_path_tenant, get_current_user, is_platform_scoped, require_path_tenant_access, require_role,
 )
 
+from .. import agent_kb as agent_kb_service
 from .. import documents as documents_service
 from .. import health as health_service
 from .. import knowledge_bases as kb_service
@@ -195,6 +196,12 @@ async def reindex_document(
     if queued is None:
         raise HTTPException(status_code=409, detail="only a ready or failed document with no job running can be reindexed")
     return queued
+
+
+@router.get("/documents/{document_id}/agents")
+async def list_document_agents(document_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    await _authorize_document(document_id, current_user)
+    return await agent_kb_service.list_for_document(document_id, platform_scoped=is_platform_scoped(current_user))
 
 
 @router.get("/documents/{document_id}/text")

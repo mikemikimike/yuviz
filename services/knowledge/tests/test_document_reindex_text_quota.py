@@ -147,6 +147,26 @@ async def test_text_of_a_foreign_document_is_404(client, pool, test_tenant, othe
     assert resp.status_code == 404
 
 
+async def test_document_agents_lists_only_the_agents_linked_to_that_document(
+    client, pool, test_tenant, test_viewer, other_tenant_admin,
+):
+    kb = await _kb(test_tenant)
+    used = await add_document(pool, test_tenant, kb, "Used", ["used"])
+    unused = await add_document(pool, test_tenant, kb, "Unused", ["unused"])
+    agent = dict(await pool.fetchrow(
+        "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'sup', 'Support') RETURNING *", test_tenant["id"],
+    ))
+    await agent_kb_service.replace_documents(agent["id"], [str(used["id"])])
+
+    used_agents = (await client.get(f"/documents/{used['id']}/agents", headers=_auth(test_viewer))).json()
+    unused_agents = (await client.get(f"/documents/{unused['id']}/agents", headers=_auth(test_viewer))).json()
+    foreign = await client.get(f"/documents/{used['id']}/agents", headers=_auth(other_tenant_admin))
+
+    assert [a["agent_name"] for a in used_agents] == ["Support"]
+    assert unused_agents == []
+    assert foreign.status_code == 404
+
+
 # ── token totals ────────────────────────────────────────────────────────────────
 
 async def test_the_document_list_sums_child_chunk_tokens(client, pool, test_tenant, test_viewer):
