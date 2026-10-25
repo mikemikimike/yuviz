@@ -36,6 +36,7 @@ from libs.knowledge_sdk import (
 from .agent_config import load_agent, to_runtime_config
 from .agent_resolver import resolve_handler_deps
 from .ai_provider_manager import AIProviderManager, close_not_ready_providers
+from .bounded import run_bounded
 from .provider_config_subscriber import ProviderConfigSubscriber
 from .callflow.handler import CallFlowConversationHandler
 from .callflow.resolver import resolve_call_flow
@@ -52,7 +53,6 @@ from .providers.llm.ollama import OllamaLLM
 from .secret_resolver import CompositeSecretResolver
 from .servicer import ConversationServicer
 from .session import AgentUnavailable, RoutingStatus, SessionContext
-from .bounded import run_bounded
 from .tools.executor_registry import ExecutorRegistry
 from .tools.executors.api_exec_executor import ApiExecExecutor
 from .tools.factory import orchestrator_factory

@@ -13,3 +13,9 @@ Accepted minors:
 - During a multi-minute blackhole, one abandoned (already cancelled) task per failed heartbeat or backoff window. The pool's max size caps lingering connections. A pool release or command timeout would be a possible follow-up.
 - No explicit test that cancelling the first single-flight caller leaves the other waiters with the result. The code is correct by shield semantics.
 - The `from .bounded import run_bounded` import is out of alphabetical order (cosmetic).
+
+## Follow-up — closing the accepted minors (4 more rounds, ending GREEN)
+- Pool slots held after a cancel on a blackholed DB. `command_timeout` alone didn't bound it (round AMBER). `tenant_conn`/`platform_conn` now take an opt-in `acquire_timeout`, which bounds asyncpg's release (AMBER: a cancel after BEGIN still hung in ROLLBACK). With the timeout set, a cancel during or after BEGIN now terminates the connection and still raises CancelledError. Passed only on `run_bounded` paths.
+- One round went RED: a TimeoutError→CancelledError swap in `_acquire` misread every asyncpg timeout, because asyncpg chains an internal CancelledError onto each one. Reverted. A test now pins that an exhausted pool raises TimeoutError.
+- Added: an in-process blackhole-Postgres test (cancel before and after BEGIN, a control case, an exhausted pool), a test for a cancelled single-flight caller, the import order fix, and test names that say what they check.
+- Final: GREEN. Full suite minus the five Postgres-socket files: 5038 passed, 0 failed. Blackhole tests pass 3/3 runs.

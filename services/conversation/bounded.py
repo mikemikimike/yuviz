@@ -8,6 +8,18 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
+# Pool-wide asyncpg command timeout: caps each query and the ROLLBACK/reset on release once the
+# connection is idle, so a blackholed DB cannot hang them for the TCP timeout. It does NOT bound the
+# wait for a cancelled query's cancel request (asyncpg waits on that before applying any timeout);
+# POOL_RELEASE_TIMEOUT_S and the terminate-on-cancel in libs.tenancy.session cover it.
+POOL_COMMAND_TIMEOUT_S = 10.0
+
+# Passed as acquire_timeout= on the run_bounded paths. It bounds the wait for a free connection and,
+# because asyncpg reuses it as the release budget, the release after a cancel before BEGIN. A cancel
+# after BEGIN terminates the connection (tenant_conn/platform_conn do this when acquire_timeout is
+# set) so the ROLLBACK fails fast. With None neither bound applies.
+POOL_RELEASE_TIMEOUT_S = 10.0
+
 
 def _consume(task: asyncio.Task) -> None:
     # Retrieve the exception so an abandoned task never logs "exception was never retrieved".

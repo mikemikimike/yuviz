@@ -15,7 +15,7 @@ import asyncpg
 
 from libs.tenancy import TenantUnresolved, tenant_conn
 
-from ..bounded import run_bounded
+from ..bounded import POOL_COMMAND_TIMEOUT_S, POOL_RELEASE_TIMEOUT_S, run_bounded
 from .registry import ToolRegistry
 from .types import ToolDefinition
 
@@ -68,7 +68,9 @@ class ToolPolicyResolver:
     async def connect(cls, database_url: str | None, registry: ToolRegistry) -> "ToolPolicyResolver":
         if not database_url:
             return cls(None, registry)
-        pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
+        pool = await asyncpg.create_pool(
+            database_url, min_size=1, max_size=5, command_timeout=POOL_COMMAND_TIMEOUT_S,
+        )
         return cls(pool, registry)
 
     async def close(self) -> None:
@@ -134,6 +136,7 @@ class ToolPolicyResolver:
         """The full, unnarrowed policy list for the agent, read from Postgres."""
         async with tenant_conn(
             self._pool, explicit_tenant=tenant_slug, reason="conversation-tool-policy",
+            acquire_timeout=POOL_RELEASE_TIMEOUT_S,
         ) as conn:
             rows = await conn.fetch(
                 """

@@ -56,7 +56,7 @@ class FakeDb:
         self.rows: list[list[dict]] = [[_POLICY_ROW], []]
 
     @asynccontextmanager
-    async def __call__(self, pool, *, explicit_tenant, reason):
+    async def __call__(self, pool, *, explicit_tenant, reason, acquire_timeout=None):
         self.entries += 1
         if self.fail == "down":
             raise OSError(DRIVER_ERROR)
@@ -247,7 +247,7 @@ async def test_another_tenants_lookup_gets_no_tools_and_is_not_short_circuited(d
 
 async def test_tenant_unresolved_is_a_bug_not_an_outage(monkeypatch, clock):
     @asynccontextmanager
-    async def unresolved(pool, *, explicit_tenant, reason):
+    async def unresolved(pool, *, explicit_tenant, reason, acquire_timeout=None):
         raise TenantUnresolved("no tenant")
         yield  # pragma: no cover
 
@@ -258,3 +258,31 @@ async def test_tenant_unresolved_is_a_bug_not_an_outage(monkeypatch, clock):
     with pytest.raises(TenantUnresolved):
         await resolver.enabled_tools("a1", "t1")
     assert ("a1", "t1") not in resolver._backoff_until
+
+
+async def test_a_caller_cancelled_mid_lookup_does_not_starve_the_other_caller(db, clock):
+    # A slow (not hung) DB: the lookup is in flight while caller 1 is cancelled, then completes.
+    db.rows = [[_POLICY_ROW, {**_POLICY_ROW, "tool_name": "execute_api"}], []]
+    release = asyncio.Event()
+    fetch = db._fetch
+
+    async def slow_fetch(sql, *args):
+        await release.wait()
+        return await fetch(sql, *args)
+
+    db._fetch = slow_fetch
+    resolver = _resolver()
+    first = asyncio.create_task(resolver.enabled_tools("a1", "t1"))
+    second = asyncio.create_task(resolver.enabled_tools("a1", "t1", only=["search_knowledge"]))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert ("a1", "t1") in resolver._inflight
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    result = await second
+
+    assert [p.definition.name for p in result] == ["search_knowledge"]
+    assert resolver._inflight == {}
