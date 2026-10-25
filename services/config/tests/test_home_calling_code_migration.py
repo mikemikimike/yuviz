@@ -8,6 +8,7 @@ upgrade does.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -78,6 +79,7 @@ async def conn(scratch_db):
     """Connection to a database holding the pre-release shape: no home_calling_code."""
     c = await asyncpg.connect(f"{_BASE}/{scratch_db}")
     await c.execute("TRUNCATE tenants CASCADE")
+    await c.execute("DELETE FROM audit_log WHERE entity_type = 'tenant_home_calling_code'")
     await c.execute("ALTER TABLE tenants DROP COLUMN IF EXISTS home_calling_code")
     yield c
     await c.close()
@@ -100,6 +102,30 @@ async def _tenant(conn, dids: tuple[str, ...] = (), destinations: tuple[str, ...
     return tenant
 
 
+async def _dial_flow(conn, tenant, destination: str) -> None:
+    graph = json.dumps({"nodes": [
+        {"id": "d", "type": "dial", "data": {"destination": destination}}, {"id": "s", "type": "start"},
+    ]})
+    await conn.execute(
+        "INSERT INTO call_flows (tenant_id, slug, name, graph) VALUES ($1, $2, 'f', $3::jsonb)",
+        tenant, f"f-{uuid.uuid4().hex[:6]}", graph,
+    )
+
+
+async def _workflow_transfer(conn, tenant, destination: str) -> None:
+    workflow = json.dumps({"nodes": [{"id": "t", "type": "transfer", "data": {"transfer_destination": destination}}]})
+    await conn.execute(
+        "INSERT INTO agents (tenant_id, slug, name, workflow) VALUES ($1, $2, 'w', $3::jsonb)",
+        tenant, f"w-{uuid.uuid4().hex[:6]}", workflow,
+    )
+
+
+async def _audit_rows(conn, tenant) -> list[asyncpg.Record]:
+    return await conn.fetch(
+        "SELECT new_value FROM audit_log WHERE entity_type = 'tenant_home_calling_code' AND entity_id = $1", tenant,
+    )
+
+
 async def _home(conn, tenant) -> str:
     return await conn.fetchval("SELECT home_calling_code FROM tenants WHERE id = $1", tenant)
 
@@ -116,60 +142,80 @@ async def test_indian_tenant_keeps_its_plus91_destinations(scratch_db, conn):
     assert transfer_policy_problem("+918012345678", TransferPolicy()) is not None
 
 
-async def test_home_code_votes_come_from_explicit_dids_and_destinations(scratch_db, conn):
-    from_dids = await _tenant(conn, dids=("+91 80-6535 4620", "918065354621", "442071234567"))
-    from_dests = await _tenant(conn, destinations=("+442071234567", "0044207123456", "+918012345678"))
-    only_extensions = await _tenant(conn, destinations=("1001", "sip:desk@pbx.example.com"))
-    no_data = await _tenant(conn)
-    us = await _tenant(conn, dids=("14155550100",))
+async def test_home_code_votes_come_from_explicit_destinations(scratch_db, conn):
+    from_dests = await _tenant(conn, destinations=("+442071234567", "0044207123456", "+918012345678", "+442071234568"))
+    only_extensions = await _tenant(conn, destinations=("1001", "sip:desk@pbx.example.com", "09876543210"))
     _upgrade(scratch_db)
-    assert await _home(conn, from_dids) == "91"
     assert await _home(conn, from_dests) == "44"
     assert await _home(conn, only_extensions) == "1"
-    assert await _home(conn, no_data) == "1"
-    assert await _home(conn, us) == "1"
 
 
-async def test_national_form_dids_vote_for_nothing(scratch_db, conn):
-    indian_mobile = await _tenant(conn, dids=("9876543210",))        # 98 is Iran
-    canadian = await _tenant(conn, dids=("4165550177", "(416) 555-0178", "7000000000"))  # 41, 7
-    national_dids_with_real_destinations = await _tenant(
-        conn, dids=("9876543211", "8065354620"), destinations=("+918012345678",)
+async def test_dids_never_vote_in_any_form(scratch_db, conn):
+    # 18001021234 is Indian toll-free; read as NANP it outvoted the one +91 number. The upgrade
+    # normalizes every DID to plain digits before the derivation, so none of these can vote.
+    toll_free = await _tenant(
+        conn, dids=("18001021234", "18001021235", "+918065354824"), destinations=("+918012345678",),
     )
+    explicit_dids_only = await _tenant(conn, dids=("+918065354620", "+918065354621"))
+    national = await _tenant(conn, dids=("9876543210", "4165550177", "(416) 555-0178", "7000000000"))
     _upgrade(scratch_db)
-    assert await _home(conn, indian_mobile) == "1"
-    assert await _home(conn, canadian) == "1"
-    assert await _home(conn, national_dids_with_real_destinations) == "91"
+    assert await _home(conn, toll_free) == "91"
+    assert await _home(conn, explicit_dids_only) == "1"
+    assert await _home(conn, national) == "1"
+    assert len(await _audit_rows(conn, explicit_dids_only)) == 1
 
 
-async def test_explicit_destinations_combine_with_did_evidence(scratch_db, conn):
-    one_us_did_two_indian_destinations = await _tenant(
-        conn, dids=("14155550102",), destinations=("+918012345678", "00918098765432")
-    )
-    two_us_dids_one_indian_destination = await _tenant(
-        conn, dids=("14155550103", "14155550104"), destinations=("+918012345678",)
-    )
+async def test_call_flow_dial_and_workflow_transfer_destinations_are_evidence(scratch_db, conn):
+    dial_only = await _tenant(conn)
+    await _dial_flow(conn, dial_only, "+919876543211")
+    workflow_only = await _tenant(conn)
+    await _workflow_transfer(conn, workflow_only, "+919876543210")
+    templated = await _tenant(conn)
+    await _workflow_transfer(conn, templated, "{{ caller_number }}")
+    await _dial_flow(conn, templated, "1001")
     _upgrade(scratch_db)
-    assert await _home(conn, one_us_did_two_indian_destinations) == "91"
-    assert await _home(conn, two_us_dids_one_indian_destination) == "1"
+    assert await _home(conn, dial_only) == "91"
+    assert await _home(conn, workflow_only) == "91"
+    assert await _home(conn, templated) == "1"
+    assert len(await _audit_rows(conn, templated)) == 1
 
 
-async def test_a_tie_keeps_the_default_and_names_the_tenant(scratch_db, conn):
-    tied = await _tenant(conn, dids=("918065354622",), destinations=("+442071234567",))
-    decided = await _tenant(conn, dids=("918065354623",), destinations=("+442071234567", "+918012345678"))
+async def test_a_number_repeated_across_sources_is_one_vote(scratch_db, conn):
+    # One +1 number against the same +91 number in three agents and a flow: one vote each, a tie.
+    repeated = await _tenant(conn, destinations=("+14155550100", "+918012345678", "00918012345678", "+918012345678"))
+    await _dial_flow(conn, repeated, "+918012345678")
+    # Distinct numbers each count: one +91 number against two different +98 numbers.
+    distinct = await _tenant(conn, destinations=("+918065354620", "+989121234567", "+989121234568"))
+    notices = _upgrade(scratch_db)
+    assert await _home(conn, repeated) == "1"
+    assert str(repeated) in notices
+    assert await _home(conn, distinct) == "98"
+
+
+async def test_a_tie_or_no_evidence_keeps_the_default_names_the_tenant_and_writes_an_audit_row(scratch_db, conn):
+    tied = await _tenant(conn, destinations=("+918065354622", "+442071234567"))
+    no_data = await _tenant(conn, dids=("918065354624",))
+    decided = await _tenant(conn, destinations=("+442071234567", "+918012345678", "+918012345679"))
     notices = _upgrade(scratch_db)
     assert await _home(conn, tied) == "1"
-    assert str(tied) in notices
+    assert await _home(conn, no_data) == "1"
+    assert str(tied) in notices and str(no_data) in notices
     assert await _home(conn, decided) == "91"
     assert str(decided) not in notices
+    [tie_row] = await _audit_rows(conn, tied)
+    assert sorted(json.loads(tie_row["new_value"])["candidates"]) == ["44", "91"]
+    [empty_row] = await _audit_rows(conn, no_data)
+    assert json.loads(empty_row["new_value"])["candidates"] is None
+    assert await _audit_rows(conn, decided) == []
 
 
 async def test_reapplying_schema_keeps_a_code_set_since(scratch_db, conn):
-    tenant = await _tenant(conn, dids=("918065354620",))
+    tenant = await _tenant(conn, destinations=("+918065354620",))
     _upgrade(scratch_db)
     await conn.execute("UPDATE tenants SET home_calling_code = '44' WHERE id = $1", tenant)
     _upgrade(scratch_db)
     assert await _home(conn, tenant) == "44"
+    assert await _audit_rows(conn, tenant) == []
 
 
 async def test_non_bypassrls_owner_upgrade_fails_loudly_and_leaves_no_column(rls_db):
@@ -178,7 +224,7 @@ async def test_non_bypassrls_owner_upgrade_fails_loudly_and_leaves_no_column(rls
     try:
         await c.execute("ALTER TABLE tenants DROP COLUMN IF EXISTS home_calling_code")
         await c.execute("TRUNCATE tenants CASCADE")
-        tenant = await _tenant(c, dids=("918065354620",))
+        tenant = await _tenant(c, destinations=("+918065354620",))
         # FORCE RLS hides the evidence rows from this owner: without the block turning
         # row_security off, every tenant silently got '1' and the apply exited 0.
         with pytest.raises(subprocess.CalledProcessError) as failed:
