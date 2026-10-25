@@ -91,12 +91,6 @@ _NANP_NON_US_CA_AREA_CODES = frozenset({
 })
 _NANP_NUMBER_RE = re.compile(r"1[2-9][0-9]{9}")
 
-# A number dialled with no +, 00 or 011 that is long enough to be E.164 (the platform stores
-# DIDs that way). It is read nationally only if it has the shape of a national number of
-# the home country; otherwise it is an international number with its prefix left off.
-_BARE_E164_RE = re.compile(r"[1-9][0-9]{9,14}")
-_NATIONAL_NUMBER_RE = {"91": re.compile(r"[6-9][0-9]{9}")}
-
 _PREMIUM_MESSAGE = "premium-rate and satellite numbers cannot be transfer destinations"
 
 # Comma-separated SIP hosts (and their subdomains) a transfer may reach without the
@@ -151,12 +145,6 @@ def _number_problem(number: str, policy: "TransferPolicy") -> str | None:
     if digits is None:
         national_premium = _NATIONAL_PREMIUM_RATE_RE.get(policy.home_calling_code)
         if national_premium is not None and national_premium.fullmatch(number):
-            return _PREMIUM_MESSAGE
-        national = _NATIONAL_NUMBER_RE.get(policy.home_calling_code)
-        if (
-            _BARE_E164_RE.fullmatch(number) and not (national and national.fullmatch(number))
-            and number.startswith(_PREMIUM_RATE_PREFIXES)
-        ):
             return _PREMIUM_MESSAGE
         return None
     if digits.startswith("0") or (digits.startswith("1") and _NANP_NUMBER_RE.fullmatch(digits) is None):
