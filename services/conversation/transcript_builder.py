@@ -29,10 +29,6 @@ class TurnLatency:
     tts_engine:        str | None = None
 
 
-class SessionCollision(RuntimeError):
-    """begin_call() for a session_id another tenant's live call already holds."""
-
-
 class TranscriptBuilder:
     def __init__(
         self,
@@ -178,11 +174,6 @@ class TranscriptBuilder:
         if self._pool is None:
             return
         tenant_slug = tenant_id or "default"
-        live_slug = self._tenant_slugs.get(session_id)
-        if live_slug is not None and live_slug != tenant_slug:
-            # Overwriting would re-point the live call's later writes at the new tenant, or let
-            # the first call's end_call() strip the second's bookkeeping.
-            raise SessionCollision(f"session_id already live for another tenant session={session_id}")
         # A repeat begin_call() for the same live call (delegate handoff) keeps its counters.
         self._turn_counts.setdefault(session_id, 0)
         self._barge_in_counts.setdefault(session_id, 0)
@@ -388,7 +379,7 @@ class TranscriptBuilder:
                     "(session_id, turn_number, caller_text, caller_confidence, ai_response, interrupted, "
                     "stt_engine, stt_latency_ms, llm_engine, llm_latency_ms, tts_engine, tts_latency_ms, "
                     "latency_ms) "
-"SELECT $1::text, $2::int, $3::text, $4::float8, $5::text, $6::bool, $7::text, $8::int, "
+                    "SELECT $1::text, $2::int, $3::text, $4::float8, $5::text, $6::bool, $7::text, $8::int, "
                     "$9::text, $10::int, $11::text, $12::int, $13::jsonb "
                     "WHERE EXISTS (SELECT 1 FROM calls WHERE session_id = $1 AND tenant_id = $14)",
                     session_id, turn_number, caller_text, caller_confidence, ai_response, interrupted,

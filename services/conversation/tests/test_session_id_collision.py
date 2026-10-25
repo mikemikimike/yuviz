@@ -13,7 +13,7 @@ os.environ.setdefault("POSTGRES_DSN", "postgresql://satish@localhost:5432/voicea
 
 from services.conversation.generated.voiceai.v1 import conversation_pb2 as pb  # noqa: E402
 from services.conversation.servicer import ConversationServicer  # noqa: E402
-from services.conversation.transcript_builder import SessionCollision, TranscriptBuilder  # noqa: E402
+from services.conversation.transcript_builder import TranscriptBuilder  # noqa: E402
 
 
 TENANT_A, TENANT_B = "collide-tenant-a", "collide-tenant-b"
@@ -139,24 +139,24 @@ def _greeting_raising(exc: Exception) -> ConversationServicer:
     return ConversationServicer(factory)
 
 
-async def test_a_collision_is_refused_exactly_like_a_duplicate_live_id():
-    """For one principal, the refusal must not reveal whether the id is held by a stream or by another tenant."""
+async def test_an_id_held_by_another_tenant_is_refused_exactly_like_one_held_by_the_callers_own_tenant():
+    """For one principal (tenant B), the refusal must not reveal whether the id is held by its own stream or another tenant's."""
     servicer, _ = _servicer()
-    first = _Stream(servicer, "same-1", TENANT_A)
-    await asyncio.wait_for(first.ready.wait(), 2)
-    duplicate = _Stream(servicer, "same-1", TENANT_A)
-    await asyncio.wait_for(duplicate.task, 2)
-    await first.hang_up()
+    held_by_a = _Stream(servicer, "same-1", TENANT_A)
+    held_by_b = _Stream(servicer, "same-2", TENANT_B)
+    await asyncio.wait_for(held_by_a.ready.wait(), 2)
+    await asyncio.wait_for(held_by_b.ready.wait(), 2)
 
-    collided = _Stream(
-        _greeting_raising(SessionCollision("session_id already live for another tenant session=same-2")),
-        "same-2", TENANT_A,
-    )
-    await asyncio.wait_for(collided.task, 2)
+    other_tenants = _Stream(servicer, "same-1", TENANT_B)
+    own_tenants = _Stream(servicer, "same-2", TENANT_B)
+    await asyncio.wait_for(other_tenants.task, 2)
+    await asyncio.wait_for(own_tenants.task, 2)
 
-    assert collided.context.abort.await_args.args == duplicate.context.abort.await_args.args
-    assert collided.context.abort.await_args.args == (grpc.StatusCode.ALREADY_EXISTS, "session_id already in use")
-    assert not [m for m in collided.messages if m.HasField("error")]
+    assert other_tenants.context.abort.await_args.args == own_tenants.context.abort.await_args.args
+    assert other_tenants.context.abort.await_args.args == (grpc.StatusCode.ALREADY_EXISTS, "session_id already in use")
+    assert not [m for m in other_tenants.messages if m.HasField("error")]
+    await held_by_a.hang_up()
+    await held_by_b.hang_up()
 
 
 async def test_an_unexpected_error_does_not_send_its_text_to_the_gateway():
@@ -197,27 +197,34 @@ async def _texts(builder: TranscriptBuilder, sid: str) -> list[str]:
     return [r["caller_text"] for r in rows]
 
 
-async def test_begin_call_for_a_session_live_in_another_tenant_is_refused_and_leaves_it_intact():
+async def test_a_refused_stream_leaves_the_holders_bookkeeping_and_call_intact():
     builder = await _builder()
-    sid = f"test-collide-{uuid.uuid4().hex[:8]}"
+    sid = f"test-holder-{uuid.uuid4().hex[:8]}"
 
-    builder.begin_call(sid, TENANT_A, "call-a")
-    builder.record_turn(sid, "a first", 0.9, "reply a1", False)
-    with pytest.raises(SessionCollision):
-        builder.begin_call(sid, TENANT_B, "call-b")
-    # tenant A's stream keeps working after the refused one is gone
-    builder.record_turn(sid, "a second", 0.9, "reply a2", False)
-    builder.record_workflow_outcome(sid, nodes_visited=["n1"], disposition="done")
-    builder.end_call(sid, "stream_ended", score_sentiment=False)
+    async def factory(ctx):
+        handler = AsyncMock()
+
+        async def greeting(session_id):
+            builder.begin_call(session_id, ctx.tenant_id, "call-a")
+            builder.record_turn(session_id, "a first", 0.9, "reply a1", False)
+            return []
+
+        handler.greeting.side_effect = greeting
+        handler.out_responses = None
+        return handler
+
+    servicer = ConversationServicer(factory, builder)
+    holder = _Stream(servicer, sid, TENANT_A)
+    await asyncio.wait_for(holder.ready.wait(), 2)
+    refused = _Stream(servicer, sid, TENANT_B)
+    await asyncio.wait_for(refused.task, 2)
+
+    refused.context.abort.assert_awaited_once()
+    assert builder._tenant_slugs[sid] == TENANT_A
+    assert builder._turn_counts[sid] == 1
+    await holder.hang_up()
     await builder._chains[sid]
-
-    row = await builder._pool.fetchrow(
-        "SELECT tenant_id, turn_count, close_reason, disposition FROM calls WHERE session_id = $1", sid,
-    )
-    assert (row["tenant_id"], row["turn_count"], row["close_reason"], row["disposition"]) == (
-        TENANT_A, 2, "stream_ended", "done",
-    )
-    assert await _texts(builder, sid) == ["a first", "a second"]
+    assert await _texts(builder, sid) == ["a first"]
     await _cleanup(builder, sid)
 
 
@@ -308,7 +315,7 @@ async def test_teardown_cut_before_end_call_leaves_nothing_behind_for_the_next_s
     await stream.hang_up()
     await builder._chains[sid]
 
-    builder.begin_call(sid, TENANT_B, "call-b")  # no SessionCollision
+    builder.begin_call(sid, TENANT_B, "call-b")  # the cut stream's counters did not carry over
     assert (builder._turn_counts[sid], builder._barge_in_counts[sid]) == (0, 0)
     await builder._chains[sid]
     await _cleanup(builder, sid)
