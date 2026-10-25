@@ -15,6 +15,7 @@ import {
   PREMIUM_ENGINES, SUPPORTED_LANGUAGES, VOICES_BY_ENGINE, baseLanguage, deepgramSupportsMulti, keptGreetings, languageLabel, languagesWithoutVoice, ttsLanguages, voiceSpeaks,
 } from "@/lib/engineCatalog";
 import { ModelRef, useLocalModels } from "@/lib/useLocalModels";
+import { VoicePickerWithPreview } from "./VoicePickerWithPreview";
 
 type Role = "stt" | "llm" | "tts";
 
@@ -167,21 +168,13 @@ function PremiumLanguageVoice({ provider, lang, current, placeholder, onPick }: 
           {pasteVoiceId}
         </>
       ) : (
-        <select
-          className="form-select"
-          value={current?.voice ?? ""}
-          onChange={(e) => {
-            const v = matching!.find((x) => x.voice_id === e.target.value);
-            if (v) onPick(v.voice_id, v.name);
-          }}
-        >
-          <option value="" disabled>{placeholder}</option>
-          {/* A saved voice that is no longer in the list still shows as selected. */}
-          {current?.voice && !matching!.some((v) => v.voice_id === current.voice) && (
-            <option value={current.voice}>{current.name}</option>
-          )}
-          {matching!.map((v) => <option key={v.voice_id} value={v.voice_id}>{v.name}</option>)}
-        </select>
+        <VoicePickerWithPreview
+          voices={matching!}
+          currentVoiceId={current?.voice}
+          placeholder={placeholder}
+          providerId={provider.id}
+          onPick={onPick}
+        />
       )}
     </div>
   );

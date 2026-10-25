@@ -288,6 +288,19 @@ body {
 .form-row { display: flex; gap: 11px; }
 .form-row .form-group { flex: 1; }
 
+.voice-picker-container { display: flex; flex-direction: column; gap: 8px; }
+.voice-options-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+.voice-option {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  background: var(--surf-2); border: 1px solid var(--border-2); border-radius: var(--rs);
+  cursor: pointer; transition: background .15s;
+}
+.voice-option:hover { background: var(--surf-3); }
+.voice-option.selected { background: var(--cyan-dim); border-color: var(--cyan-border); }
+.voice-name { flex: 1; font-size: .78rem; color: var(--text); }
+.voice-preview-btn { padding: 2px 8px !important; font-size: .7rem; }
+.cf-preview-error { font-size: .7rem; color: var(--red); }
+
 /* ═══ Tabs ═══ */
 .tabs { display: flex; gap: 1px; border-bottom: 1px solid var(--border); margin-bottom: 18px; flex-wrap: wrap; }
 .tab {
