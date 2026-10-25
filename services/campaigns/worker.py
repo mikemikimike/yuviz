@@ -196,9 +196,14 @@ class CampaignWorker:
             await self._send_sip(row, first=False)
 
     async def _reconcile_cpaas(self, row: dict[str, Any]) -> None:
-        # A 429 placed nothing and the provider released the key, so there is nothing to reconcile and no send cap.
-        if row["state"] == "pending" and row["send_due"] and row["rate_limited"]:
-            if await attempts.reserve_send(row["id"], path="cpaas") == "ok":
+        # A 429 placed nothing and the provider released the key: re-send it, or hand the lead back untouched.
+        if row["state"] == "pending" and row["rate_limited"]:
+            if row["campaign_status"] != "running" or not _within_calling_hours(row):
+                why = row["campaign_status"] if row["campaign_status"] != "running" else "calling_hours"
+                await attempts.release_unplaced(row["id"], reason=f"rate_limited_{why}")
+            elif row["send_count"] >= attempts.MAX_RATE_LIMITED_SENDS:
+                await self._fail_send(row, "rate_limited")
+            elif row["send_due"] and await attempts.reserve_send(row["id"], path="cpaas") == "ok":
                 await self._send_cpaas({**row, "send_count": row["send_count"] + 1})
             return
         if row["state"] == "pending" and row["send_due"] and row["resend_age"] and row["send_count"] < attempts.MAX_SENDS:

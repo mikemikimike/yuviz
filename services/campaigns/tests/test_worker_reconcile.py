@@ -394,3 +394,56 @@ async def test_b_a_rate_limited_attempt_waits_out_its_hold(scratch_pool, redis_r
     monkeypatch.setattr(telephony_originate, "originate_call", originate)
     await _reconcile(redis_raw)
     assert sends == [] and (await _attempt(scratch_pool, att["idempotency_key"]))["state"] == "pending"
+
+
+async def _held(pool, world, **attempt_sql):
+    async with pool.acquire() as conn:
+        contact, att = await w.open_attempt(conn, world, path="cpaas", provider="fake", age_s=30)
+    await pool.execute(
+        "UPDATE campaign_attempts SET rate_limited = true, not_before = now() - interval '1 second', send_count = $2 "
+        "WHERE id = $1", att["id"], attempt_sql.get("send_count", 1),
+    )
+    return contact, att
+
+
+def _no_sends(monkeypatch):
+    sends = []
+
+    async def originate(**kw):
+        sends.append(kw["idempotency_key"])
+        return "vendor-x"
+
+    monkeypatch.setattr(telephony_originate, "originate_call", originate)
+    return sends
+
+
+@pytest.mark.parametrize("setup_sql, reason", [
+    ("UPDATE campaigns SET status = 'paused' WHERE id = $1", "rate_limited_paused"),
+    ("UPDATE campaigns SET status = 'cancelled' WHERE id = $1", "rate_limited_cancelled"),
+    ("UPDATE campaigns SET calling_hours_start = to_char(now() AT TIME ZONE 'UTC' + interval '2 hours', 'HH24:MI'), "
+     "calling_hours_end = to_char(now() AT TIME ZONE 'UTC' + interval '3 hours', 'HH24:MI'), "
+     "calling_hours_timezone = 'UTC' WHERE id = $1", "rate_limited_calling_hours"),
+])
+async def test_b_a_held_attempt_is_never_sent_once_dialling_must_stop_and_its_lead_gets_the_attempt_back(
+    scratch_pool, redis_raw, monkeypatch, setup_sql, reason,
+):
+    world = await _setup(scratch_pool, provider="fake")
+    contact, att = await _held(scratch_pool, world)
+    await scratch_pool.execute(setup_sql, world["campaign"]["id"])
+    sends = _no_sends(monkeypatch)
+    await _reconcile(redis_raw)
+    row = await _attempt(scratch_pool, att["idempotency_key"])
+    lead = await w.contact_row(scratch_pool, contact["id"])
+    assert sends == []
+    assert (row["state"], row["failure_reason"]) == ("resolved", reason)
+    assert (lead["status"], lead["attempt_count"]) == ("pending", 0)
+
+
+async def test_b_an_attempt_held_too_many_times_fails_instead_of_staying_open(scratch_pool, redis_raw, monkeypatch):
+    world = await _setup(scratch_pool, provider="fake", max_attempts=1)
+    contact, att = await _held(scratch_pool, world, send_count=attempts.MAX_RATE_LIMITED_SENDS)
+    sends = _no_sends(monkeypatch)
+    await _reconcile(redis_raw)
+    row = await _attempt(scratch_pool, att["idempotency_key"])
+    assert sends == [] and (row["outcome"], row["failure_reason"]) == ("failed", "rate_limited")
+    assert (await w.contact_row(scratch_pool, contact["id"]))["status"] == "failed"

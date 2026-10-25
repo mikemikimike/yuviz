@@ -492,3 +492,28 @@ async def test_calling_hours_must_be_hh_mm(scratch_pool, api, bad):
     assert (await _create(api, world, calling_hours_start=bad, calling_hours_end="17:00")).status_code == 400
     resp = await api.patch(f"/campaigns/{world['campaign']['id']}", json={"calling_hours_end": bad}, headers=_as(world))
     assert resp.status_code == 400
+
+
+async def test_a_send_closed_by_cancel_is_corrected_by_its_late_answer(scratch_pool, api):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    await scratch_pool.execute("UPDATE campaigns SET status = 'running' WHERE id = $1", cid)
+    async with scratch_pool.acquire() as conn:
+        contact, att = await w.open_attempt(conn, world)
+    assert (await api.post(f"/campaigns/{cid}/cancel", headers=_as(world))).status_code == 200
+    await attempts.apply_outcome(
+        tenant_id=world["tenant_id"], key=att["idempotency_key"], provider_call_id=None, outcome="answered",
+        call_session_id=att["call_session_id"],
+    )
+    assert (await w.contact_row(scratch_pool, contact["id"]))["status"] == "completed"
+
+
+async def test_leads_a_cancelled_campaign_never_called_can_be_called_again(scratch_pool, api):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    await scratch_pool.execute("UPDATE campaigns SET status = 'running' WHERE id = $1", cid)
+    untouched = await scratch_pool.fetchval("SELECT id FROM campaign_contacts WHERE campaign_id = $1", cid)
+    assert (await api.post(f"/campaigns/{cid}/recall", json={"contact_ids": [str(untouched)]}, headers=_as(world))).status_code == 409
+    assert (await api.post(f"/campaigns/{cid}/cancel", headers=_as(world))).status_code == 200
+    resp = await api.post(f"/campaigns/{cid}/recall", json={"contact_ids": [str(untouched)]}, headers=_as(world))
+    assert resp.status_code == 201, resp.text

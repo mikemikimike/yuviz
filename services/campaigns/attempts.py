@@ -17,6 +17,7 @@ ADMISSION_LOCK = "SELECT pg_advisory_xact_lock(hashtext('campaigns:admission'))"
 DEADLINE_S = 120
 RESEND_WINDOW_S = 60
 MAX_SENDS = 2
+MAX_RATE_LIMITED_SENDS = 8  # ~25 min of 429 backoff before the attempt is failed
 
 _OUTCOMES = ("answered", "ended", "busy", "no_answer", "declined", "failed")
 
@@ -98,7 +99,8 @@ async def list_open(limit: int = 200) -> list[dict[str, Any]]:
     async with platform_conn(pool, reason="campaign-dial-state") as conn:
         rows = await conn.fetch(
             """
-            SELECT a.*, t.slug AS tenant_slug, ag.slug AS agent_slug,
+            SELECT a.*, t.slug AS tenant_slug, ag.slug AS agent_slug, c.status AS campaign_status,
+                   c.calling_hours_start, c.calling_hours_end, c.calling_hours_timezone,
                    a.deadline_at <= now() AS past_deadline,
                    now() - a.created_at > interval '10 seconds' AS resend_age,
                    (a.not_before IS NULL OR a.not_before <= now()) AS send_due,
@@ -127,6 +129,26 @@ async def defer_send(attempt_id: UUID, *, delay_s: float) -> bool:
             attempt_id, delay_s, DEADLINE_S,
         )
     return row is not None
+
+
+async def release_unplaced(attempt_id: UUID, *, reason: str) -> bool:
+    """Close a rate-limited attempt that was never placed and give its lead the attempt back."""
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="campaign-dial-state") as conn:
+        return await conn.fetchval(
+            """
+            WITH a AS (
+                UPDATE campaign_attempts SET state = 'resolved', outcome = 'failed', failure_reason = $2, resolved_at = now()
+                WHERE id = $1 AND state = 'pending' AND rate_limited RETURNING contact_id
+            ), c AS (
+                UPDATE campaign_contacts SET status = 'pending', attempt_count = GREATEST(attempt_count - 1, 0),
+                       next_attempt_at = NULL
+                WHERE id IN (SELECT contact_id FROM a) AND status = 'calling' RETURNING id
+            )
+            SELECT EXISTS (SELECT 1 FROM a)
+            """,
+            attempt_id, reason,
+        )
 
 
 async def mark_sent(attempt_id: UUID, *, provider_call_id: str | None) -> bool:

@@ -328,8 +328,9 @@ async def close_unsent_attempts(campaign_id: Any, *, platform_scoped: bool = Fal
         return await conn.fetchval(
             """
             WITH closed AS (
+                -- An unconfirmed send may be live; closed_by_deadline lets its late answered/ended event correct this.
                 UPDATE campaign_attempts SET state = 'resolved', outcome = 'failed', failure_reason = 'campaign_cancelled',
-                       resolved_at = now()
+                       closed_by_deadline = NOT rate_limited, resolved_at = now()
                 WHERE campaign_id = $1 AND state = 'pending' RETURNING contact_id
             ), freed AS (
                 UPDATE campaign_contacts SET status = 'failed', next_attempt_at = NULL
@@ -371,7 +372,7 @@ async def list_call_attempts(
             """
             SELECT a.id, a.contact_id, a.campaign_id, c.name AS campaign_name, a.attempt, a.state, a.outcome,
                    a.failure_reason, a.callee, a.caller_id, a.created_at, a.answered_at, a.ended_at,
-                   cc.status AS contact_status, ag.name AS agent_name
+                   cc.status AS contact_status, c.status AS campaign_status, ag.name AS agent_name
             FROM campaign_attempts a
             JOIN campaigns c ON c.id = a.campaign_id AND c.deleted_at IS NULL
             JOIN campaign_contacts cc ON cc.id = a.contact_id
@@ -390,7 +391,8 @@ async def list_call_attempts(
         row = dict(record)
         row["callee_masked"] = _mask_callee(row.pop("callee"))
         # Judged on the lead, not this attempt: a lead answered on a later try is not called again.
-        row["can_call_again"] = row.pop("contact_status") in RECALLABLE_OUTCOMES
+        recallable = RECALLABLE_OUTCOMES + (("pending",) if row.pop("campaign_status") == "cancelled" else ())
+        row["can_call_again"] = row.pop("contact_status") in recallable
         result.append(row)
     return result
 
@@ -408,12 +410,12 @@ async def recall(
 
     wanted = set(contact_ids)
     contacts = await campaign_contacts.list_contacts(source["id"], platform_scoped=platform_scoped)
-    eligible = [
-        c for c in contacts
-        if str(c["id"]) in wanted and c["status"] in RECALLABLE_OUTCOMES
-    ]
+    recallable = (*RECALLABLE_OUTCOMES, "pending") if source["status"] == "cancelled" else RECALLABLE_OUTCOMES
+    eligible = [c for c in contacts if str(c["id"]) in wanted and c["status"] in recallable]
     if not eligible:
-        raise ValueError("none of the chosen leads can be called again (only no answer, busy, failed or declined)")
+        raise ValueError(
+            "none of the chosen leads can be called again (only no answer, busy, failed, declined, or not yet called)"
+        )
     new = await create_campaign(
         source["tenant_id"], agent_id=source["agent_id"],
         name=(name or f"Call again: {source['name']}").strip(),
