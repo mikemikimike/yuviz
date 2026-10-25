@@ -190,6 +190,23 @@ def test_indian_numbers_are_not_premium(value):
     assert transfer_policy_problem(value, TransferPolicy(home_calling_code="91")) is None
 
 
+@pytest.mark.parametrize("home, value", [
+    ("91", "19765551234"), ("91", "19005550100"), ("91", "881123456789"), ("91", "87123456789"),
+    ("44", "8816123456"), ("44", "19765551234"), ("49", "8826123456"), ("49", "sip:19765551234@example.com"),
+])
+def test_a_bare_e164_premium_number_is_refused_even_when_opted_in(home, value):
+    assert transfer_policy_problem(value, TransferPolicy(home_calling_code=home, allow_international=True)) is not None
+
+
+@pytest.mark.parametrize("home, value", [
+    ("91", "9876543210"), ("91", "8816123456"), ("91", "8712345678"), ("91", "7000000000"),
+    ("91", "09876543210"), ("91", "18001021234"), ("91", "1001"),
+    ("1", "4155550100"), ("1", "14155550100"), ("1", "2025550100"),
+])
+def test_a_bare_national_number_is_not_mistaken_for_premium(home, value):
+    assert transfer_policy_problem(value, TransferPolicy(home_calling_code=home)) is None
+
+
 def test_indian_national_number_in_a_sip_user_part_is_not_premium():
     assert transfer_policy_problem(
         "sip:09876543210@example.com", TransferPolicy(home_calling_code="91", allow_international=True),
