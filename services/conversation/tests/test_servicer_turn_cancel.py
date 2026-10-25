@@ -172,3 +172,76 @@ async def test_cancel_behind_a_deferred_speech_ended_still_stops_the_running_tur
     assert names.count("tts_chunk") < 6
     assert "end_call" not in names
     assert ("stt_result", "turn1") in events and ("stt_result", "turn2") in events
+
+
+async def test_frames_behind_a_deferred_speech_ended_are_examined_once_per_turn(monkeypatch):
+    """With a speech_ended deferred, every later frame wakes a drain. Each drain must look only at
+    the new arrivals, not rescan everything deferred so far (O(n^2) per turn), and the deferred
+    messages must still reach the outer loop in arrival order once the turn ends."""
+    import types
+
+    import services.conversation.servicer as servicer_mod
+
+    pops = 0
+
+    class CountingDeque(servicer_mod.collections.deque):
+        def popleft(self):
+            nonlocal pops
+            pops += 1
+            return super().popleft()
+
+    monkeypatch.setattr(
+        servicer_mod, "collections", types.SimpleNamespace(deque=CountingDeque),
+    )
+
+    n_frames = 200
+    turns = []
+    release = asyncio.Event()
+
+    async def turn(session_id, audio, duration_ms, energy_db):
+        turns.append(len(turns))
+        if len(turns) == 1:
+            await release.wait()
+        yield HandlerResponse(stt_text=f"turn{len(turns)}")
+
+    servicer, handler = _servicer(turn)
+    handler.on_audio.return_value = HandlerResponse()
+
+    async def stream():
+        yield _open()
+        yield _speech_ended()
+        await asyncio.sleep(0.05)
+        yield _speech_ended()   # deferred: turn 1 is still running
+        for i in range(n_frames):
+            yield pb.GatewayMessage(audio_chunk=pb.AudioChunk(
+                session_id="s1", payload=i.to_bytes(2, "big"),
+            ))
+            await asyncio.sleep(0)   # one drain per frame
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.Event().wait()
+
+    texts: list[str] = []
+    done = asyncio.Event()
+
+    async def consume():
+        async for out in servicer.Converse(stream(), AsyncMock()):
+            if out.WhichOneof("payload") == "stt_result" and out.stt_result.text:
+                texts.append(out.stt_result.text)
+                if len(texts) == 2:
+                    done.set()
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(done.wait(), 3)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    assert texts == ["turn1", "turn2"]
+    # Each message is popped a small constant number of times; a per-drain rescan pops
+    # roughly n_frames^2 / 2 (about 20,000 here).
+    assert pops < 4 * (n_frames + 2), pops
