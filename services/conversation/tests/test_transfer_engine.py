@@ -84,6 +84,11 @@ def test_directive_reason_is_one_short_line_without_control_characters():
     assert len(reason) <= 120
 
 
+def test_directive_reason_drops_bidi_and_zero_width_characters():
+    reason = _directive_reason("ctl\u202e\u200b\u2066end\ufeff\u200f\u2069")
+    assert reason == "ctlend"
+
+
 def test_blank_directive_reason_falls_back_to_a_constant():
     assert _directive_reason(" \n\t ") == "caller_requested_human"
 

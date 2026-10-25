@@ -27,7 +27,7 @@ from .envelope import build_envelope
 from .guard import (
     DEFAULT_MAX_TOOL_CALLS_PER_TURN, LastGoodCache, TurnGuard, call_signature, scrub_scope_args, validate_json,
 )
-from .middleware import BreakerBoard, _redact, build_default_chain
+from .middleware import BreakerBoard, build_default_chain, describe_arguments
 from .policy_resolver import ToolPolicyResolver
 from .provider_manager import ToolProviderManager
 from .types import ToolDefinition, ToolExecutionContext, ToolExecutionRequest, ToolResult, ToolStatus
@@ -272,17 +272,11 @@ class ToolCallOrchestrator:
                         raise
                 latency_ms = (time.monotonic() - call_t0) * 1000
                 read_only = definition.read_only if definition is not None else False
-                # Local tools have no policy row to say which values are sensitive, and their arguments are the
-                # caller's own words (a search query), so only the key names are logged.
-                logged_args = (
-                    _redact(event.arguments, policy.sensitive_arg_keys) if policy is not None
-                    else sorted(event.arguments) if isinstance(event.arguments, dict) else "<not an object>"
-                )
                 log.info(
                     "tool_call result turn=%s tool=%s tenant=%s agent=%s status=%s error=%s latency_ms=%d "
-                    "trace_id=%s args=%r",
+                    "trace_id=%s %s",
                     turn_id, event.tool_name, tenant_id, agent_id, result.status.value, result.error,
-                    latency_ms, trace_id, logged_args,
+                    latency_ms, trace_id, describe_arguments(event.arguments),
                 )
                 _fold_tool_result_into_history(
                     history, event, result, read_only=read_only, latency_ms=latency_ms, trace_id=trace_id,
@@ -379,7 +373,6 @@ class ToolCallOrchestrator:
         timeout_ms = policy.timeout_ms or DEFAULT_TOOL_TIMEOUT_MS
         chain = build_default_chain(
             executor, timeout_ms=timeout_ms, metrics=self._metrics,
-            redact_arg_keys=policy.sensitive_arg_keys,
             latency_store=self._latency_store,
             breaker_board=self._breakers,
         )

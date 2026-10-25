@@ -17,7 +17,8 @@ log = logging.getLogger(__name__)
 
 _MAX_REASON_CHARS = 120
 _REASON_WHITESPACE_RE = re.compile(r"\s+")
-_REASON_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# C0/C1 controls plus bidi overrides/isolates and zero-width characters, which render as nothing or reorder a log line.
+_REASON_CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 
 
 def _clean_reason(raw: str) -> str:

@@ -8,6 +8,7 @@ import json
 import logging
 
 import asyncpg
+import pytest
 
 from services.conversation.providers.interfaces import ChatMessage
 from services.conversation.tools.executor_registry import ExecutorRegistry
@@ -587,47 +588,42 @@ async def test_cancel_event_mid_call_yields_failed_cancelled_and_never_folds_the
     assert json.loads(history[2].content)["error"]["code"] == "cancelled"
 
 
-# ── logging redaction (finding 8), against the real build_default_chain ──
+# ── tool-call logging carries names and sizes only (#177), against the real build_default_chain ──
+
+_CALLER_WORDS = "my name is Zebulonqx and my card is 4111 1111 1111 1111"
 
 
-async def test_sensitive_arg_keys_never_appear_in_any_log_record(caplog):
-    client = _FakeToolExecClient({"chain_status": "success", "data": {"looked_up": True}})
-    executor = ApiExecExecutor(client)
-    chain = build_default_chain(executor, timeout_ms=1000, redact_arg_keys=frozenset({"national_id"}))
-    request = _request(arguments={
-        "api_name": "lookup_customer", "inputs": {"national_id": "SENTINEL-SSN-123", "name": "Alex"},
-    })
+@pytest.mark.parametrize("arguments", [
+    {"api_name": "lookup_order", "inputs": {"order_id": _CALLER_WORDS}},
+    {"api_name": "lookup_order", "inputs": _CALLER_WORDS},
+    {"api_name": "lookup_order", "inputs": {"Order_ID": _CALLER_WORDS, "card_number": "4111111111111111"}},
+])
+async def test_no_argument_value_or_payload_reaches_any_log_record(caplog, arguments):
+    client = _FakeToolExecClient({"chain_status": "success", "data": {"card": "4111111111111111"}})
+    chain = build_default_chain(ApiExecExecutor(client), timeout_ms=1000)
 
-    with caplog.at_level(logging.INFO, logger="services.conversation.tools.middleware"):
-        result = await chain.execute(request)
+    with caplog.at_level(logging.DEBUG, logger="services.conversation.tools"):
+        await chain.execute(_request(arguments=arguments))
 
-    assert result.status == ToolStatus.SUCCESS
-    for record in caplog.records:
-        assert "SENTINEL-SSN-123" not in record.getMessage()
-        assert "SENTINEL-SSN-123" not in repr(record.args)
-    joined = " ".join(r.getMessage() for r in caplog.records)
-    assert "lookup_customer" in joined
-    assert "Alex" in joined
+    joined = " ".join(r.getMessage() + repr(r.args) for r in caplog.records)
+    assert "Zebulonqx" not in joined
+    assert "4111" not in joined
 
 
-async def test_empty_redact_arg_keys_default_logs_byte_identical_to_today(caplog):
+async def test_start_line_names_the_tool_and_argument_keys_only(caplog):
     client = _FakeToolExecClient({"chain_status": "success", "data": {}})
-    executor = ApiExecExecutor(client)
-    chain = build_default_chain(executor, timeout_ms=1000)  # default redact_arg_keys=frozenset()
-    request = _request(arguments={"api_name": "lookup_order", "inputs": {"order_id": "o1"}})
+    chain = build_default_chain(ApiExecExecutor(client), timeout_ms=1000)
 
     with caplog.at_level(logging.INFO, logger="services.conversation.tools.middleware"):
-        await chain.execute(request)
+        await chain.execute(_request(arguments={"api_name": "lookup_order", "inputs": {"order_id": "o1"}}))
 
-    start_record = next(r for r in caplog.records if "tool_call start" in r.getMessage())
-    assert start_record.getMessage() == (
-        "tool_call start tool=execute_api call_id=call1 tenant=t1 agent=a1 "
-        "arguments={'api_name': 'lookup_order', 'inputs': {'order_id': 'o1'}}"
-    )
+    start = next(r.getMessage() for r in caplog.records if "tool_call start" in r.getMessage())
+    assert "tool=execute_api" in start
+    assert "arg_keys=['api_name', 'inputs']" in start
+    assert "o1" not in start and "lookup_order" not in start
 
 
-async def test_orchestrator_wires_policy_sensitive_arg_keys_into_the_real_logging_middleware(caplog):
-    """The real orchestrator passes policy sensitive_arg_keys as redact_arg_keys to build_default_chain."""
+async def test_orchestrator_result_line_logs_no_argument_values(caplog):
     client = _FakeToolExecClient({"chain_status": "success", "data": {}})
     registry = ExecutorRegistry()
     registry.register(
@@ -638,23 +634,25 @@ async def test_orchestrator_wires_policy_sensitive_arg_keys_into_the_real_loggin
     llm = _ScriptedLLM([
         [ToolCallEvent(
             tool_call_id="c1", tool_name="execute_api",
-            arguments={"api_name": "lookup_customer", "inputs": {"national_id": "SENTINEL-SSN-456"}},
+            arguments={"api_name": "lookup_customer", "inputs": {"anything": _CALLER_WORDS}},
         )],
         [TokenEvent(text="done")],
     ])
     orchestrator = ToolCallOrchestrator(
         llm_adapter=LLMAdapter(llm),
-        policy_resolver=_FakePolicyResolver([_policy(sensitive_arg_keys=frozenset({"national_id"}))]),
+        policy_resolver=_FakePolicyResolver([_policy()]),
         provider_manager=_FakeProviderManager(client),
         executor_registry=registry,
     )
     history = [ChatMessage(role="user", content="look me up")]
 
-    with caplog.at_level(logging.INFO, logger="services.conversation.tools.middleware"):
+    with caplog.at_level(logging.INFO, logger="services.conversation.tools"):
         [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", history)]
 
+    assert any("tool_call result" in r.getMessage() for r in caplog.records)
     for record in caplog.records:
-        assert "SENTINEL-SSN-456" not in record.getMessage()
+        assert "Zebulonqx" not in record.getMessage()
+        assert "4111" not in record.getMessage()
 
 
 # ── tenant fence (AC 10), real Postgres — defense-in-depth independent of
