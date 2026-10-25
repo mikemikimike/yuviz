@@ -528,5 +528,5 @@ def _fold_tool_result_into_history(
     history.append(ChatMessage(role="assistant", content="", tool_calls=[call_dict]))
     envelope = build_envelope(result, read_only=read_only, latency_ms=latency_ms, trace_id=trace_id)
     history.append(ChatMessage(
-        role="tool", content=json.dumps(envelope), tool_call_id=event.tool_call_id,
+        role="tool", content=json.dumps(envelope, ensure_ascii=False), tool_call_id=event.tool_call_id,
     ))

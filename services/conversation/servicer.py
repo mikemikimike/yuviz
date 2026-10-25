@@ -436,6 +436,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     # Stream SttResult/TTS chunks as the pipeline produces them —
                     # buffering the whole turn would trip the gateway's SttTimeout.
                     tts_started_sent      = False
+                    audio_sent            = False
                     cancelled             = False
                     stt_sent              = False
                     end_call_requested    = False
@@ -449,6 +450,11 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     async for response in turn_stream:
                         # Drain BEFORE sending so a cancel_generation that arrived
                         # during synthesis stops this turn's audio from being sent.
+                        # Once a speech_ended / transfer_* is deferred to the outer loop,
+                        # everything behind it belongs to the next utterance and waits in
+                        # `deferred` — except a cancel or end of stream, which still stop
+                        # this turn.
+                        deferred: list[pb.GatewayMessage] = []
                         while backlog or not msg_q.empty():
                             pending = backlog.popleft() if backlog else msg_q.get_nowait()
                             if pending is None:
@@ -458,7 +464,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 backlog.appendleft(None)  # so outer loop exits
                                 break
                             pcase = pending.WhichOneof("payload")
-                            if pcase == "cancel_generation":
+                            if deferred and pcase != "cancel_generation":
+                                deferred.append(pending)
+                            elif pcase == "cancel_generation":
                                 await session.cancel()
                                 cancelled = True
                                 # Ack now so C++ leaves BargeIn without waiting for
@@ -501,20 +509,19 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             elif pcase == "speech_ended":
                                 # New utterance while this turn's pipeline still runs —
                                 # leave it for the outer loop.
-                                backlog.appendleft(pending)
-                                break
+                                deferred.append(pending)
                             elif pcase in (
                                 "transfer_initiated", "transfer_completed", "transfer_failed",
                             ):
                                 # Defer: transfer_failed streams its own TTS, which would
                                 # interleave with this turn's audio.
-                                backlog.appendleft(pending)
-                                break
+                                deferred.append(pending)
                             else:
                                 log.warning(
                                     "Unexpected %s during speech pipeline session=%s",
                                     pcase, sid,
                                 )
+                        backlog.extendleft(reversed(deferred))
 
                         if response is None:
                             continue  # woken by a message, already handled above
@@ -556,6 +563,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             # advances C++ FSM Thinking→Synthesizing→Speaking so
                             # barge-in detection works during playback.
                             if response.tts_payloads:
+                                audio_sent = True
                                 if not tts_started_sent:
                                     yield pb.ServiceMessage(
                                         tts_started=pb.TtsStarted(session_id=sid)
@@ -613,8 +621,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         )
 
                     # Sent after the final TtsChunk so the gateway waits for the goodbye to drain.
-                    # Requires TTS this turn, else the flag leaks into a later turn's playback.
-                    if end_call_requested and not cancelled and tts_started_sent:
+                    # Requires audio this turn (not just the synthetic TtsStarted), else the flag leaks
+                    # into a later turn's playback.
+                    if end_call_requested and not cancelled and audio_sent:
                         log.info(
                             "Converse: sending EndCall grace_period_ms=%d session=%s",
                             end_call_grace_period, sid,
@@ -626,7 +635,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 grace_period_ms=end_call_grace_period,
                             )
                         )
-                    elif end_call_requested and not cancelled and not tts_started_sent:
+                    elif end_call_requested and not cancelled:
                         log.warning(
                             "Converse: end-call marker detected but turn produced no "
                             "TTS audio — not sending EndCall (would leak into a later "

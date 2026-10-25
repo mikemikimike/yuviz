@@ -309,6 +309,47 @@ async def test_oversized_data_is_truncated_with_a_marker_before_it_reaches_the_m
     assert len(json.dumps(result.payload)) < 7000
 
 
+async def test_oversized_non_latin_data_is_excerpted_readable_not_as_unicode_escapes():
+    from services.conversation.tools.orchestrator import _fold_tool_result_into_history
+
+    client = _FakeToolExecClient({"chain_status": "success", "data": {"blob": "नमस्ते दुनिया " * 2_000}})
+
+    result = await ApiExecExecutor(client).execute(_request())
+
+    excerpt = result.payload["data_excerpt"]
+    assert result.payload["truncated"] is True
+    assert excerpt.startswith('{"blob": "नमस्ते दुनिया ')
+    assert len(excerpt) == 6000
+    history: list[ChatMessage] = []
+    _fold_tool_result_into_history(
+        history, ToolCallEvent(tool_call_id="call1", tool_name="execute_api", arguments={}), result)
+    assert "नमस्ते दुनिया" in history[-1].content
+    assert "\\u" not in history[-1].content
+    assert json.loads(history[-1].content)["data"]["data_excerpt"] == excerpt
+
+
+async def test_non_latin_data_under_the_cap_reaches_the_model_readable():
+    from services.conversation.tools.orchestrator import _fold_tool_result_into_history
+
+    client = _FakeToolExecClient({"chain_status": "success", "data": {"name": "सुनीता शर्मा", "city": "München"}})
+
+    result = await ApiExecExecutor(client).execute(_request())
+
+    assert result.payload == {"name": "सुनीता शर्मा", "city": "München"}
+    history: list[ChatMessage] = []
+    _fold_tool_result_into_history(
+        history, ToolCallEvent(tool_call_id="call1", tool_name="execute_api", arguments={}), result)
+    assert "सुनीता शर्मा" in history[-1].content and "München" in history[-1].content
+
+
+async def test_non_latin_data_is_capped_by_its_readable_length_not_its_escaped_length():
+    client = _FakeToolExecClient({"chain_status": "success", "data": {"b": "क" * 1_500}})
+
+    result = await ApiExecExecutor(client).execute(_request())
+
+    assert result.payload == {"b": "क" * 1_500}
+
+
 async def test_data_under_the_cap_is_passed_through_untouched():
     client = _FakeToolExecClient({"chain_status": "success", "data": {"blob": "x" * 1000}})
 

@@ -55,6 +55,16 @@ def transfer_policy(tenant: dict[str, Any]) -> TransferPolicy:
     )
 
 
+async def transfer_policy_on(conn: Any, tenant_id: Any) -> TransferPolicy:
+    """Read on the caller's connection: tenants is outside RLS, and a publish already holds one."""
+    row = await conn.fetchrow(
+        "SELECT home_calling_code, allow_international_transfers FROM tenants WHERE id = $1", tenant_id,
+    )
+    if row is None:
+        raise LookupError(f"tenant {tenant_id} not found")
+    return transfer_policy(dict(row))
+
+
 def _cache_key(slug: str) -> str:
     return f"tenant:{slug}"
 
