@@ -629,6 +629,23 @@ async def test_every_grace_cut_counts_against_the_embedder_until_its_breaker_ope
     assert result["chunks"][0]["content"] == REFUND
 
 
+async def test_a_cached_query_cut_during_the_vector_search_does_not_charge_the_embedder(world):
+    """The embedding was a cache hit (no provider call); only the HNSW search was slow. The embedder did nothing
+    wrong, so its breaker must stay closed even with a threshold of one."""
+    cfg = RetrievalConfig(dense_grace_s=0.04, deadline_s=0.8, embed_timeout_override_s=0.6, dense_timeout_s=1.0,
+                          breaker_failures=1)
+    query = "refunds processed days"
+    await _run(world["tenant"], world["agent"], FakeEmbedder(), query, config=cfg)          # warms the embedding cache
+    resilience.breakers.clear()
+    unused = FakeEmbedder(latency_s=0.5)
+    result = await _run(world["tenant"], world["agent"], unused, query, repo=FaultRepo(dense_sleep=0.5), config=cfg)
+
+    assert result["retrieval_metadata"]["timings_ms"]["dense_grace_cut"] == 1.0              # the dense branch was cut
+    assert result["chunks"][0]["content"] == REFUND
+    assert unused.calls == 0
+    assert {b.state for k, b in resilience.breakers._breakers.items() if k.startswith("embed:")} <= {"closed"}
+
+
 async def test_the_grace_is_off_unless_configured(world):
     assert RetrievalConfig().dense_grace_s is None
     result = await _run(world["tenant"], world["agent"], FakeEmbedder(latency_s=0.2), "how long do refunds take",

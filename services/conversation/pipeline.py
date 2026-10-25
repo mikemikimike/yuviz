@@ -305,6 +305,14 @@ _FILLER_DELAY_MS_DEFAULT = 1200
 _FIRST_TURN = "__first_turn__"
 
 
+def _merge_turn_notes(*notes: ChatMessage | None) -> ChatMessage | None:
+    """One transient note from several: they are folded into the caller's turn together (with_directive takes one)."""
+    present = [n for n in notes if n is not None]
+    if len(present) <= 1:
+        return present[0] if present else None
+    return ChatMessage(role="user", content="\n\n".join(n.content for n in present))
+
+
 def _filler_delay_s() -> float:
     """VOICEAI_FILLER_DELAY_MS (default 1200; blank or unusable values use the default). 0 = always, immediately."""
     return env_ms("VOICEAI_FILLER_DELAY_MS", _FILLER_DELAY_MS_DEFAULT) / 1000
@@ -991,13 +999,15 @@ class PipelineConversationHandler:
             self._session(session_id).first_turn_filler_spoken = True
 
         # Knowledge retrieval is the `search_knowledge` local tool, called only when needed. A turn that looks like
-        # a knowledge question searches up front instead (prefetch.py), so the model answers in one pass; the
-        # passages ride on a copy of the caller's turn and never enter history.
+        # a knowledge question searches up front instead (prefetch.py), so the model answers in one pass. The
+        # passages are a note folded into the caller's turn on every LLM call (turn_context): never stored in
+        # history, and the history list stays the one the turn's tool messages are appended to.
         messages_for_llm = history
+        turn_context: ChatMessage | None = None
         if pre_retrieval is not None:
             block = await self._pre_retrieval_block(pre_retrieval, session_id)
             if block:
-                messages_for_llm = with_directive(history, ChatMessage(role="user", content=block))
+                turn_context = ChatMessage(role="user", content=block)
 
         directives: list[Directive] = []
         full_response: list[str] = []
@@ -1016,6 +1026,7 @@ class PipelineConversationHandler:
                 async for item in self._llm_to_tts(
                     messages_for_llm, cancel_event, session_id, directives, tool_calls_made,
                     store=history, caller_text=stt_result.text, first_turn_filler=first_turn_filler,
+                    turn_context=turn_context,
                 ):
                     await items.put(item)
                 await items.put(_STREAM_END)
@@ -1473,11 +1484,15 @@ class PipelineConversationHandler:
         tool_calls_made: list[str],
         store: list[ChatMessage] | None = None,
         carry_taint: bool = False,
+        turn_context: ChatMessage | None = None,
     ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
-        """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech."""
+        """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech.
+        turn_context (pre-retrieved passages) rides on every LLM call of the turn with the reply-language line,
+        folded into the caller's turn and never stored, and starts the turn tainted: it is retrieved, tenant-uploaded
+        text, so a write is held for the caller's yes as after a search_knowledge lookup."""
+        trailing = _merge_turn_notes(turn_context, self._reply_directive(session_id))
         if self._tool_orchestrator is None:
-            directive = self._reply_directive(session_id)
-            async for event in LLMAdapter(self._llm).generate(with_directive(history, directive)):
+            async for event in LLMAdapter(self._llm).generate(with_directive(history, trailing)):
                 assert isinstance(event, ToolTokenEvent)
                 yield event.text
             return
@@ -1491,7 +1506,7 @@ class PipelineConversationHandler:
             caller_number=self._caller_number, called_number=self._called_number,
             call_direction=self._direction, cancel_event=cancel_event,
             local_tools=local_tools, only_tools=only_tools, carry_taint=carry_taint,
-            trailing_message=self._reply_directive(session_id),
+            trailing_message=trailing, pre_tainted=turn_context is not None,
         ):
             if isinstance(event, ToolCallStartedEvent):
                 if not event.filler_only:
@@ -1522,6 +1537,7 @@ class PipelineConversationHandler:
         silent_turn_text: str = "fallback_llm_error",
         caller_text:  str = "",
         first_turn_filler: bool = False,
+        turn_context: ChatMessage | None = None,
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """Stream LLM tokens and synthesize per sentence, yielding (raw_token, tts_bytes, end_call).
         Directives are stripped before TTS and appended to `directives` in place.
@@ -1538,7 +1554,9 @@ class PipelineConversationHandler:
         first_piece_sent = False  # the reply's first sentence or clause has gone to TTS
         try:
             async for item in _with_filler_timer(
-                self._token_stream(history, session_id, cancel_event, tool_calls_made, store, carry_taint),
+                self._token_stream(
+                    history, session_id, cancel_event, tool_calls_made, store, carry_taint, turn_context,
+                ),
                 _filler_delay_s(), arm_first=first_turn_filler,
             ):
                 if cancel_event.is_set():

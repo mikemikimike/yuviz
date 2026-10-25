@@ -5,6 +5,7 @@ asks, no message rewriting, offered only when the node has knowledge, failures r
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 from libs.knowledge_sdk import MockKnowledgeProvider
@@ -386,3 +387,77 @@ async def test_weak_and_partial_matches_are_attached_with_the_caveat_unavailable
     down.add_chunk("test", "test-agent", REFUND, score=0.9, document_title="Refund Policy")
     _handler, calls = await _turn("What is your refund policy?", down)
     assert calls[0][1].content == "What is your refund policy?"
+
+
+# --- pre-retrieval + tool calls: the turn's tool messages persist, writes are held ---------------------------
+
+def _handler_with_tools(text: str, scripted: list[list], executor, *, read_only=frozenset()):
+    from dataclasses import replace
+
+    from services.conversation.tools.executor_registry import ExecutorRegistry
+    from services.conversation.tools.llm_adapter import LLMAdapter
+    from services.conversation.tools.orchestrator import ToolCallOrchestrator
+
+    from .test_tool_call_orchestrator import _FakePolicyResolver, _FakeProviderManager, _ScriptedLLM
+    from .test_tool_envelope import _policy
+
+    registry = ExecutorRegistry()
+    registry.register("execute_api", lambda provider: executor)
+    llm = _ScriptedLLM(scripted)
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm), policy_resolver=_FakePolicyResolver([replace(_policy(), read_only_apis=frozenset(read_only))]),
+        provider_manager=_FakeProviderManager(), executor_registry=registry, max_tool_iterations=5,
+    )
+    knowledge = _CountingKnowledge()
+    knowledge.add_chunk("test", "test-agent", "Timings: 10 AM to 6 PM.", score=0.9, document_title="FAQ")
+    handler = _make_handler(_make_stt(text), _make_llm(["unused"]), _make_tts(b"\x00" * 640), knowledge=knowledge,
+                            node_knowledge=["kb1"], tool_orchestrator=orchestrator)
+    return handler, llm, knowledge
+
+
+async def test_a_pre_retrieved_turn_keeps_its_tool_messages_and_never_stores_the_passages():
+    from services.conversation.tools.llm_adapter import TokenEvent, ToolCallEvent
+
+    from .test_tool_envelope import _Executor
+
+    executor = _Executor()
+    handler, llm, knowledge = _handler_with_tools(
+        "What slots do you have tomorrow?",
+        [[ToolCallEvent(tool_call_id="c1", tool_name="execute_api", arguments={"api_name": "check_availability"})],
+         [TokenEvent(text="We have ten and eleven.")]],
+        executor, read_only={"check_availability"},
+    )
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+
+    assert len(knowledge.calls) == 1 and len(executor.calls) == 1
+    history = handler._get_history("s1")
+    assert [m.role for m in history] == ["system", "user", "assistant", "tool", "assistant"]   # the tool round survives
+    assert history[1].content == "What slots do you have tomorrow?"
+    assert "Timings: 10 AM to 6 PM." not in "".join(m.content or "" for m in history)           # passages never stored
+    # ...yet the model saw them on both of the turn's LLM calls
+    assert len(llm.seen_messages) == 2
+    assert all(any("Timings: 10 AM to 6 PM." in (m.content or "") for m in call) for call in llm.seen_messages)
+
+
+async def test_a_write_on_a_pre_retrieved_turn_is_held_for_the_callers_confirmation():
+    from services.conversation.tools.llm_adapter import TokenEvent, ToolCallEvent
+
+    from .test_tool_envelope import _Executor
+
+    executor = _Executor()
+    handler, _llm, knowledge = _handler_with_tools(
+        "What are your timings?",
+        [[ToolCallEvent(tool_call_id="c1", tool_name="execute_api", arguments={"api_name": "cancel_booking"})],
+         [TokenEvent(text="Shall I cancel it?")]],
+        executor,
+    )
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+
+    assert len(knowledge.calls) == 1                                  # pre-retrieved
+    assert executor.calls == []                                       # the write did not run
+    envelope = json.loads(next(m.content for m in handler._get_history("s1") if m.role == "tool"))
+    assert envelope["error"]["code"] == "needs_caller_confirmation"

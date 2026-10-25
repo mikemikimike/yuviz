@@ -217,16 +217,25 @@ async def _embed(
 async def _dense_branch(
     plan: plans.RetrievalPlan, vector_repo: IVectorRepository, embedding_manager: EmbeddingProviderManager,
     held: asyncpg.Connection | None, bpool: BoundedPool, query: str, limit: int, minimum_score: float,
-    cfg: RetrievalConfig, timings: dict[str, float], remaining,
+    cfg: RetrievalConfig, timings: dict[str, float], remaining, embedding_pending: set[str] | None = None,
 ) -> _Branch:
+    """`embedding_pending`, when given, holds the embed configs whose embedding has not finished yet; the caller reads
+    it if it cuts this branch short, to charge only an embedder that was actually still working."""
     branch = _Branch("dense")
     t0 = time.monotonic()
     try:
         config_ids = list(plan.groups)
-        vectors = await asyncio.gather(
-            *[_embed(plan, embedding_manager, cid, query, cfg, remaining()) for cid in config_ids],
-            return_exceptions=True,
-        )
+        if embedding_pending is not None:
+            embedding_pending.update(config_ids)
+
+        async def embed_one(cid: str) -> list[float]:
+            try:
+                return await _embed(plan, embedding_manager, cid, query, cfg, remaining())
+            finally:
+                if embedding_pending is not None:
+                    embedding_pending.discard(cid)
+
+        vectors = await asyncio.gather(*[embed_one(cid) for cid in config_ids], return_exceptions=True)
         timings["embed"] = (time.monotonic() - t0) * 1000
         for v in vectors:
             if isinstance(v, asyncio.CancelledError):
@@ -491,9 +500,11 @@ async def _retrieve(
     # 2. dense and lexical. Own connections: in parallel. The caller's connection: one after the other on it.
     results: dict[str, _Branch] = {}
 
+    embedding_pending: set[str] = set()
+
     def dense_coro():
         return _dense_branch(plan, vector_repo, embedding_manager, held, bpool, query, limit,
-                             policy["minimum_score"], cfg, timings, remaining)
+                             policy["minimum_score"], cfg, timings, remaining, embedding_pending)
 
     def lexical_coro():
         return _lexical_branch(plan, vector_repo, held, bpool, query, limit, cfg, timings, remaining)
@@ -528,8 +539,11 @@ async def _retrieve(
         if cut_early:
             ops_metrics.inc("dense_grace_cut")
             timings["dense_grace_cut"] = 1.0
-            # A miss for each embedder that did not make the grace, so one that never does ends up skipped.
-            for config_id in plan.groups:
+            # A miss for each embedder still embedding when the grace ran out, so one that never makes it ends up
+            # skipped. A cached query, or an embedder that answered and was only waiting on the vector search, is
+            # not charged, nor is a fast embedder for a slow sibling. Read before anything awaits: the cancelled
+            # branch only clears its set when the loop next runs.
+            for config_id in tuple(embedding_pending):
                 breakers.get(f"embed:{config_id}", cfg).record_failure()
         elif pending:
             degraded.append("deadline")

@@ -70,10 +70,11 @@ def _call(i: int, tool="execute_api", **arguments) -> list:
     return [ToolCallEvent(tool_call_id=f"c{i}", tool_name=tool, arguments=arguments)]
 
 
-async def _turn(orchestrator, scripted, *, call_id="call1", local_tools=None, tenant="t1", agent="a1"):
+async def _turn(orchestrator, scripted, *, call_id="call1", local_tools=None, tenant="t1", agent="a1", **turn_kwargs):
     _with_llm(orchestrator, scripted)
     history = [ChatMessage(role="user", content="hi")]
-    events = [e async for e in orchestrator.run_turn(agent, tenant, call_id, "s1", history, local_tools=local_tools)]
+    events = [e async for e in orchestrator.run_turn(
+        agent, tenant, call_id, "s1", history, local_tools=local_tools, **turn_kwargs)]
     return history, events
 
 
@@ -800,6 +801,28 @@ async def test_a_lookup_that_found_nothing_does_not_taint_the_turn():
     ], local_tools=_knowledge_tools(knowledge))
 
     assert _envelopes(history)[1]["status"] == "ok"
+
+
+async def test_a_turn_that_starts_tainted_holds_a_write_with_no_search_having_run():
+    """Pre-retrieved passages reach the model with no search_knowledge call to taint the turn."""
+    executor = _Executor()
+
+    history, _ = await _turn(_taint_orchestrator(executor), [
+        _call(1, api_name="cancel_booking"), [TokenEvent(text="Shall I cancel it?")],
+    ], pre_tainted=True)
+
+    _assert_sayable(_envelopes(history)[0], "error", "needs_caller_confirmation")
+    assert executor.calls == []
+
+
+async def test_a_turn_that_starts_clean_is_untouched_and_the_next_turn_does_not_inherit_a_pre_taint():
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor)
+    await _turn(orchestrator, [_call(1, api_name="cancel_booking"), [TokenEvent(text="Sure?")]], pre_tainted=True)
+
+    history, _ = await _turn(orchestrator, [_call(1, api_name="cancel_booking"), [TokenEvent(text="Done.")]])
+
+    assert _envelopes(history)[0]["status"] == "ok" and len(executor.calls) == 1   # a new caller utterance confirms
 
 
 async def test_the_taint_block_can_be_switched_off_by_env(monkeypatch):
