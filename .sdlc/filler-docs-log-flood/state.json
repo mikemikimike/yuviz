@@ -2,10 +2,11 @@
   "slug": "filler-docs-log-flood",
   "base": "92aa06aeb2bf16567ef8f09b5c7fd7e4262a37b7",
   "stage": "ship",
-  "status": "gate_ship",
+  "status": "shipped",
   "started_at": "Sun Oct 25 06:42:07 UTC 2026",
   "gates": {
-    "prd": "approved"
+    "prd": "approved",
+    "ship": "approved"
   },
   "stages": {
     "prd": {
@@ -145,22 +146,22 @@
     {
       "stage": "prd",
       "severity": "minor",
-      "finding": ".sdlc/filler-docs-log-flood/01-prd.md: Acceptance criteria 3/4 — Scope says the remaining missing-workflow message must be INFO or lower, but no criterion checks that: AC3 only forbids ERROR and above, so a WARNING-level log would pass every criterion; fix by adding to AC4 that the record's level is at most INFO."
+      "finding": ".sdlc/filler-docs-log-flood/01-prd.md: Acceptance criteria 3/4 \u2014 Scope says the remaining missing-workflow message must be INFO or lower, but no criterion checks that: AC3 only forbids ERROR and above, so a WARNING-level log would pass every criterion; fix by adding to AC4 that the record's level is at most INFO."
     },
     {
       "stage": "plan",
       "severity": "minor",
-      "finding": ".sdlc/filler-docs-log-flood/03-tasks.md:9 (T4, Test plan 3) — If the RuntimeError sub-case reuses the broken-JSON sub-case's RuntimeConfig, it gets the fallback that sub-case cached (services/conversation/workflow/runner.py:274-276, 294-295), never reaches parse_graph and emits no exc_info record; fix by giving it a distinct agent id/slug or clearing _GRAPH_CACHE between the two sub-cases."
+      "finding": ".sdlc/filler-docs-log-flood/03-tasks.md:9 (T4, Test plan 3) \u2014 If the RuntimeError sub-case reuses the broken-JSON sub-case's RuntimeConfig, it gets the fallback that sub-case cached (services/conversation/workflow/runner.py:274-276, 294-295), never reaches parse_graph and emits no exc_info record; fix by giving it a distinct agent id/slug or clearing _GRAPH_CACHE between the two sub-cases."
     },
     {
       "stage": "review:backend",
       "severity": "minor",
-      "finding": "docs/design/agent-creation-ux-issues.md:1 — This branch also carries files the design never mentions: a 148-line admin-ui UX audit, the untracked CLAUDE.md, and bookkeeping edits for the earlier dynamic-first-turn-filler run (08-run-report.md, state.json, 05-review-postmerge.md). A blanket `git add` would ship them in this PR, so commit only runner.py, the test file, docs/voice-latency.md and .sdlc/filler-docs-log-flood/."
+      "finding": "docs/design/agent-creation-ux-issues.md:1 \u2014 This branch also carries files the design never mentions: a 148-line admin-ui UX audit, the untracked CLAUDE.md, and bookkeeping edits for the earlier dynamic-first-turn-filler run (08-run-report.md, state.json, 05-review-postmerge.md). A blanket `git add` would ship them in this PR, so commit only runner.py, the test file, docs/voice-latency.md and .sdlc/filler-docs-log-flood/."
     },
     {
       "stage": "test",
       "severity": "medium",
-      "finding": "uncovered — AC10 full conversation suite not run by tester"
+      "finding": "uncovered \u2014 AC10 full conversation suite not run by tester"
     }
   ],
   "retro_sources": [],
@@ -179,5 +180,6 @@
     "changed_lines": 167,
     "backend": 9,
     "admin_ui": 0
-  }
+  },
+  "pr": "https://github.com/yuviz-ai/yuviz/pull/212"
 }
