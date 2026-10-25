@@ -1634,7 +1634,7 @@ class PipelineConversationHandler:
                         transition_text += f"{speech} "
                         # Yield text once so full_response/history/transcript record it.
                         first = True
-                        async for chunk in self._synthesize_sentence_stream(speech, session_id, in_reply=True):
+                        async for chunk in self._synthesize_sentence_stream(speech, session_id):
                             yield speech if first else "", chunk, end_call
                             first = False
                     continue
@@ -1712,7 +1712,7 @@ class PipelineConversationHandler:
             if not cancel_event.is_set():
                 spoke = True
                 fallback_text = t("fallback_llm_error", self._spoken_language(session_id))
-                async for chunk in self._synthesize_sentence_stream(fallback_text, session_id, in_reply=True):
+                async for chunk in self._synthesize_sentence_stream(fallback_text, session_id):
                     yield fallback_text, chunk, False
                     fallback_text = ""  # yielded once — see full_response.append(chunk) at the call site
 
@@ -1750,7 +1750,7 @@ class PipelineConversationHandler:
             # Other callers (transfer recovery) keep their own wording.
             fallback_key = "end_call_check" if end_call_rejected and silent_turn_text == "fallback_llm_error" else silent_turn_text
             fallback_text = t(fallback_key, self._spoken_language(session_id))
-            async for chunk in self._synthesize_sentence_stream(fallback_text, session_id, in_reply=True):
+            async for chunk in self._synthesize_sentence_stream(fallback_text, session_id):
                 yield fallback_text, chunk, False
                 fallback_text = ""
 
