@@ -76,6 +76,18 @@ class TestTenantEndpoints:
         assert resp.json()["vad_hold_ms"] == 700
         assert resp.json()["config_version"] == test_tenant["config_version"] + 1
 
+    async def test_superadmin_sets_knowledge_limits_and_an_admin_cannot(self, client, admin_client, test_tenant):
+        limits = {"knowledge_max_documents": 25, "knowledge_max_storage_bytes": 5_000_000}
+        refused = await admin_client.patch(f"/tenants/{test_tenant['id']}", json=limits)
+        resp = await client.patch(f"/tenants/{test_tenant['id']}", json=limits)
+        assert refused.status_code == 403
+        assert resp.status_code == 200
+        assert {k: resp.json()[k] for k in limits} == limits
+
+    async def test_a_knowledge_limit_below_one_is_422(self, client, test_tenant):
+        resp = await client.patch(f"/tenants/{test_tenant['id']}", json={"knowledge_max_documents": 0})
+        assert resp.status_code == 422
+
     async def test_update_tenant_with_empty_body_is_400(self, client, test_tenant):
         resp = await client.patch(f"/tenants/{test_tenant['id']}", json={})
         assert resp.status_code == 400

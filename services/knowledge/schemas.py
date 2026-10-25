@@ -47,9 +47,10 @@ class RetrieveRequest(BaseModel):
 
 
 class RetrievalPolicyUpdate(BaseModel):
-    top_k: int | None = None
-    max_tokens: int | None = None
-    minimum_score: float | None = None
+    # Same bounds as the agent page's inputs, so a value the UI refuses is refused here too.
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    max_tokens: int | None = Field(default=None, ge=100, le=100_000)
+    minimum_score: float | None = Field(default=None, ge=0.0, le=1.0)
     rerank: bool | None = None
     hybrid_search: bool | None = None
     include_citations: bool | None = None

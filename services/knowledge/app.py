@@ -71,6 +71,7 @@ app.add_middleware(
 app.include_router(knowledge_bases.tenant_scoped_router)
 app.include_router(knowledge_bases.router)
 app.include_router(documents.router)
+app.include_router(documents.usage_router)
 app.include_router(agent_kb.router)
 app.include_router(retrieval_policies.router)
 app.include_router(retrieve.router)

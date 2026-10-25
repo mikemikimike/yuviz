@@ -7,7 +7,7 @@ from typing import Any
 
 from libs.tenancy import platform_conn, tenant_conn
 
-from . import audit, db
+from . import audit, db, quotas
 from . import retrieval_plan as plans
 from .storage import StorageProvider
 
@@ -39,9 +39,11 @@ async def list_documents(kb_id: Any) -> list[dict[str, Any]]:
         # Not parent rows (no embedding of their own), and regardless of version: during a re-ingest the document keeps
         # serving its old chunks, so the count stays what is searchable.
         rows = await conn.fetch(
-            f"SELECT d.*, {RETRYABLE_SQL} AS retryable, "
-            "(SELECT COUNT(*) FROM kb_chunks c WHERE c.document_id = d.id AND NOT c.is_parent) AS chunk_count "
-            "FROM kb_documents d WHERE d.kb_id = $1 AND d.deleted_at IS NULL ORDER BY d.created_at DESC",
+            f"SELECT d.*, {RETRYABLE_SQL} AS retryable, c.chunk_count, c.token_count "
+            "FROM kb_documents d "
+            "LEFT JOIN LATERAL (SELECT COUNT(*) AS chunk_count, COALESCE(SUM(token_count), 0) AS token_count "
+            "                   FROM kb_chunks WHERE document_id = d.id AND NOT is_parent) c ON true "
+            "WHERE d.kb_id = $1 AND d.deleted_at IS NULL ORDER BY d.created_at DESC",
             kb_id,
         )
     return [dict(row) for row in rows]
@@ -60,9 +62,17 @@ async def upload_document(
     tags: dict[str, Any] | None = None,
     user_id: Any | None = None,
     user_email: str | None = None,
+    replaces: Any | None = None,
 ) -> dict[str, Any]:
+    """`replaces` names the live document this upload will replace: the quota counts the net change and the new
+    document is linked to the same agents. Raises LookupError for an unknown one, quotas.QuotaExceeded over a limit."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
+        if replaces is not None and await conn.fetchval(
+            "SELECT 1 FROM kb_documents WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL", replaces, tenant_id,
+        ) is None:
+            raise LookupError(f"kb_document {replaces} not found")
+        await quotas.check_upload(conn, tenant_id, len(content), replaces=replaces)
         row = await conn.fetchrow(
             "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type, language, tags, byte_size) "
             "VALUES ($1, $2, $3, '', $4, $5, $6::jsonb, $7) RETURNING *",
@@ -81,11 +91,20 @@ async def upload_document(
             "INSERT INTO kb_ingestion_jobs (document_id, kb_id) VALUES ($1, $2) RETURNING *",
             document["id"], kb_id,
         )
+        relinked = 0
+        if replaces is not None:
+            relinked = int((await conn.execute(
+                "INSERT INTO agent_documents (agent_id, document_id) "
+                "SELECT agent_id, $2 FROM agent_documents WHERE document_id = $1 ON CONFLICT DO NOTHING",
+                replaces, document["id"],
+            )).split()[-1])
 
         await audit.write_audit(
             conn, entity_type="kb_document", entity_id=document["id"], action="created",
             user_id=user_id, user_email=user_email, new_value=document,
         )
+    if relinked:
+        plans.invalidate_tenant_id(tenant_id)  # those agents' plans must pick up the new document
     return {**document, "ingestion_job_id": job_row["id"]}
 
 
@@ -175,6 +194,88 @@ async def retry_document(
             user_id=user_id, user_email=user_email, new_value=document,
         )
     return {**document, "ingestion_job_id": job_row["id"]}
+
+
+async def reindex_document(
+    document_id: Any,
+    *,
+    tenant_id: Any,
+    platform_scoped: bool = False,
+    stamp_tenant: Any | None = None,
+    user_id: Any | None = None,
+    user_email: str | None = None,
+) -> dict[str, Any] | None:
+    """Re-queue a ready (or failed) document's stored file at normal priority. A ready one keeps serving its old
+    chunks until the worker swaps in the new ones. None when it is in neither state or already has a job queued."""
+    pool = await db.get_pool()
+    conn_cm = (
+        platform_conn(pool, reason="document-admin-by-id", stamp_tenant=stamp_tenant)
+        if platform_scoped else tenant_conn(pool)
+    )
+    async with conn_cm as conn:
+        # Two clicks at once must not queue two jobs: the NOT EXISTS below alone cannot see an uncommitted one.
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('kb-reindex:' || $1::text, 0))", str(document_id))
+        row = await conn.fetchrow(
+            "UPDATE kb_documents SET status = CASE WHEN status = 'failed' THEN 'pending' ELSE status END, "
+            "error = CASE WHEN status = 'failed' THEN NULL ELSE error END, version = version + 1, updated_at = now() "
+            "WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL "
+            "AND status IN ('ready', 'ready_degraded', 'failed') "
+            "AND NOT EXISTS (SELECT 1 FROM kb_ingestion_jobs j WHERE j.document_id = kb_documents.id "
+            "                AND j.status IN ('pending', 'running')) RETURNING *",
+            document_id, tenant_id,
+        )
+        if row is None:
+            return None
+        document = dict(row)
+        job_row = await conn.fetchrow(
+            "INSERT INTO kb_ingestion_jobs (document_id, kb_id) VALUES ($1, $2) RETURNING *",
+            document["id"], document["kb_id"],
+        )
+        await audit.write_audit(
+            conn, entity_type="kb_document", entity_id=document_id, action="updated",
+            user_id=user_id, user_email=user_email, new_value=document,
+        )
+    return {**document, "ingestion_job_id": job_row["id"]}
+
+
+TEXT_MAX_CHARS = 200_000
+_MAX_OVERLAP_WORDS = 400
+
+
+def _join_windows(chunks: list[str]) -> str:
+    """Join fixed-window chunks, dropping the words each one repeats from the end of the one before it."""
+    words: list[str] = []
+    for chunk in chunks:
+        new = chunk.split()
+        for k in range(min(len(words), len(new), _MAX_OVERLAP_WORDS), 0, -1):
+            if words[-k:] == new[:k]:
+                new = new[k:]
+                break
+        words.extend(new)
+    return " ".join(words)
+
+
+async def get_document_text(document_id: Any, *, platform_scoped: bool = False) -> dict[str, Any]:
+    """The text the agent searches, rebuilt from the indexed chunks: whole sections in order where the chunker kept
+    them (parents, chunk_index -1 - ordinal), otherwise the windows with their overlap removed."""
+    pool = await db.get_pool()
+    conn_cm = platform_conn(pool, reason="document-by-id") if platform_scoped else tenant_conn(pool)
+    async with conn_cm as conn:
+        sections = await conn.fetch(
+            "SELECT content FROM kb_chunks WHERE document_id = $1 AND is_parent ORDER BY chunk_index DESC", document_id,
+        )
+        if sections:
+            text, source = "\n\n".join(r["content"] for r in sections), "sections"
+        else:
+            windows = await conn.fetch(
+                "SELECT content FROM kb_chunks WHERE document_id = $1 AND NOT is_parent ORDER BY chunk_index",
+                document_id,
+            )
+            text, source = _join_windows([r["content"] for r in windows]), "chunks"
+    return {
+        "document_id": str(document_id), "text": text[:TEXT_MAX_CHARS], "source": source,
+        "truncated": len(text) > TEXT_MAX_CHARS,
+    }
 
 
 async def soft_delete_document(

@@ -19,6 +19,7 @@ _UPDATABLE_FIELDS = {
     "transfer_timeout_ms",
     "default_stt_config_id", "default_llm_config_id", "default_tts_config_id",
     "max_concurrent_calls", "number_purchase_enabled",
+    "knowledge_max_documents", "knowledge_max_storage_bytes",
 }
 
 

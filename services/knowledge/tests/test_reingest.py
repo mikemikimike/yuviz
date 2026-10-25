@@ -144,6 +144,7 @@ async def test_a_fresh_upload_is_claimed_before_the_whole_tenant_wide_reingest(t
     await _drain_pending(pool)
     kb = await _make_kb(tenant, "fair-kb")
     await _bulk_documents(pool, tenant, kb, 200)
+    await pool.execute("UPDATE tenants SET knowledge_max_documents = 1000 WHERE id = $1", tenant["id"])  # past the default
     set_caller_tenant(None)
     assert len(await requeue_documents(pool, tenant["id"], batch=0)) == 200
     fresh = await _upload(tenant, kb, "fresh", content=_DOC, content_type="text/markdown")   # queued AFTER the 200

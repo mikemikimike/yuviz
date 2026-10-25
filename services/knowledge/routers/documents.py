@@ -4,15 +4,19 @@ import asyncio
 import json
 import os
 
+import asyncpg
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from libs.tenancy import set_target_tenant
 from services.config.auth import CurrentUser
-from services.config.deps import assert_tenant_access, get_current_user, is_platform_scoped, require_role
+from services.config.deps import (
+    assert_tenant_access, bind_path_tenant, get_current_user, is_platform_scoped, require_path_tenant_access, require_role,
+)
 
 from .. import documents as documents_service
 from .. import health as health_service
 from .. import knowledge_bases as kb_service
+from .. import quotas
 from ..parsers import (
     BINARY_DISABLED_REASON, BINARY_TYPES, SUPPORTED_CONTENT_TYPES, binary_parsers_enabled, detect_content_type, unsupported_reason,
 )
@@ -20,6 +24,11 @@ from ..schemas import DocumentUpdate
 from ..storage import LocalStorageProvider
 
 router = APIRouter(tags=["kb_documents"])
+usage_router = APIRouter(
+    prefix="/tenants/{tenant_id}/knowledge-usage",
+    tags=["kb_documents"],
+    dependencies=[Depends(bind_path_tenant), Depends(require_path_tenant_access)],
+)
 _storage = LocalStorageProvider()
 
 MAX_UPLOAD_BYTES = int(os.environ.get("KNOWLEDGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
@@ -81,6 +90,7 @@ async def upload_document(
     title: str = Form(...),
     language: str | None = Form(default=None),
     tags: str = Form(default="{}"),
+    replaces: str | None = Form(default=None),
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
     kb = await _authorize_kb(kb_id, current_user)
@@ -97,19 +107,27 @@ async def upload_document(
         raise HTTPException(status_code=415, detail=unsupported_reason(content_type))
     if content_type in BINARY_TYPES and not binary_parsers_enabled():
         raise HTTPException(status_code=415, detail=BINARY_DISABLED_REASON)
-    return await documents_service.upload_document(
-        tenant_id=kb["tenant_id"],
-        kb_id=kb_id,
-        title=title,
-        filename=file.filename or "document",
-        content_type=content_type,
-        content=content,
-        storage=_storage,
-        language=language,
-        tags=json.loads(tags),
-        user_id=current_user.id,
-        user_email=current_user.email,
-    )
+    try:
+        return await documents_service.upload_document(
+            tenant_id=kb["tenant_id"],
+            kb_id=kb_id,
+            title=title,
+            filename=file.filename or "document",
+            content_type=content_type,
+            content=content,
+            storage=_storage,
+            language=language,
+            tags=json.loads(tags),
+            user_id=current_user.id,
+            user_email=current_user.email,
+            replaces=replaces,
+        )
+    except (LookupError, asyncpg.DataError):
+        if replaces is None:
+            raise
+        raise HTTPException(status_code=404, detail=f"kb_document {replaces!r} not found")
+    except quotas.QuotaExceeded as exc:
+        raise HTTPException(status_code=413 if exc.kind == "storage" else 409, detail=str(exc))
 
 
 @router.get("/documents/{document_id}")
@@ -159,6 +177,39 @@ async def retry_document(
     if retried is None:
         raise HTTPException(status_code=409, detail="only a failed document (or one whose re-index failed) can be retried")
     return retried
+
+
+@router.post("/documents/{document_id}/reindex", status_code=202)
+async def reindex_document(
+    document_id: str, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
+):
+    document = await _authorize_document(document_id, current_user)
+    platform_scoped = is_platform_scoped(current_user)
+    queued = await documents_service.reindex_document(
+        document_id,
+        tenant_id=document["tenant_id"],
+        platform_scoped=platform_scoped,
+        stamp_tenant=str(document["tenant_id"]) if platform_scoped else None,
+        user_id=current_user.id, user_email=current_user.email,
+    )
+    if queued is None:
+        raise HTTPException(status_code=409, detail="only a ready or failed document with no job running can be reindexed")
+    return queued
+
+
+@router.get("/documents/{document_id}/text")
+async def get_document_text(document_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    await _authorize_document(document_id, current_user)
+    return await documents_service.get_document_text(document_id, platform_scoped=is_platform_scoped(current_user))
+
+
+@usage_router.get("")
+async def get_knowledge_usage(tenant_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    try:
+        usage = await quotas.tenant_usage(tenant_id)
+    except (LookupError, asyncpg.DataError):
+        raise HTTPException(status_code=404, detail=f"tenant {tenant_id!r} not found")
+    return {**usage, "max_upload_bytes": MAX_UPLOAD_BYTES}
 
 
 @router.delete("/documents/{document_id}", status_code=204)

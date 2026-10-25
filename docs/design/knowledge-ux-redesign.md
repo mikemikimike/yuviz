@@ -90,8 +90,8 @@ Concurrency: searches are read-only and the plan is per agent, so agents sharing
 |---|---|---|
 | `GET /agents/{agent_id}/documents` | tenant members | Linked documents with title, type, size, tokens, status |
 | `PUT /agents/{agent_id}/documents` | superadmin, admin | Body `{document_ids: [...]}` replaces the whole set in one transaction. Unknown or foreign IDs get the same 404 as a missing agent. Invalidates the plan. Audited. |
-| `POST /documents/{id}/reindex` | superadmin, admin | Reuses the single-document path of `reingest.py`. 202 with the queued document. 409 if a job is pending or running, or the document is not ready or failed. Audited. |
-| `GET /documents/{id}/text` | tenant members | Sections of the current version in `chunk_index` order: parent chunks where they exist, otherwise children. Capped at 200,000 characters with `truncated: true`. |
+| `POST /documents/{id}/reindex` | superadmin, admin | Works like retry, not like `reingest.py` (which only queues tenant-wide batches at background priority): bumps the version and queues a normal-priority job under a per-document advisory lock, so two clicks queue one job. A ready document keeps serving its old chunks until the worker swaps. 202 with the queued document; 409 if a job is pending or running or the document is not ready or failed. Audited. |
+| `GET /documents/{id}/text` | tenant members | The text the agent searches, rebuilt from the indexed chunks (not a re-parse of the file): parent sections in order where they exist (`source: "sections"`), otherwise the fixed windows with each one's overlap with the previous removed (`source: "chunks"`). Capped at 200,000 characters with `truncated: true`. |
 | `GET /tenants/{tenant_id}/knowledge-usage` | tenant members | `{documents, max_documents, storage_bytes, max_storage_bytes, max_upload_bytes}` |
 | `GET /knowledge-bases/{kb_id}/documents` (existing) | unchanged | Gains `token_count`: the sum of child chunk tokens for the current version |
 
@@ -102,7 +102,7 @@ Concurrency: searches are read-only and the plan is per agent, so agents sharing
 - New nullable tenant columns `knowledge_max_documents INT` and `knowledge_max_storage_bytes BIGINT`, with CHECK constraints for positive values. NULL means the platform default from `KNOWLEDGE_DEFAULT_MAX_DOCUMENTS` and `KNOWLEDGE_DEFAULT_MAX_STORAGE_BYTES`.
 - Only a superadmin can change them, through the config service tenant route, as with `number_purchase_enabled`.
 - Enforcement is in the upload transaction, under `pg_advisory_xact_lock` keyed on the tenant, so two parallel uploads cannot both pass the last slot. Errors: 409 "file limit reached (N of N)" and 413 "storage full". Per-file size stays `KNOWLEDGE_MAX_UPLOAD_BYTES`.
-- Replace must not count the file twice. The check counts the net change when the request names the document being replaced.
+- Replace must not count the file twice, and must not drop the document from agents. The upload route takes an optional `replaces` document id: the check leaves that document out, and the new document is linked to the same agents in the upload transaction. The admin UI's replace flow (upload, wait until ready, delete the original) passes it.
 - Documents uploaded before `byte_size` existed count as 0 bytes. A one-off backfill reads their stored size.
 
 ### 5. Prompt mode
@@ -152,7 +152,7 @@ The UI keeps its input bounds (`top_k` 1 to 50, `max_tokens` at least 100). The 
 Phases 1 to 3 ship as one PR: after phase 1 the old folder-link routes return 410, and five admin screens still call them until phase 3 (agents list, new-agent wizard, agent Knowledge panel, workflow editor, Knowledge pages).
 
 1. Schema, migration and retrieval switch, with the link routes and tests. Done on this branch.
-2. Reindex route, text route, token totals and quotas with the usage route.
+2. Reindex route, text route, token totals and quotas with the usage route. Done on this branch.
 3. Admin UI: Knowledge page and agent tab. Prompt mode removed from the UI.
 4. Follow-up release: drop `agent_knowledge_bases`.
 
