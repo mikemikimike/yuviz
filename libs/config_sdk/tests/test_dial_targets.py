@@ -235,3 +235,37 @@ def test_allowlisted_sip_host_needs_no_opt_in(monkeypatch):
 @pytest.mark.parametrize("value", ["sip:a@b@c", "call me", "sip:x@127.0.0.1", "788"])
 def test_policy_refuses_what_is_not_a_transfer_destination(value):
     assert transfer_policy_problem(value, OPEN) is not None
+
+
+@pytest.mark.parametrize("value", [
+    "sip:+1-876-555-1234@pbx.acme.example", "sip:+1.876.555.1234@pbx.acme.example",
+    "sip:1-876-555-1234@pbx.acme.example", "sip:+44-7911-123456@pbx.acme.example",
+    "sip:+8-8-2-1-2-3-4-5-6-7-8-9@pbx.acme.example", "sip:00-1-876-555-1234@pbx.acme.example",
+])
+def test_separators_in_a_sip_user_part_do_not_skip_the_number_policy(monkeypatch, value):
+    monkeypatch.setenv("VOICEAI_TRANSFER_SIP_HOSTS", "pbx.acme.example")
+    assert transfer_policy_problem(value, DEFAULT) is not None
+
+
+@pytest.mark.parametrize("value", [
+    "sip:+1-900-555-1234@carrier.example", "sip:1.900.555.1234@carrier.example",
+    "sip:+882-123-456-789@carrier.example", "sip:011-882-123456@carrier.example",
+])
+def test_separators_in_a_sip_user_part_do_not_hide_a_premium_number(value):
+    assert transfer_policy_problem(value, OPEN) is not None
+
+
+def test_separated_home_numbers_and_extensions_still_pass(monkeypatch):
+    monkeypatch.setenv("VOICEAI_TRANSFER_SIP_HOSTS", "pbx.acme.example")
+    assert transfer_policy_problem("sip:+1-415-555-0100@pbx.acme.example", DEFAULT) is None
+    assert transfer_policy_problem("sip:desk-1@pbx.acme.example", DEFAULT) is None
+    assert transfer_policy_problem("sip:front.desk@pbx.acme.example", DEFAULT) is None
+
+
+@pytest.mark.parametrize("value", [
+    "sip:+1 876 555 1234@pbx.acme.example", "sip:+1(876)5551234@pbx.acme.example",
+    "sip:+1%20876%205551234@pbx.acme.example",
+])
+def test_separators_the_gateway_refuses_are_refused_at_write_time(value):
+    assert not is_transfer_destination(value)
+    assert transfer_policy_problem(value, OPEN) is not None

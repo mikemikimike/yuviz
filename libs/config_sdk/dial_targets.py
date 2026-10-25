@@ -170,7 +170,10 @@ def transfer_policy_problem(value: str, policy: TransferPolicy) -> str | None:
     if value.lower().startswith(("sip:", "sips:")):
         user = re.split(r"[:;]", value.split(":", 1)[1].split("@", 1)[0], maxsplit=1)[0]
         # The user part is dialled onward whatever the host, so an allowlisted host
-        # does not exempt it.
+        # does not exempt it. A carrier ignores the visual separators the gateway
+        # allowlist lets through (- and .), so the policy reads the number without them.
+        # Spaces and parentheses never get here: the shape check refuses them.
+        user = re.sub(r"[-.]", "", user)
         if is_dial_number(user):
             problem = _number_problem(user, policy)
             if problem is not None:
