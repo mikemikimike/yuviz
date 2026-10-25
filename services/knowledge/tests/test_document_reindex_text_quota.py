@@ -101,19 +101,29 @@ async def test_reindex_is_admin_only_and_a_foreign_document_is_404(
 
 # ── extracted text ──────────────────────────────────────────────────────────────
 
-async def test_text_returns_sections_in_order(client, pool, test_tenant, test_viewer):
+async def test_text_returns_sections_and_parentless_passages_in_order(client, pool, test_tenant, test_viewer):
     kb = await _kb(test_tenant)
-    doc = await add_document(pool, test_tenant, kb, "Handbook", ["child"])
-    for ordinal, section in enumerate(["Intro section.", "Refunds section.", "Contact section."]):
-        await pool.execute(
-            "INSERT INTO kb_chunks (document_id, kb_id, tenant_id, chunk_index, content, is_parent) "
-            "VALUES ($1, $2, $3, $4, $5, true)", doc["id"], kb["id"], test_tenant["id"], -1 - ordinal, section,
+    doc = await add_document(pool, test_tenant, kb, "Handbook", [])
+
+    async def chunk(index, content, *, is_parent=False, parent_id=None):
+        return await pool.fetchval(
+            "INSERT INTO kb_chunks (document_id, kb_id, tenant_id, chunk_index, content, is_parent, parent_id) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+            doc["id"], kb["id"], test_tenant["id"], index, content, is_parent, parent_id,
         )
+
+    intro = await chunk(-1, "Intro one. Intro two.", is_parent=True)
+    refunds = await chunk(-2, "Refunds one. Refunds two.", is_parent=True)
+    await chunk(0, "Intro one.", parent_id=intro)
+    await chunk(1, "Intro two.", parent_id=intro)
+    await chunk(2, "Hours: open 9 to 5.")
+    await chunk(3, "Refunds one.", parent_id=refunds)
+    await chunk(4, "Refunds two.", parent_id=refunds)
 
     body = (await client.get(f"/documents/{doc['id']}/text", headers=_auth(test_viewer))).json()
 
     assert body["source"] == "sections" and body["truncated"] is False
-    assert body["text"] == "Intro section.\n\nRefunds section.\n\nContact section."
+    assert body["text"] == "Intro one. Intro two.\n\nHours: open 9 to 5.\n\nRefunds one. Refunds two."
 
 
 async def test_text_joins_windows_without_repeating_their_overlap(client, pool, test_tenant, test_viewer):

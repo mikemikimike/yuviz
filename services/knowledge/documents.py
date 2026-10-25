@@ -7,7 +7,7 @@ from typing import Any
 
 from libs.tenancy import platform_conn, tenant_conn
 
-from . import audit, db, quotas
+from . import agent_kb, audit, db, quotas
 from . import retrieval_plan as plans
 from .storage import StorageProvider
 
@@ -20,6 +20,8 @@ RETRYABLE_SQL = (
     "COALESCE((d.status = 'failed' OR (d.status IN ('ready', 'ready_degraded') AND d.error LIKE 're-index failed:%')) "
     "AND NOT EXISTS (SELECT 1 FROM kb_ingestion_jobs j WHERE j.document_id = d.id AND j.status IN ('pending', 'running')), false)"
 )
+# True while an upload, retry or reindex job is queued or running; a reindexed document stays 'ready' meanwhile.
+JOB_ACTIVE_SQL = "EXISTS (SELECT 1 FROM kb_ingestion_jobs j WHERE j.document_id = d.id AND j.status IN ('pending', 'running'))"
 
 
 async def get_document(document_id: Any, *, platform_scoped: bool = False) -> dict[str, Any] | None:
@@ -27,7 +29,7 @@ async def get_document(document_id: Any, *, platform_scoped: bool = False) -> di
     conn_cm = platform_conn(pool, reason="document-by-id") if platform_scoped else tenant_conn(pool)
     async with conn_cm as conn:
         row = await conn.fetchrow(
-            f"SELECT d.*, {RETRYABLE_SQL} AS retryable FROM kb_documents d WHERE d.id = $1 AND d.deleted_at IS NULL",
+            f"SELECT d.*, {RETRYABLE_SQL} AS retryable, {JOB_ACTIVE_SQL} AS job_active FROM kb_documents d WHERE d.id = $1 AND d.deleted_at IS NULL",
             document_id,
         )
     return dict(row) if row is not None else None
@@ -39,7 +41,7 @@ async def list_documents(kb_id: Any) -> list[dict[str, Any]]:
         # Not parent rows (no embedding of their own), and regardless of version: during a re-ingest the document keeps
         # serving its old chunks, so the count stays what is searchable.
         rows = await conn.fetch(
-            f"SELECT d.*, {RETRYABLE_SQL} AS retryable, "
+            f"SELECT d.*, {RETRYABLE_SQL} AS retryable, {JOB_ACTIVE_SQL} AS job_active, "
             "       COALESCE(c.chunk_count, 0) AS chunk_count, COALESCE(c.token_count, 0) AS token_count "
             "FROM kb_documents d "
             "LEFT JOIN LATERAL (SELECT COUNT(*) AS chunk_count, COALESCE(SUM(token_count), 0) AS token_count "
@@ -275,12 +277,12 @@ async def get_document_text(document_id: Any, *, platform_scoped: bool = False) 
         text_parts: list[str] = []
         seen_parents: set = set()
         for child in children:
-            if child.get("parent_id") and child["parent_id"] not in seen_parents:
-                parent = chunk_map.get(child["parent_id"])
-                if parent:
-                    text_parts.append(parent["content"])
-                    seen_parents.add(child["parent_id"])
-            text_parts.append(child["content"])
+            parent = chunk_map.get(child["parent_id"]) if child["parent_id"] else None
+            if parent is None:
+                text_parts.append(child["content"])  # a short section the chunker gave no parent
+            elif parent["id"] not in seen_parents:
+                text_parts.append(parent["content"])  # the whole section, which already holds this child's text
+                seen_parents.add(parent["id"])
         text, source = "\n\n".join(text_parts), "sections"
     else:
         windows = sorted([c for c in chunks if not c["is_parent"]], key=lambda c: c["chunk_index"])
@@ -319,7 +321,6 @@ async def soft_delete_document(
             conn, entity_type="kb_document", entity_id=document_id, action="deleted",
             user_id=user_id, user_email=user_email, old_value=old,
         )
-    plans.invalidate_tenant_id(old["tenant_id"])
-    from . import agent_kb
+    plans.invalidate_tenant_id(old["tenant_id"])  # a deleted prompt-mode document must stop being served now
     for agent_id in agent_ids:
         await agent_kb._refresh_flag(agent_id)

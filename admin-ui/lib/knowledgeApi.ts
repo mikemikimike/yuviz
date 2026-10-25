@@ -93,6 +93,8 @@ export interface KbDocument {
   token_count: number;
   // Whether Retry will work now: failed (or a failed re-index) and no job already pending or running.
   retryable?: boolean;
+  // An upload, retry or reindex job is queued or running.
+  job_active?: boolean;
   // null for documents uploaded before sizes were recorded.
   byte_size: number | null;
   created_at: string;

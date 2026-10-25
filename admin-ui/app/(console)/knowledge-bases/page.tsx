@@ -63,6 +63,7 @@ function formatDate(iso: string): string {
 }
 
 const preparing = (d: KbDocument) => d.status === "pending" || d.status === "processing";
+const reindexing = (d: KbDocument) => !preparing(d) && !!d.job_active;
 
 export default function KnowledgeBasesPage() {
   const { tenant, allTenants, isAllTenants, loading: tenantLoading, error: accountError } = useActiveTenant();
@@ -136,7 +137,7 @@ export default function KnowledgeBasesPage() {
   }, [scope, tenantLoading]);
 
   // Only files still being prepared change on their own; re-read while any are.
-  const anyPreparing = rows.some(preparing);
+  const anyPreparing = rows.some((r) => preparing(r) || reindexing(r));
   useEffect(() => {
     if (!anyPreparing) return;
     const timer = setTimeout(() => load(true), POLL_MS);
@@ -150,14 +151,9 @@ export default function KnowledgeBasesPage() {
     setDetailId(id);
     setDetailText(null);
     setDetailError(null);
-    const row = rows.find((r) => r.id === id);
-    if (row && (row.status === "ready" || row.status === "ready_degraded")) {
-      getDocumentText(id)
-        .then((t) => { if (current()) setDetailText(t); })
-        .catch((e) => { if (current()) setDetailError(e instanceof ApiError ? e.detail : String(e)); });
-    }
   };
 
+  // Loads the text on open, once a preparing file turns ready, and after a reindex swaps in a new version.
   useEffect(() => {
     if (!detail || !detail.id) return;
     if (detail.status !== "ready" && detail.status !== "ready_degraded") return;
@@ -165,7 +161,7 @@ export default function KnowledgeBasesPage() {
       .then((t) => { if (current()) setDetailText(t); })
       .catch((e) => { if (current()) setDetailError(e instanceof ApiError ? e.detail : String(e)); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail?.id, detail?.status, detail?.version]);
+  }, [detail?.id, detail?.status, detail?.job_active]);
 
   // ?add=1 (the top bar's "+ Add file") and ?manage=<id> deep links.
   useEffect(() => {
@@ -230,7 +226,6 @@ export default function KnowledgeBasesPage() {
 
   const reindex = (row: DocRow) => run(row, async () => {
     await reindexDocument(row.id);
-    if (detailId === row.id) setDetailText(null);
   });
 
   const pickReplacement = (row: DocRow) => {
@@ -283,23 +278,33 @@ export default function KnowledgeBasesPage() {
       <div className="knowledge-heading">
         <div>
           <h1>Knowledge</h1>
-          <p>Files your agents answer from. Pick which ones each agent uses on its Knowledge tab.</p>
+          <p>Upload documents, then attach them to an agent under Knowledge.</p>
         </div>
         {usage && (
           <div className="knowledge-usage" aria-label="Knowledge usage">
-            <div>
-              <span className="knowledge-usage-label">Files</span>
-              <span className="knowledge-usage-value">{usage.documents}<small>/{usage.max_documents}</small></span>
+            <div className="knowledge-usage-group">
+              <span className="knowledge-usage-title">File uploads</span>
+              <div className="knowledge-usage-row">
+                <div>
+                  <span className="knowledge-usage-label">Files</span>
+                  <span className="knowledge-usage-value">{usage.documents}<small>/{usage.max_documents}</small></span>
+                </div>
+                <div>
+                  <span className="knowledge-usage-label">Max size</span>
+                  <span className="knowledge-usage-value">{formatBytes(usage.max_upload_bytes)}</span>
+                </div>
+              </div>
             </div>
-            <div>
-              <span className="knowledge-usage-label">Storage</span>
-              <span className="knowledge-usage-value">
-                {formatBytes(usage.storage_bytes)}<small>/{formatBytes(usage.max_storage_bytes)}</small>
-              </span>
-            </div>
-            <div>
-              <span className="knowledge-usage-label">Max file size</span>
-              <span className="knowledge-usage-value">{formatBytes(usage.max_upload_bytes)}</span>
+            <div className="knowledge-usage-group">
+              <span className="knowledge-usage-title">Account storage</span>
+              <div className="knowledge-usage-row">
+                <div>
+                  <span className="knowledge-usage-label">Used</span>
+                  <span className="knowledge-usage-value">
+                    {formatBytes(usage.storage_bytes)}<small>/{formatBytes(usage.max_storage_bytes)}</small>
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -399,7 +404,11 @@ export default function KnowledgeBasesPage() {
                 filtered.map((r) => {
                   const busy = busyId === r.id;
                   return (
-                    <tr key={r.id}>
+                    <tr
+                      key={r.id}
+                      className="knowledge-row"
+                      onClick={(e) => { if (!(e.target as HTMLElement).closest("button, a, input")) openDetail(r.id); }}
+                    >
                       <td data-label="Name">
                         <button type="button" className="knowledge-row-open" onClick={() => openDetail(r.id)}>
                           <FileText size={15} aria-hidden="true" />
@@ -411,18 +420,20 @@ export default function KnowledgeBasesPage() {
                       <td data-label="Size" className="tabular">{formatBytes(r.byte_size)}</td>
                       <td data-label="Tokens" className="tabular">{preparing(r) || r.token_count == null ? "—" : r.token_count.toLocaleString()}</td>
                       <td data-label="Status">
-                        <span className={`badge ${FILE_STATUS[r.status].color}`}>{FILE_STATUS[r.status].label}</span>
+                        {reindexing(r)
+                          ? <span className="badge amber">Reindexing…</span>
+                          : <span className={`badge ${FILE_STATUS[r.status].color}`}>{FILE_STATUS[r.status].label}</span>}
                       </td>
                       <td data-label="Uploaded" className="kb-source-sub">{formatDate(r.created_at)}</td>
                       <td data-label="Actions">
                         {canManage && (
                           <div className="knowledge-row-actions">
                             <button type="button" className="btn btn-ghost btn-sm btn-icon" title="Reindex" aria-label={`Reindex ${r.title}`}
-                              disabled={busy || preparing(r)} onClick={() => reindex(r)}>
+                              disabled={busy || preparing(r) || reindexing(r)} onClick={() => reindex(r)}>
                               <RefreshCw size={14} className={busy ? "knowledge-refreshing" : undefined} />
                             </button>
                             <button type="button" className="btn btn-ghost btn-sm btn-icon" title="Replace file" aria-label={`Replace ${r.title}`}
-                              disabled={busy || preparing(r)} onClick={() => pickReplacement(r)}>
+                              disabled={busy || preparing(r) || reindexing(r)} onClick={() => pickReplacement(r)}>
                               <FileUp size={14} />
                             </button>
                             <button type="button" className="btn btn-ghost btn-sm btn-icon" title="Rename" aria-label={`Rename ${r.title}`}
@@ -465,7 +476,7 @@ export default function KnowledgeBasesPage() {
         footer={detail && canManage ? (
           <button
             className="btn btn-ghost btn-sm"
-            disabled={busyId === detail.id || preparing(detail)}
+            disabled={busyId === detail.id || preparing(detail) || reindexing(detail)}
             onClick={() => reindex(detail)}
           >
             <RefreshCw size={13} /> Reindex
@@ -477,9 +488,14 @@ export default function KnowledgeBasesPage() {
             <div className="knowledge-detail-meta">
               <span>{sourceType(detail)}</span>
               <span>{formatBytes(detail.byte_size)}</span>
-              {!preparing(detail) && <span>{detail.token_count.toLocaleString()} tokens</span>}
-              <span className={`badge ${FILE_STATUS[detail.status].color}`}>{FILE_STATUS[detail.status].label}</span>
+              {!preparing(detail) && detail.token_count != null && <span>{detail.token_count.toLocaleString()} tokens</span>}
+              {reindexing(detail)
+                ? <span className="badge amber">Reindexing…</span>
+                : <span className={`badge ${FILE_STATUS[detail.status].color}`}>{FILE_STATUS[detail.status].label}</span>}
             </div>
+            {reindexing(detail) && (
+              <p className="knowledge-manage-preparing">Reindexing. The agent answers from the text below until it finishes.</p>
+            )}
             {preparing(detail) ? (
               <p className="knowledge-manage-preparing">We’re preparing this file. Its text appears here when it’s ready.</p>
             ) : detail.status === "failed" ? (

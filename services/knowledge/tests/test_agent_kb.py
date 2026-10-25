@@ -57,6 +57,18 @@ async def test_replace_with_an_empty_set_unlinks_everything_and_flips_flag_false
     assert await cache.get_has_enabled_kb(tenant["slug"], agent["slug"]) is False
 
 
+async def test_deleting_the_agents_only_document_flips_the_flag_false(pool, tenant_agent):
+    from services.knowledge import documents as documents_service
+    tenant, agent = tenant_agent
+    kb = await _make_kb(tenant)
+    doc = await _doc(pool, tenant, kb)
+    await agent_kb_service.replace_documents(agent["id"], [str(doc["id"])])
+
+    await documents_service.soft_delete_document(doc["id"])
+
+    assert await cache.get_has_enabled_kb(tenant["slug"], agent["slug"]) is False
+
+
 async def test_replace_keeps_only_the_given_documents(pool, tenant_agent):
     tenant, agent = tenant_agent
     kb = await _make_kb(tenant)

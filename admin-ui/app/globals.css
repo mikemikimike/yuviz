@@ -2048,8 +2048,13 @@ button.topbar-cta { border: 0; font-family: inherit; }
 
 /* Knowledge page: usage tiles, upload area, row actions and the document detail panel. */
 .knowledge-usage { display: flex; gap: 0; border: 1px solid var(--border); border-radius: var(--r); background: var(--surf); }
-.knowledge-usage > div { display: flex; flex-direction: column; gap: 4px; padding: 10px 16px; }
-.knowledge-usage > div + div { border-left: 1px solid var(--border); }
+.knowledge-usage-group { display: flex; flex-direction: column; gap: 6px; padding: 10px 18px; }
+.knowledge-usage-group + .knowledge-usage-group { border-left: 1px solid var(--border); }
+.knowledge-usage-title { font-size: .64rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+.knowledge-usage-row { display: flex; gap: 18px; }
+.knowledge-usage-row > div { display: flex; flex-direction: column; gap: 2px; }
+.knowledge-row { cursor: pointer; }
+.knowledge-row:hover td { background: var(--surf-2); }
 .knowledge-usage-label { font-size: .66rem; letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
 .knowledge-usage-value { font-size: 1.05rem; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
 .knowledge-usage-value small { font-size: .72rem; font-weight: 400; color: var(--text-3); }
@@ -2074,7 +2079,7 @@ button.topbar-cta { border: 0; font-family: inherit; }
 .knowledge-delete-body ul { margin: 0; padding-left: 18px; }
 @media (max-width: 640px) {
   .knowledge-usage { width: 100%; }
-  .knowledge-usage > div { flex: 1; padding: 8px 10px; }
+  .knowledge-usage-group { flex: 1; padding: 8px 10px; }
 }
 .knowledge-card .card-hdr { flex-wrap: wrap; gap: 12px; }
 .knowledge-card .card-title { margin: 0; }
@@ -2130,7 +2135,6 @@ button.topbar-cta { border: 0; font-family: inherit; }
 .knowledge-agent-panel .toggle-switch input:focus-visible + .toggle-slider { outline: 2px solid var(--cyan); outline-offset: 3px; }
 .knowledge-agent-panel { display: flex; flex-direction: column; gap: 16px; }
 .knowledge-agent-panel .card { margin: 0; }
-.knowledge-agent-manage { margin-left: auto; white-space: nowrap; font-size: .76rem; color: var(--cyan); }
 .knowledge-agent-footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding-top: 4px; }
 
 /* Agent document picker: chips for what is linked, a searchable menu for the rest. */
@@ -2140,15 +2144,17 @@ button.topbar-cta { border: 0; font-family: inherit; }
 .kb-chip-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kb-chip-remove { display: inline-flex; border: 0; background: none; padding: 2px; color: var(--text-3); cursor: pointer; border-radius: 4px; }
 .kb-chip-remove:hover, .kb-chip-remove:focus-visible { color: var(--text); background: var(--surf-3); }
-.kb-chip-add { display: inline-flex; align-items: center; gap: 4px; border: 1px dashed var(--border-2); background: none; color: var(--text-2); font: inherit; font-size: .76rem; padding: 5px 10px; border-radius: var(--rs); cursor: pointer; }
-.kb-chip-add:hover, .kb-chip-add:focus-visible { color: var(--cyan); border-color: var(--cyan-border); }
-.kb-chips-done { font-size: .74rem; color: var(--text-3); padding: 0 4px; }
 .kb-picker-menu { position: absolute; top: 100%; left: 0; right: 0; z-index: 20; margin-top: 4px; display: flex; flex-direction: column; gap: 2px; max-height: 280px; overflow-y: auto; padding: 8px; border: 1px solid var(--border-2); border-radius: var(--r); background: var(--surf); box-shadow: 0 8px 24px rgba(0, 0, 0, .12); }
 .kb-picker-menu .form-input { margin-bottom: 4px; }
 .kb-picker-option { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 8px 10px; border: 0; background: none; color: var(--text); font: inherit; font-size: .8rem; text-align: left; border-radius: var(--rs); cursor: pointer; }
 .kb-picker-option:hover, .kb-picker-option:focus-visible { background: var(--surf-2); }
 .kb-picker-empty { padding: 8px 10px; font-size: .76rem; color: var(--text-3); }
-.kb-picker-count { font-size: .74rem; color: var(--text-3); }
+.kb-picker-count { padding: 10px 18px; border-top: 1px solid var(--border); background: var(--surf-2); font-size: .74rem; color: var(--text-3); border-radius: 0 0 var(--r) var(--r); }
+.kb-picker-count strong { color: var(--text); }
+.ed2-optional { font-weight: 400; color: var(--text-3); }
+.kb-picker-hint { font-size: .72rem; color: var(--text-3); }
+.kb-chips { cursor: text; }
+.kb-chips-input { flex: 1; min-width: 120px; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-size: .8rem; padding: 4px; }
 .knowledge-search-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 20px; }
 .knowledge-search-wide { grid-column: 1 / -1; }
 @media (max-width: 640px) { .knowledge-search-settings { grid-template-columns: minmax(0, 1fr); } }

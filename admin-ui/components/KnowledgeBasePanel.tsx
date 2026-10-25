@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Check, Plus, X } from "lucide-react";
+import { Check, X } from "lucide-react";
 import { ApiError } from "@/lib/api";
 import {
   getRetrievalPolicy,
@@ -147,10 +147,9 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
           <div>
             <div className="card-title">Documents</div>
             <div className="card-sub" style={{ marginLeft: 0 }}>
-              Pick the files this agent answers from. Uploads and reindexing happen on the Knowledge page.
+              Tick the files this agent answers from. Uploads and reindexing happen on the Knowledge page.
             </div>
           </div>
-          <Link href="/knowledge-bases" className="knowledge-agent-manage">Manage all files →</Link>
         </div>
         <div className="card-body">
           {documents.length === 0 ? (
@@ -159,43 +158,43 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
             </div>
           ) : (
             <div className="kb-picker" ref={pickerRef}>
-              <div className="kb-chips">
+              <div className="kb-chips" onClick={() => setPickerOpen(true)}>
                 {selected.map((d) => (
                   <span key={d.id} className="kb-chip">
                     <span className="kb-chip-title">{d.title}</span>
                     {d.status !== "ready" && (
                       <span className={`badge ${FILE_STATUS[d.status].color}`}>{FILE_STATUS[d.status].label}</span>
                     )}
-                    <button type="button" className="kb-chip-remove" aria-label={`Remove ${d.title}`} onClick={() => remove(d.id)}>
+                    <button
+                      type="button"
+                      className="kb-chip-remove"
+                      aria-label={`Remove ${d.title}`}
+                      onClick={(e) => { e.stopPropagation(); remove(d.id); }}
+                    >
                       <X size={13} />
                     </button>
                   </span>
                 ))}
-                {choices.length > 0 || query ? (
-                  <button
-                    type="button"
-                    className="kb-chip-add"
-                    aria-expanded={pickerOpen}
-                    onClick={() => setPickerOpen((o) => !o)}
-                  >
-                    <Plus size={13} /> Add a document
-                  </button>
-                ) : (
-                  selected.length > 0 && <span className="kb-chips-done">Every file is selected</span>
-                )}
+                <input
+                  className="kb-chips-input"
+                  placeholder={selected.length ? "" : "Add a document…"}
+                  role="combobox"
+                  aria-label="Add a document"
+                  aria-expanded={pickerOpen}
+                  aria-controls="kb-picker-menu"
+                  value={query}
+                  onFocus={() => setPickerOpen(true)}
+                  onChange={(e) => { setQuery(e.target.value); setPickerOpen(true); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setPickerOpen(false);
+                    if (e.key === "Backspace" && !query && selected.length) remove(selected[selected.length - 1].id);
+                  }}
+                />
               </div>
               {pickerOpen && (
-                <div className="kb-picker-menu" role="listbox" aria-label="Documents to add">
-                  <input
-                    className="form-input"
-                    placeholder="Search files"
-                    aria-label="Search files"
-                    autoFocus
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                  />
+                <div id="kb-picker-menu" className="kb-picker-menu" role="listbox" aria-label="Documents to add">
                   {choices.length === 0 ? (
-                    <div className="kb-picker-empty">No files match.</div>
+                    <div className="kb-picker-empty">{query ? "No files match." : "Every file is selected."}</div>
                   ) : (
                     choices.map((d) => (
                       <button
@@ -213,12 +212,15 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                   )}
                 </div>
               )}
-              <div className="kb-picker-count">
-                <strong>{selected.length}</strong> of {documents.length} selected
-              </div>
+              <div className="kb-picker-hint">Click a document to add it. Uploads and reindexing happen on the Knowledge page.</div>
             </div>
           )}
         </div>
+        {documents.length > 0 && (
+          <div className="kb-picker-count">
+            <strong>{selected.length}</strong> of {documents.length} selected
+          </div>
+        )}
       </section>
 
       <section className="card">
@@ -291,7 +293,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
             </label>
             <div>
               <div className="form-label" style={{ margin: 0 }}>Mention where answers come from</div>
-              <div className="hint">The agent is told which file each passage came from and may name it.</div>
+              <div className="hint">The agent can name the source document it used.</div>
             </div>
           </div>
         </div>
