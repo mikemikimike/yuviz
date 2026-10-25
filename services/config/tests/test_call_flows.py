@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -11,8 +12,8 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from libs.tenancy import current_scope, set_caller_tenant, set_target_tenant
-from services.config import agents, auth, cache, call_flows, provider_configs, tenants
+from libs.tenancy import current_scope, set_caller_tenant, set_target_tenant, tenant_conn
+from services.config import agents, auth, cache, call_flows, db, provider_configs, tenants
 from services.config.app import app
 
 
@@ -490,3 +491,25 @@ async def test_publish_allows_international_dial_only_after_opt_in_but_never_pre
         await call_flows.publish(flow["id"], _dial_graph("+442071234567"))
         with pytest.raises(call_flows.CallFlowValidationError):
             await call_flows.publish(flow["id"], _dial_graph("+8821234567890"))
+
+
+async def test_concurrent_publishes_with_dial_nodes_do_not_exhaust_the_pool(test_tenant):
+    """Each publish holds a tenant_conn; reading the transfer policy must reuse it, not take a second
+    pool connection, or more publishes than pool slots wait on each other forever."""
+    pool_size = (await db.get_pool()).get_max_size()
+    flows = [await _flow(test_tenant) for _ in range(pool_size + 2)]
+
+    async def publish(flow):
+        with _as_tenant(test_tenant["id"]):
+            return await call_flows.publish(flow["id"], _dial_graph("+18005550100"))
+
+    published = await asyncio.wait_for(asyncio.gather(*(publish(f) for f in flows)), timeout=15)
+    assert len(published) == pool_size + 2
+
+
+async def test_publish_of_a_flow_whose_tenant_row_is_gone_raises_lookup_error(test_tenant):
+    flow = await _flow(test_tenant)
+    with _as_tenant(test_tenant["id"]):
+        async with tenant_conn(await db.get_pool()) as conn:
+            with pytest.raises(LookupError):
+                await call_flows._dial_destination_errors(conn, _dial_graph("+18005550100"), uuid.uuid4())

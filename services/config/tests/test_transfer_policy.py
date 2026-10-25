@@ -165,3 +165,56 @@ async def test_tenant_admin_cannot_use_the_superadmin_patch_to_opt_in(admin_clie
         f"/tenants/{test_tenant['id']}", json={"allow_international_transfers": True},
     )
     assert resp.status_code == 403
+
+
+def _transfer_workflow(destination):
+    def node(id_, type_, name, **data):
+        return {"id": id_, "type": type_, "position": {"x": 0, "y": 0}, "data": {"name": name, **data}}
+
+    def edge(id_, source, target, label):
+        return {"id": id_, "source": source, "target": target,
+                "data": {"label": label, "condition": "something happened"}}
+
+    return {
+        "version": 1,
+        "nodes": [
+            node("n1", "start", "greeting"),
+            node("n2", "transfer", "to_human", prompt="Connecting you now.", transfer_destination=destination),
+            node("n3", "end", "goodbye"),
+        ],
+        "edges": [edge("e1", "n1", "n2", "needs a person"), edge("e2", "n1", "n3", "done")],
+    }
+
+
+async def _publish_workflow(client, tenant, agent, destination):
+    return await client.post(
+        f"/tenants/{tenant['slug']}/agents/{agent['id']}/workflow/publish",
+        json={"graph": _transfer_workflow(destination)},
+    )
+
+
+async def test_workflow_publish_refuses_a_literal_transfer_destination_outside_the_policy(
+    admin_client, test_tenant, agent,
+):
+    resp = await _publish_workflow(admin_client, test_tenant, agent, "+447911123456")
+    assert resp.status_code == 400, resp.text
+    errors = resp.json()["errors"]
+    assert [(e["id"], e["field"]) for e in errors] == [("n2", "transfer_destination")]
+
+
+async def test_workflow_publish_allows_the_same_destination_after_opt_in(
+    admin_client, superadmin_client, test_tenant, agent,
+):
+    opt_in = await superadmin_client.patch(
+        f"/tenants/{test_tenant['id']}/transfer-policy", json={"allow_international_transfers": True},
+    )
+    assert opt_in.status_code == 200, opt_in.text
+    resp = await _publish_workflow(admin_client, test_tenant, agent, "+447911123456")
+    assert resp.status_code == 200, resp.text
+
+
+async def test_workflow_publish_leaves_a_templated_transfer_destination_for_runtime(
+    admin_client, test_tenant, agent,
+):
+    resp = await _publish_workflow(admin_client, test_tenant, agent, "{{ branch_number }}")
+    assert resp.status_code == 200, resp.text

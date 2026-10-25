@@ -89,7 +89,7 @@ class ApiExecExecutor:
             # Only the redacted `data` projection reaches the LLM/log —
             # never steps/completed_steps/failed_step.
             payload = dict(response.get("data") or {})
-            serialized = json.dumps(payload)
+            serialized = json.dumps(payload, ensure_ascii=False)
             if len(serialized) > _MAX_DATA_CHARS:
                 log.warning(
                     "ApiExecExecutor: data truncated api_name=%s chars=%d", api_name, len(serialized),

@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .dial_targets import is_transfer_destination
+from .dial_targets import TransferPolicy, is_transfer_destination, transfer_policy_problem
 
 NODE_TYPES = ("start", "agent", "transfer", "end", "global")
 TERMINAL_NODE_TYPES = ("end", "transfer")
@@ -366,6 +366,18 @@ def literal_destination_errors(graph: WorkflowGraph) -> list[WorkflowError]:
         for node in graph.nodes.values()
         if node.type == "transfer" and node.transfer_destination
         and "{{" not in node.transfer_destination and not is_transfer_destination(node.transfer_destination)
+    ]
+
+
+def literal_destination_policy_errors(graph: WorkflowGraph, policy: TransferPolicy) -> list[WorkflowError]:
+    """Publish-time only: literal transfer destinations the tenant's transfer policy refuses."""
+    return [
+        WorkflowError("node", node.id, "transfer_destination",
+                      f"{node.name!r} can't transfer there — {problem}")
+        for node in graph.nodes.values()
+        if node.type == "transfer" and node.transfer_destination and "{{" not in node.transfer_destination
+        for problem in [transfer_policy_problem(node.transfer_destination, policy)]
+        if problem
     ]
 
 

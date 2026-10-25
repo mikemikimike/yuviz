@@ -118,7 +118,7 @@ async def _agent_reference_errors(
     return errs
 
 
-async def _dial_destination_errors(graph: dict[str, Any], tenant_id: Any) -> list[CallFlowError]:
+async def _dial_destination_errors(conn: Any, graph: dict[str, Any], tenant_id: Any) -> list[CallFlowError]:
     """Editor errors for `dial` nodes whose destination is malformed or outside the tenant's transfer policy."""
     dials = [
         (str(n.get("id") or ""), str((n.get("data") or {}).get("destination") or ""))
@@ -128,7 +128,7 @@ async def _dial_destination_errors(graph: dict[str, Any], tenant_id: Any) -> lis
     dials = [(node_id, dest) for node_id, dest in dials if dest.strip()]  # _node_errors reports an unset one
     if not dials:
         return []
-    policy = tenants_service.transfer_policy(await tenants_service.get_tenant_by_id(tenant_id))
+    policy = await tenants_service.transfer_policy_on(conn, tenant_id)
     errs: list[CallFlowError] = []
     for node_id, dest in dials:
         problem = transfer_policy_problem(dest, policy)
@@ -405,7 +405,7 @@ async def publish(
         agent_errs = await _agent_reference_errors(conn, graph, current["tenant_id"])
         if agent_errs:
             raise CallFlowValidationError(agent_errs)
-        dial_errs = await _dial_destination_errors(graph, current["tenant_id"])
+        dial_errs = await _dial_destination_errors(conn, graph, current["tenant_id"])
         if dial_errs:
             raise CallFlowValidationError(dial_errs)
         next_version = current["config_version"] + 1
