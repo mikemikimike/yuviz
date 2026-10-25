@@ -162,7 +162,9 @@ async def mark_sent(attempt_id: UUID, *, provider_call_id: str | None) -> bool:
     return row is not None
 
 
-async def reserve_send(attempt_id: UUID, *, path: Path) -> Literal["ok", "wait_cps", "refused"]:
+async def reserve_send(
+    attempt_id: UUID, *, path: Path, require_running: bool = False,
+) -> Literal["ok", "wait_cps", "refused"]:
     """Gate before every re-send. Takes the admission lock so the CPS window cannot be over-booked."""
     pool = await db.get_pool()
     async with platform_conn(pool, reason="campaign-dial-state") as conn:
@@ -176,8 +178,9 @@ async def reserve_send(attempt_id: UUID, *, path: Path) -> Literal["ok", "wait_c
             "UPDATE campaign_attempts SET send_count = send_count + 1, last_send_at = clock_timestamp(), rate_limited = false "
             "WHERE id = $1 AND state = 'pending' "
             "AND ($2 <> 'sip' OR (send_count < $3 AND created_at > now() - make_interval(secs => $4))) "
+            "AND (NOT $5 OR EXISTS (SELECT 1 FROM campaigns c WHERE c.id = campaign_id AND c.status = 'running')) "
             "RETURNING id",
-            attempt_id, path, MAX_SENDS, RESEND_WINDOW_S,
+            attempt_id, path, MAX_SENDS, RESEND_WINDOW_S, require_running,
         )
     return "ok" if row is not None else "refused"
 

@@ -447,3 +447,28 @@ async def test_b_an_attempt_held_too_many_times_fails_instead_of_staying_open(sc
     row = await _attempt(scratch_pool, att["idempotency_key"])
     assert sends == [] and (row["outcome"], row["failure_reason"]) == ("failed", "rate_limited")
     assert (await w.contact_row(scratch_pool, contact["id"]))["status"] == "failed"
+
+
+async def test_b_a_pause_after_the_reconcile_scan_still_stops_the_held_send(scratch_pool, redis_raw, monkeypatch):
+    world = await _setup(scratch_pool, provider="fake")
+    _, att = await _held(scratch_pool, world)
+    sends = _no_sends(monkeypatch)
+    [row] = [r for r in await attempts.list_open() if r["id"] == att["id"]]
+    await scratch_pool.execute("UPDATE campaigns SET status = 'paused' WHERE id = $1", world["campaign"]["id"])
+    await w.worker(redis_raw)._reconcile_cpaas(row)
+    assert sends == [] and (await _attempt(scratch_pool, att["idempotency_key"]))["state"] == "pending"
+
+
+async def test_b_a_tiny_retry_after_still_holds_for_the_backoff(scratch_pool, redis_raw, monkeypatch):
+    world = await _setup(scratch_pool, provider="fake")
+    async with scratch_pool.acquire() as conn:
+        _, att = await w.open_attempt(conn, world, path="cpaas", provider="fake")
+
+    async def limited(**kw):
+        raise TelephonyRateLimited("slow down", retry_after=1)
+
+    monkeypatch.setattr(telephony_originate, "originate_call", limited)
+    await w.worker(redis_raw)._send_cpaas({**att, "tenant_slug": "t", "agent_slug": "a"})
+    assert await scratch_pool.fetchval(
+        "SELECT not_before > now() + interval '25 seconds' FROM campaign_attempts WHERE id = $1", att["id"],
+    )

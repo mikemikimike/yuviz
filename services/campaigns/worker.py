@@ -203,7 +203,7 @@ class CampaignWorker:
                 await attempts.release_unplaced(row["id"], reason=f"rate_limited_{why}")
             elif row["send_count"] >= attempts.MAX_RATE_LIMITED_SENDS:
                 await self._fail_send(row, "rate_limited")
-            elif row["send_due"] and await attempts.reserve_send(row["id"], path="cpaas") == "ok":
+            elif row["send_due"] and await attempts.reserve_send(row["id"], path="cpaas", require_running=True) == "ok":
                 await self._send_cpaas({**row, "send_count": row["send_count"] + 1})
             return
         if row["state"] == "pending" and row["send_due"] and row["resend_age"] and row["send_count"] < attempts.MAX_SENDS:
@@ -369,7 +369,9 @@ class CampaignWorker:
                 idempotency_key=attempt["idempotency_key"],
             )
         except TelephonyRateLimited as exc:
-            delay = min(_RATE_LIMIT_MAX_S, exc.retry_after or _RATE_LIMIT_BACKOFF_S * 2 ** (attempt["send_count"] - 1))
+            # Never below the backoff: a tiny Retry-After would spend MAX_RATE_LIMITED_SENDS in seconds.
+            backoff = _RATE_LIMIT_BACKOFF_S * 2 ** (attempt["send_count"] - 1)
+            delay = min(_RATE_LIMIT_MAX_S, max(exc.retry_after or 0, backoff))
             await attempts.defer_send(attempt["id"], delay_s=delay)
         except (telephony_originate.TelephonyOriginatePending, telephony_originate.TelephonyOriginateError):
             # The vendor may already have dialled: leave it pending for reconcile_call to decide.
