@@ -29,7 +29,7 @@ from .rejection import RejectedCallHangup
 from .session import (
     AgentUnavailable, ConversationSession, IConversationHandler, RoutingStatus, SessionContext,
 )
-from .transcript_builder import SessionCollision
+from .transcript_builder import SessionCollision, TranscriptBuilder
 
 from .generated.voiceai.v1 import conversation_pb2 as pb
 from .generated.voiceai.v1 import conversation_pb2_grpc as pb_grpc
@@ -91,9 +91,12 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
     """Stateless servicer: a fresh ConversationSession and handler per Converse() call."""
 
     def __init__(
-        self, handler_factory: Callable[[SessionContext], Awaitable[IConversationHandler]],
+        self,
+        handler_factory: Callable[[SessionContext], Awaitable[IConversationHandler]],
+        transcripts: TranscriptBuilder | None = None,
     ) -> None:
         self._handler_factory = handler_factory
+        self._transcripts = transcripts
         self._stream_tasks: set[asyncio.Task] = set()
         self._live_sessions: set[str] = set()
 
@@ -156,6 +159,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         sid, open_req.tenant_id)
             await context.abort(grpc.StatusCode.ALREADY_EXISTS, _SESSION_IN_USE)
         finally:
+            # end_call() normally cleared these; a teardown cut short before it must not leave them behind.
+            if self._transcripts is not None:
+                self._transcripts.discard_session(sid)
             self._live_sessions.discard(sid)
 
     async def _serve(

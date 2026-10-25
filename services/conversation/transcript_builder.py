@@ -243,6 +243,13 @@ class TranscriptBuilder:
             return
         self._spawn(session_id, self._record_live_stage(session_id, self._tenant_slugs.get(session_id), stage))
 
+    def discard_session(self, session_id: str) -> None:
+        """Drop the in-memory bookkeeping for a session whose stream is gone. end_call() already
+        does this on the normal path; this covers a teardown cut short before it."""
+        self._turn_counts.pop(session_id, None)
+        self._barge_in_counts.pop(session_id, None)
+        self._tenant_slugs.pop(session_id, None)
+
     def end_call(self, session_id: str, close_reason: str,
                  final_state: str | None = None, *, score_sentiment: bool) -> None:
         # No default: sentiment is a per-agent opt-in, so every caller must say which.

@@ -285,3 +285,47 @@ async def test_repeat_begin_call_for_the_same_live_call_keeps_its_counters():
     )
     assert [r["turn_number"] for r in rows] == [1, 2]
     await _cleanup(builder, sid)
+
+
+async def test_teardown_cut_before_end_call_leaves_nothing_behind_for_the_next_stream():
+    builder = await _builder()
+    sid = f"test-cut-{uuid.uuid4().hex[:8]}"
+
+    async def factory(ctx):
+        handler = AsyncMock()
+
+        async def greeting(session_id):
+            builder.begin_call(session_id, TENANT_A, "call-a")
+            builder.record_turn(session_id, "hello", 0.9, "hi", True)
+            return []  # the stream then ends without the handler's end_call()
+
+        handler.greeting.side_effect = greeting
+        handler.out_responses = None
+        return handler
+
+    stream = _Stream(ConversationServicer(factory, builder), sid, TENANT_A)
+    await asyncio.wait_for(stream.ready.wait(), 2)
+    await stream.hang_up()
+    await builder._chains[sid]
+
+    builder.begin_call(sid, TENANT_B, "call-b")  # no SessionCollision
+    assert (builder._turn_counts[sid], builder._barge_in_counts[sid]) == (0, 0)
+    await builder._chains[sid]
+    await _cleanup(builder, sid)
+
+
+async def test_discard_session_is_idempotent_and_safe_without_begin_or_after_end_call():
+    builder = await _builder()
+    sid = f"test-discard-{uuid.uuid4().hex[:8]}"
+
+    builder.discard_session(sid)  # begin_call never ran
+    builder.begin_call(sid, TENANT_A, "call-a")
+    builder.end_call(sid, "stream_ended", score_sentiment=False)
+    builder.discard_session(sid)  # end_call already ran
+    builder.discard_session(sid)
+    await builder._chains[sid]
+
+    assert sid not in builder._tenant_slugs
+    assert sid not in builder._turn_counts
+    assert sid not in builder._barge_in_counts
+    await _cleanup(builder, sid)
