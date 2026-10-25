@@ -132,8 +132,8 @@ APIS = [
       _p("notes", "Anything the caller asked for the visit, in a few words."), LANG, CALLER],
      _parts("$.upstream.re_prepare_site_visit.confirm_text"), _parts("$.spoken")),
     ("re_find_site_visits", "/visits/find", False,
-     "Find the caller's upcoming site visits. From another phone, pass the booking number and the mobile "
-     "number used for the booking.",
+     "Find the caller's upcoming site visits, by the number they are calling from. From another phone, pass the "
+     "booking number and the mobile number used for the booking; a number alone is not enough.",
      [_p("reference", "The 6-digit booking number, if the caller has it."), OTHER_PHONE, LANG, CALLER],
      None, None),
     ("re_prepare_cancel_visit", "/visits/cancel/prepare", False, "Checks the visit before cancelling (internal step).",

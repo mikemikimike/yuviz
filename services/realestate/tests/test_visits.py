@@ -136,3 +136,64 @@ async def test_callback_is_deduplicated_per_phone_within_a_day(run, pool, tenant
     none = await run(core.request_callback, caller_phone=None, phone=None, name=None, preferred_time=None,
                      topic=None, language="en")
     assert not none["ok"]
+
+
+async def test_a_spoken_number_alone_never_lists_anyones_visits(run):
+    _, done = await _prepare_and_book(run, slot=tomorrow_at(12), caller=CALLER, name="Amit Verma")
+    stranger = "+919899999999"
+    # the stranger says the owner's number; the call's own number is theirs
+    said = await run(core.find_visits, reference=None, visitor_phone=CALLER, caller_phone=stranger, language="en")
+    assert said["ok"] and said["visits"] == []                                  # nothing, and no names or references
+    mine = await run(core.find_visits, reference=None, visitor_phone=None, caller_phone=CALLER, language="en")
+    assert [v["reference"] for v in mine["visits"]] == [done["reference"]]      # the owner still sees their own
+    assert await run(core.find_visits, reference=None, visitor_phone=CALLER, caller_phone=None, language="en") == {
+        "ok": False, "message": core._not_found("en")}
+
+
+async def test_a_spoken_number_is_only_a_second_factor_against_the_visitors_own_number(run, pool):
+    booker, visitor = "+919811100020", "+919811100021"
+    prep = await run(core.prepare_visit, project="GFH", slot_start=tomorrow_at(13), visitor_name="Neha Singh",
+                     visitor_phone=visitor, caller_phone=booker, language="en")
+    done = await run(core.book_visit, project_code=prep["project_code"], slot_start=prep["slot_start"],
+                     visitor_name="Neha Singh", visitor_phone=prep["visitor_phone"], caller_phone=booker, notes=None,
+                     language="en")
+    ref, stranger = done["reference"], "+919899999999"
+
+    # the booking phone's number, said by a stranger, is not enough (only the call's own number counts for it)
+    assert not (await run(core.find_visits, reference=ref, visitor_phone=booker, caller_phone=stranger, language="en"))["ok"]
+    assert not (await run(core.prepare_cancel, reference=ref, visitor_phone=booker, caller_phone=stranger, language="en"))["ok"]
+    assert not (await run(core.cancel_visit, reference=ref, visitor_phone=booker, caller_phone=stranger, language="en"))["ok"]
+    # the visitor's own number with the booking number: the documented "calling from another phone" path
+    assert (await run(core.prepare_cancel, reference=ref, visitor_phone=visitor, caller_phone=stranger, language="en"))["ok"]
+    assert await pool.fetchval("SELECT status FROM re_site_visits WHERE reference = $1", ref) == "booked"
+
+
+async def test_a_visit_that_has_started_cannot_be_cancelled_and_staff_status_is_never_overwritten(run, pool, tenant):
+    _, done = await _prepare_and_book(run, slot=tomorrow_at(10), caller=CALLER, name="Amit Verma")
+    ref = done["reference"]
+    past = await pool.fetchval(
+        "INSERT INTO re_site_visits (tenant_id, reference, project_id, visitor_name, visitor_phone, booked_by_phone, "
+        "  starts_at, ends_at) SELECT $1, '700001', id, 'Old Visit', $2, $2, now() - interval '3 hours', "
+        "  now() - interval '2 hours' FROM re_projects WHERE tenant_id = $1 AND code = 'GFH' RETURNING reference",
+        tenant["id"], CALLER)
+    assert not (await run(core.prepare_cancel, reference=past, visitor_phone=None, caller_phone=CALLER, language="en"))["ok"]
+    assert not (await run(core.cancel_visit, reference=past, visitor_phone=None, caller_phone=CALLER, language="en"))["ok"]
+    assert await pool.fetchval("SELECT status FROM re_site_visits WHERE reference = $1", past) == "booked"
+
+    # staff complete the visit between the cancel's read and its write: the stale read must not overwrite it
+    stale = dict(await pool.fetchrow(
+        "SELECT v.*, p.name AS project_name, p.name_hi AS project_name_hi FROM re_site_visits v "
+        "JOIN re_projects p ON p.id = v.project_id WHERE v.reference = $1", ref))
+    await pool.execute("UPDATE re_site_visits SET status = 'completed' WHERE reference = $1", ref)
+
+    async def _stale_read(conn, co, reference):
+        return stale
+
+    original = core._visit_by_reference
+    core._visit_by_reference = _stale_read
+    try:
+        result = await run(core.cancel_visit, reference=ref, visitor_phone=None, caller_phone=CALLER, language="en")
+    finally:
+        core._visit_by_reference = original
+    assert not result["ok"]
+    assert await pool.fetchval("SELECT status FROM re_site_visits WHERE reference = $1", ref) == "completed"

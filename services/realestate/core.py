@@ -150,9 +150,13 @@ _WEEKDAYS = {
 }
 
 
+_NEXT_WORDS = ("next ", "अगले ", "अगला ", "agle ", "agla ")
+
+
 def parse_day(text: str | None, co: Company) -> datetime.date | None:
     """YYYY-MM-DD, or the caller's own words: today/tomorrow/कल/परसों, or a weekday name in English or
-    Hindi (the next such day, today included). Resolved here because models get "Saturday" wrong."""
+    Hindi (the next such day, today included; "next <weekday>" never today). Resolved here because models get
+    "Saturday" wrong."""
     if not text:
         return None
     raw = str(text).strip()
@@ -160,11 +164,18 @@ def parse_day(text: str | None, co: Company) -> datetime.date | None:
         return datetime.date.fromisoformat(raw[:10])
     except ValueError:
         pass
-    words = raw.casefold().replace("next ", "").replace("this ", "").strip(" .,?")
+    words = raw.casefold().strip(" .,?")
+    # "next saturday" is never today: on a Saturday it is a week out. A bare or "this" weekday counts today.
+    upcoming = words.startswith(_NEXT_WORDS)
+    for prefix in (*_NEXT_WORDS, "this "):
+        if words.startswith(prefix):
+            words = words[len(prefix):].strip()
+            break
     if words in _DAY_OFFSETS:
         return co.today + datetime.timedelta(days=_DAY_OFFSETS[words])
     if words in _WEEKDAYS:
-        return co.today + datetime.timedelta(days=(_WEEKDAYS[words] - co.today.weekday()) % 7)
+        delta = (_WEEKDAYS[words] - co.today.weekday()) % 7
+        return co.today + datetime.timedelta(days=(delta or 7) if upcoming else delta)
     raise ValueError("date must be YYYY-MM-DD, a weekday name, today or tomorrow")
 
 
@@ -430,10 +441,18 @@ async def book_visit(conn: Any, co: Company, *, project_code: str, slot_start: s
 
 # ── find / cancel ─────────────────────────────────────────────────────────
 
-def may_manage(visit: dict, caller_phone: str | None, visitor_phone: str | None) -> bool:
-    """Only the number the visit was booked from, or the visitor's own number, may see or change it."""
-    mine = {p for p in (phones.normalize_phone(caller_phone), phones.normalize_phone(visitor_phone)) if p}
-    return bool(mine & {visit["visitor_phone"], visit["booked_by_phone"]})
+def may_manage(visit: dict, caller_phone: str | None, claimed_phone: str | None = None) -> bool:
+    """Who may see or change a visit, once the caller has named it by booking number.
+
+    The server-side number of the call (`caller_phone`, from call metadata) is enough on its own when it is the
+    visitor's number or the number the visit was booked from. A number the caller merely SAYS (`claimed_phone`,
+    model-supplied) is the second factor for someone calling from another phone: it counts only with the booking
+    number in hand, and only against the visitor's own number, never the booking phone."""
+    caller = phones.normalize_phone(caller_phone)
+    if caller is not None and caller in (visit["visitor_phone"], visit["booked_by_phone"]):
+        return True
+    claimed = phones.normalize_phone(claimed_phone)
+    return claimed is not None and claimed == visit["visitor_phone"]
 
 
 async def _visit_by_reference(conn: Any, co: Company, reference: str | None) -> dict | None:
@@ -466,7 +485,9 @@ async def find_visits(conn: Any, co: Company, *, reference: str | None, visitor_
         if v is None or not may_manage(v, caller_phone, visitor_phone):
             return {"ok": False, "message": _not_found(language)}
         return {"ok": True, "visits": [_visit_view(co, v, language)]}
-    phone = phones.normalize_phone(visitor_phone) or phones.normalize_phone(caller_phone)
+    # No booking number: list only by the number the call really comes from. A number the caller says is never
+    # enough to read someone's visits back (names, times, booking numbers); it only narrows a lookup by reference.
+    phone = phones.normalize_phone(caller_phone)
     if phone is None:
         return {"ok": False, "message": _not_found(language)}
     rows = await conn.fetch(
@@ -483,7 +504,8 @@ async def prepare_cancel(conn: Any, co: Company, *, reference: str | None, visit
                          caller_phone: str | None, language: str) -> dict:
     language = speech.lang_or_default(language)
     v = await _visit_by_reference(conn, co, reference)
-    if v is None or not may_manage(v, caller_phone, visitor_phone) or v["status"] != "booked":
+    if (v is None or not may_manage(v, caller_phone, visitor_phone) or v["status"] != "booked"
+            or v["starts_at"] <= co.now):
         return _refusal(_not_found(language), reference="")
     view = _visit_view(co, v, language)
     text = (f"पुष्टि कर लूँ: {view['visitor']} की {view['project']} की विज़िट, {view['when']}, रद्द कर दूँ?" if _hi(language)
@@ -497,9 +519,16 @@ async def cancel_visit(conn: Any, co: Company, *, reference: str | None, visitor
     if not reference or reference == NOTHING:
         return {"ok": False, "spoken": _not_found(language)}
     v = await _visit_by_reference(conn, co, reference)
-    if v is None or not may_manage(v, caller_phone, visitor_phone) or v["status"] != "booked":
+    if v is None or not may_manage(v, caller_phone, visitor_phone):
         return {"ok": False, "spoken": _not_found(language)}
-    await conn.execute("UPDATE re_site_visits SET status = 'cancelled', cancelled_at = now() WHERE id = $1", v["id"])
+    # Conditional write: only a visit that is still booked and still ahead. A staff completion or no-show that
+    # landed since the read stays as it is, and a visit that has started cannot be turned into a cancellation.
+    cancelled = await conn.fetchval(
+        "UPDATE re_site_visits SET status = 'cancelled', cancelled_at = now() "
+        "WHERE id = $1 AND tenant_id = $2 AND status = 'booked' AND starts_at > now() RETURNING id",
+        v["id"], co.tenant_id)
+    if cancelled is None:
+        return {"ok": False, "spoken": _not_found(language)}
     log.info("realestate: visit cancelled tenant=%s ref=%s", co.tenant_id, v["reference"])
     return {"ok": True, "spoken": ("आपकी साइट विज़िट रद्द कर दी गई है। क्या आप कोई नया समय चुनना चाहेंगे?" if _hi(language)
                                     else "Your site visit has been cancelled. Would you like to pick a new time?")}

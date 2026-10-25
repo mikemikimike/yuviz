@@ -61,9 +61,25 @@ def test_placeholder_names_are_refused():
     assert not core._is_placeholder_name("Amit Verma")
 
 
+def test_next_weekday_is_never_today_but_a_bare_or_this_weekday_is():
+    co = company()                                                              # Saturday 24 October
+    assert core.parse_day("saturday", co) == datetime.date(2026, 10, 24)
+    assert core.parse_day("this saturday", co) == datetime.date(2026, 10, 24)
+    assert core.parse_day("next saturday", co) == datetime.date(2026, 10, 31)   # a week out, not today
+    assert core.parse_day("Next Saturday.", co) == datetime.date(2026, 10, 31)
+    assert core.parse_day("next monday", co) == datetime.date(2026, 10, 26)
+    assert core.parse_day("अगले शनिवार", co) == datetime.date(2026, 10, 31)
+    assert core.parse_day("agla somvar", co) == datetime.date(2026, 10, 26)
+    assert core.parse_day("tomorrow", co) == datetime.date(2026, 10, 25)
+
+
 def test_may_manage_requires_a_matching_number():
     visit = {"visitor_phone": "+919811100001", "booked_by_phone": "+919811100002"}
     assert core.may_manage(visit, "+919811100002", None)
     assert core.may_manage(visit, None, "9811100001")
     assert not core.may_manage(visit, "+919811100003", None)
     assert not core.may_manage(visit, None, None)
+    # a number the caller only says counts against the visitor's own number, never the booking phone
+    assert not core.may_manage(visit, None, "+919811100002")
+    assert not core.may_manage(visit, "+919811100003", "+919811100002")
+    assert core.may_manage(visit, "+919811100003", "+919811100001")
