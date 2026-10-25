@@ -333,3 +333,70 @@ async def test_a_scheduled_campaign_that_is_not_ready_at_its_time_waits_and_is_n
     await w.worker(scratch_redis_raw)._tick()
     campaign = await w.refreshed(scratch_pool, world["campaign"]["id"])
     assert campaign["status"] == "scheduled"
+
+
+# ── status races and per-campaign isolation ──────────────────────────────
+
+async def test_a_pause_during_the_pre_checks_stops_the_dial(scratch_pool, scratch_redis_raw):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+
+    class PausingRegistry:
+        async def check(self, e164, purpose, tenant_id):
+            await campaigns.set_status(cid, "paused", platform_scoped=True)
+            return "allow"
+
+    dial = w.FakeDial("accepted")
+    await _dial(scratch_pool, w.worker(scratch_redis_raw, dial, registry=PausingRegistry()), world)
+    assert dial.sent == [] and await _attempts(scratch_pool, world) == []
+    contact = await scratch_pool.fetchrow("SELECT status, attempt_count FROM campaign_contacts WHERE campaign_id = $1", cid)
+    assert (contact["status"], contact["attempt_count"]) == ("pending", 0)
+
+
+async def test_the_workers_own_pause_never_revives_a_cancelled_campaign(scratch_pool, scratch_redis_raw):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    await scratch_pool.execute("UPDATE campaigns SET status = 'cancelled' WHERE id = $1", cid)
+    await w.worker(scratch_redis_raw)._pause(str(cid), "caller ID is not owned")
+    assert (await w.refreshed(scratch_pool, cid))["status"] == "cancelled"
+
+
+async def test_one_campaigns_failure_does_not_stop_the_others(scratch_pool, scratch_redis_raw):
+    first, second = await _world(scratch_pool), await _world(scratch_pool)
+    wk = w.worker(scratch_redis_raw)
+    seen = []
+
+    async def failing_dial_next(campaign):
+        seen.append(campaign["id"])
+        raise ValueError("invalid literal for int() with base 10: '9'")
+
+    wk._dial_next = failing_dial_next
+    await wk._tick()
+    assert {first["campaign"]["id"], second["campaign"]["id"]} <= set(seen)
+
+
+async def test_a_scheduled_start_picks_up_the_agents_current_caller_id(scratch_pool, scratch_redis_raw):
+    world = await _world(scratch_pool, status="scheduled")
+    cid, owned = world["campaign"]["id"], world["campaign"]["caller_id"]
+    await scratch_pool.execute("UPDATE agents SET outbound_caller_id = $2 WHERE id = $1", world["campaign"]["agent_id"], owned)
+    await scratch_pool.execute(
+        "UPDATE campaigns SET caller_id = '+14155550999', scheduled_start_at = now() - interval '1 minute' WHERE id = $1", cid,
+    )
+    await w.worker(scratch_redis_raw)._tick()
+    campaign = await w.refreshed(scratch_pool, cid)
+    assert (campaign["status"], campaign["caller_id"]) == ("running", owned)
+
+
+async def test_a_call_that_ends_after_cancel_leaves_its_lead_recallable_not_requeued(scratch_pool):
+    from services.campaigns import attempts
+
+    world = await _world(scratch_pool, contacts=0)
+    async with scratch_pool.acquire() as conn:
+        contact, att = await w.open_attempt(conn, world, state="sent")
+    await scratch_pool.execute("UPDATE campaigns SET status = 'cancelled' WHERE id = $1", world["campaign"]["id"])
+    await attempts.apply_outcome(
+        tenant_id=world["tenant_id"], key=att["idempotency_key"], provider_call_id=None, outcome="no_answer",
+        call_session_id=None,
+    )
+    row = await w.contact_row(scratch_pool, contact["id"])
+    assert (row["status"], row["next_attempt_at"]) == ("no_answer", None)

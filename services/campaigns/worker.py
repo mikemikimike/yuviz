@@ -105,7 +105,10 @@ class CampaignWorker:
         async with platform_conn(pool, reason="campaign-worker-scan") as conn:
             running = await conn.fetch("SELECT * FROM campaigns WHERE status = 'running' AND deleted_at IS NULL")
         for row in running:
-            await self._dial_next(dict(row))
+            try:
+                await self._dial_next(dict(row))
+            except Exception:
+                log.exception("CampaignWorker: dial failed campaign=%s", row["id"])
 
     async def _start_due_scheduled(self) -> None:
         """A scheduled campaign starts only if the same readiness check that Start uses passes now; otherwise it waits."""
@@ -122,6 +125,7 @@ class CampaignWorker:
                 continue
             self._schedule_checked_at[key] = now
             try:
+                campaign = await campaigns.refresh_caller_id(campaign, platform_scoped=True)
                 result = await readiness.check(
                     campaign, tenant_id=campaign["tenant_id"], dial_client=self._dial, billing=self._billing,
                 )
@@ -192,6 +196,11 @@ class CampaignWorker:
             await self._send_sip(row, first=False)
 
     async def _reconcile_cpaas(self, row: dict[str, Any]) -> None:
+        # A 429 placed nothing and the provider released the key, so there is nothing to reconcile and no send cap.
+        if row["state"] == "pending" and row["send_due"] and row["rate_limited"]:
+            if await attempts.reserve_send(row["id"], path="cpaas") == "ok":
+                await self._send_cpaas({**row, "send_count": row["send_count"] + 1})
+            return
         if row["state"] == "pending" and row["send_due"] and row["resend_age"] and row["send_count"] < attempts.MAX_SENDS:
             try:
                 result = await telephony_originate.reconcile_call(
@@ -232,7 +241,10 @@ class CampaignWorker:
 
     async def _pause(self, campaign_id: str, why: str) -> None:
         log.warning("CampaignWorker: campaign=%s %s — pausing it; fix it and resume", campaign_id, why)
-        await campaigns.set_status(campaign_id, "paused", platform_scoped=True)
+        try:
+            await campaigns.set_status(campaign_id, "paused", platform_scoped=True)
+        except campaigns.InvalidTransition:
+            log.info("CampaignWorker: campaign=%s was stopped meanwhile; not pausing it", campaign_id)
 
     async def _dial_next(self, campaign: dict[str, Any]) -> None:
         campaign_id = str(campaign["id"])
@@ -245,7 +257,10 @@ class CampaignWorker:
         if contact is None:
             await campaigns.set_wait_reason(campaign["id"], None)
             if await campaigns.is_finished(campaign["id"]):
-                await campaigns.set_status(campaign["id"], "completed", platform_scoped=True)
+                try:
+                    await campaigns.set_status(campaign["id"], "completed", platform_scoped=True)
+                except campaigns.InvalidTransition:
+                    return
                 log.info("CampaignWorker: campaign=%s completed (no contacts remain)", campaign_id)
             return
 

@@ -450,3 +450,45 @@ async def test_cancelling_closes_attempts_that_were_never_sent(scratch_pool, api
     assert (await api.post(f"/campaigns/{cid}/cancel", headers=_as(world))).status_code == 200
     state = await scratch_pool.fetchrow("SELECT state, outcome, failure_reason FROM campaign_attempts WHERE id = $1", row["id"])
     assert (state["state"], state["outcome"], state["failure_reason"]) == ("resolved", "failed", "campaign_cancelled")
+
+
+@pytest.mark.parametrize("status", ["draft", "scheduled", "cancelled", "completed"])
+async def test_pause_is_refused_unless_the_campaign_is_running(scratch_pool, api, status):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    await scratch_pool.execute("UPDATE campaigns SET status = $2 WHERE id = $1", cid, status)
+    assert (await api.post(f"/campaigns/{cid}/pause", headers=_as(world))).status_code == 409
+    assert (await w.refreshed(scratch_pool, cid))["status"] == status
+
+
+async def test_cancelling_frees_leads_whose_dial_was_never_sent_so_they_can_be_called_again(scratch_pool, api):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    await scratch_pool.execute("UPDATE campaigns SET status = 'running' WHERE id = $1", cid)
+    async with scratch_pool.acquire() as conn:
+        contact, _ = await w.open_attempt(conn, world)
+    assert (await api.post(f"/campaigns/{cid}/cancel", headers=_as(world))).status_code == 200
+    assert (await w.contact_row(scratch_pool, contact["id"]))["status"] == "failed"
+    resp = await api.post(f"/campaigns/{cid}/recall", json={"contact_ids": [str(contact["id"])]}, headers=_as(world))
+    assert resp.status_code == 201, resp.text
+
+
+async def test_a_platform_superadmin_can_call_again(scratch_pool, api):
+    world = await _world(scratch_pool)
+    cid = world["campaign"]["id"]
+    await scratch_pool.execute("UPDATE campaigns SET status = 'completed' WHERE id = $1", cid)
+    async with scratch_pool.acquire() as conn:
+        missed = await seed.contact(conn, cid, status="busy", phone="+14155550203")
+    resp = await api.post(f"/campaigns/{cid}/recall", json={"contact_ids": [str(missed["id"])]}, headers={"x-role": "superadmin"})
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["tenant_id"] == str(world["tenant_id"])
+    contacts = await scratch_pool.fetch("SELECT phone_number FROM campaign_contacts WHERE campaign_id = $1", resp.json()["id"])
+    assert [r["phone_number"] for r in contacts] == ["+14155550203"]
+
+
+@pytest.mark.parametrize("bad", ["9", "9:00", "24:00", "09:60", "0900"])
+async def test_calling_hours_must_be_hh_mm(scratch_pool, api, bad):
+    world = await _world(scratch_pool)
+    assert (await _create(api, world, calling_hours_start=bad, calling_hours_end="17:00")).status_code == 400
+    resp = await api.patch(f"/campaigns/{world['campaign']['id']}", json={"calling_hours_end": bad}, headers=_as(world))
+    assert resp.status_code == 400

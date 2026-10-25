@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import io
-import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -14,7 +13,6 @@ from . import attempts, capacity, db
 from .dial_request import is_e164
 
 _PHONE_SEPARATORS = str.maketrans("", "", " -().")
-_DIAL_NUMBER_RE = re.compile(r"\+?[0-9]{3,15}")
 
 
 @dataclass(frozen=True)
@@ -96,28 +94,6 @@ async def list_contacts(
     return [dict(row) for row in rows]
 
 
-async def claim_next_pending(campaign_id: Any, *, platform_scoped: bool = False) -> dict[str, Any] | None:
-    """Atomically claims one pending contact via SKIP LOCKED so two worker
-    ticks never dial the same contact twice."""
-    pool = await db.get_pool()
-    conn_cm = platform_conn(pool, reason="campaign-by-id") if platform_scoped else tenant_conn(pool)
-    async with conn_cm as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM campaign_contacts WHERE campaign_id = $1 AND status = 'pending' "
-            "AND (next_attempt_at IS NULL OR next_attempt_at <= now()) "
-            "ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED",
-            campaign_id,
-        )
-        if row is None:
-            return None
-        updated = await conn.fetchrow(
-            "UPDATE campaign_contacts SET status = 'calling', attempt_count = attempt_count + 1, "
-            "last_attempted_at = now() WHERE id = $1 RETURNING *",
-            row["id"],
-        )
-        return dict(updated)
-
-
 async def peek_next_due(campaign_id: Any) -> dict[str, Any] | None:
     """The next contact claim_next_due would take; no lock, so the worker can run its external pre-checks first."""
     pool = await db.get_pool()
@@ -137,7 +113,10 @@ async def claim_next_due(
     pool = await db.get_pool()
     async with platform_conn(pool, reason="campaign-dial-state") as conn:
         await conn.execute(attempts.ADMISSION_LOCK)
-        await conn.execute("SELECT 1 FROM campaigns WHERE id = $1 FOR UPDATE", campaign["id"])
+        # Re-read under the lock set_status takes: a Pause or Cancel during the pre-checks stops this dial.
+        status = await conn.fetchval("SELECT status FROM campaigns WHERE id = $1 FOR UPDATE", campaign["id"])
+        if status != "running":
+            return Waiting(None)
         reason = await capacity.admit(conn, campaign, cps_scope)
         if reason is not None:
             await capacity.write_wait_reason(conn, campaign["id"], reason)
@@ -156,18 +135,6 @@ async def claim_next_due(
         )
         await capacity.write_wait_reason(conn, campaign["id"], None)
     return Claimed(dict(contact), attempt)
-
-
-async def release_claim(contact_id: Any, *, platform_scoped: bool = False) -> None:
-    """Undo claim_next_pending for a dial that never happened, refunding the attempt."""
-    pool = await db.get_pool()
-    conn_cm = platform_conn(pool, reason="campaign-by-id") if platform_scoped else tenant_conn(pool)
-    async with conn_cm as conn:
-        await conn.execute(
-            "UPDATE campaign_contacts SET status = 'pending', attempt_count = GREATEST(attempt_count - 1, 0) "
-            "WHERE id = $1 AND status = 'calling'",
-            contact_id,
-        )
 
 
 async def mark_contact_status(

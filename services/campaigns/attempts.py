@@ -122,7 +122,7 @@ async def defer_send(attempt_id: UUID, *, delay_s: float) -> bool:
     pool = await db.get_pool()
     async with platform_conn(pool, reason="campaign-dial-state") as conn:
         row = await conn.fetchrow(
-            "UPDATE campaign_attempts SET not_before = now() + make_interval(secs => $2), "
+            "UPDATE campaign_attempts SET not_before = now() + make_interval(secs => $2), rate_limited = true, "
             "deadline_at = now() + make_interval(secs => $2 + $3) WHERE id = $1 AND state = 'pending' RETURNING id",
             attempt_id, delay_s, DEADLINE_S,
         )
@@ -151,7 +151,7 @@ async def reserve_send(attempt_id: UUID, *, path: Path) -> Literal["ok", "wait_c
         if await capacity.cps_exhausted(conn, scope):
             return "wait_cps"
         row = await conn.fetchrow(
-            "UPDATE campaign_attempts SET send_count = send_count + 1, last_send_at = clock_timestamp() "
+            "UPDATE campaign_attempts SET send_count = send_count + 1, last_send_at = clock_timestamp(), rate_limited = false "
             "WHERE id = $1 AND state = 'pending' "
             "AND ($2 <> 'sip' OR (send_count < $3 AND created_at > now() - make_interval(secs => $4))) "
             "RETURNING id",
@@ -218,8 +218,8 @@ async def _mirror_contact(conn: asyncpg.Connection, attempt: dict[str, Any]) -> 
     await conn.execute(
         """
         UPDATE campaign_contacts cc SET
-            status = CASE WHEN cc.attempt_count < c.max_attempts THEN 'pending' ELSE $2 END,
-            next_attempt_at = CASE WHEN cc.attempt_count < c.max_attempts
+            status = CASE WHEN cc.attempt_count < c.max_attempts AND c.status <> 'cancelled' THEN 'pending' ELSE $2 END,
+            next_attempt_at = CASE WHEN cc.attempt_count < c.max_attempts AND c.status <> 'cancelled'
                                    THEN $3::timestamptz + make_interval(mins => c.retry_gap_minutes) END
         FROM campaigns c WHERE cc.id = $1 AND c.id = cc.campaign_id AND cc.status = 'calling'
         """,

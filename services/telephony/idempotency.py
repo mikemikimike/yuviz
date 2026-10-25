@@ -112,4 +112,4 @@ async def claim_webhook_nonce(provider: str, account_ref: str, nonce: str, ttl_s
 
 
 async def publish_event(stream: str, fields: dict[str, str]) -> None:
-    await _get_client().xadd(stream, fields)
+    await _get_client().xadd(stream, fields, maxlen=campaign_events.STREAM_MAXLEN, approximate=True)

@@ -68,19 +68,6 @@ def test_parse_contacts_csv_reports_spreadsheet_row_after_multiline_cell():
         campaign_contacts.parse_contacts_csv(content)
 
 
-async def test_release_claim_returns_contact_to_pending_without_counting_the_attempt(test_tenant, test_agent, scoped):
-    campaign = await _make_campaign(test_tenant, test_agent)
-    await campaign_contacts.bulk_insert_contacts(campaign["id"], [{"phone_number": "+14155551111", "name": ""}])
-    claimed = await campaign_contacts.claim_next_pending(campaign["id"])
-    assert claimed["attempt_count"] == 1
-
-    await campaign_contacts.release_claim(claimed["id"])
-
-    contacts = await campaign_contacts.list_contacts(campaign["id"])
-    assert contacts[0]["status"] == "pending"
-    assert contacts[0]["attempt_count"] == 0
-
-
 async def _make_campaign(test_tenant, test_agent):
     return await campaigns.create_campaign(
         test_tenant["id"], agent_id=test_agent["id"], name="Contacts test",
@@ -105,37 +92,12 @@ async def test_bulk_insert_empty_list_is_noop(test_tenant, test_agent, scoped):
     assert await campaign_contacts.bulk_insert_contacts(campaign["id"], []) == 0
 
 
-async def test_claim_next_pending_marks_calling_and_increments_attempts(test_tenant, test_agent, scoped):
-    campaign = await _make_campaign(test_tenant, test_agent)
-    await campaign_contacts.bulk_insert_contacts(campaign["id"], [{"phone_number": "+14155551111", "name": ""}])
-
-    claimed = await campaign_contacts.claim_next_pending(campaign["id"])
-    assert claimed["status"] == "calling"
-    assert claimed["attempt_count"] == 1
-    assert claimed["last_attempted_at"] is not None
-
-
-async def test_claim_next_pending_returns_none_when_empty(test_tenant, test_agent, scoped):
-    campaign = await _make_campaign(test_tenant, test_agent)
-    assert await campaign_contacts.claim_next_pending(campaign["id"]) is None
-
-
-async def test_claim_next_pending_does_not_reclaim_already_calling(test_tenant, test_agent, scoped):
-    campaign = await _make_campaign(test_tenant, test_agent)
-    await campaign_contacts.bulk_insert_contacts(campaign["id"], [{"phone_number": "+14155551111", "name": ""}])
-
-    first = await campaign_contacts.claim_next_pending(campaign["id"])
-    assert first is not None
-    second = await campaign_contacts.claim_next_pending(campaign["id"])
-    assert second is None
-
-
 async def test_mark_contact_status_updates_status_and_session(test_tenant, test_agent, scoped):
     campaign = await _make_campaign(test_tenant, test_agent)
     await campaign_contacts.bulk_insert_contacts(campaign["id"], [{"phone_number": "+14155551111", "name": ""}])
-    claimed = await campaign_contacts.claim_next_pending(campaign["id"])
+    (contact,) = await campaign_contacts.list_contacts(campaign["id"])
 
-    await campaign_contacts.mark_contact_status(claimed["id"], "completed", call_session_id="sess-123")
+    await campaign_contacts.mark_contact_status(contact["id"], "completed", call_session_id="sess-123")
 
     contacts = await campaign_contacts.list_contacts(campaign["id"])
     assert contacts[0]["status"] == "completed"

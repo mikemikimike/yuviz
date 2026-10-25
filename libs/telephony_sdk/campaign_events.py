@@ -10,6 +10,7 @@ from typing import Literal
 STREAM_FS = "campaign:events:fs"
 STREAM_CPAAS = "campaign:events:cpaas"
 STREAM_CONV = "campaign:events:conv"
+STREAM_MAXLEN = 100_000  # approximate trim, same as campaign_event.lua's MAXLEN ~ 100000
 GROUP = "campaigns"
 # Telephony's replay guard; its ACL user may only SET this prefix.
 WEBHOOK_NONCE_KEY = "telephony:webhook_nonce:{provider}:{account_ref}:{nonce}"

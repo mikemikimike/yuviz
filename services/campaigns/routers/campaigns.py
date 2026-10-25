@@ -107,18 +107,19 @@ async def list_attempts(campaign_id: str, current_user: CurrentUser = Depends(ge
 
 
 async def _with_agent_caller_id(campaign: dict, current_user: CurrentUser) -> dict:
-    """Start/resume pick up the agent's current outbound caller ID, so a fix made on the agent reaches the campaign."""
-    scoped = is_platform_scoped(current_user)
-    agent = await campaigns_service.agent_outbound_settings(
-        campaign["tenant_id"], campaign["agent_id"], platform_scoped=scoped,
+    return await campaigns_service.refresh_caller_id(
+        campaign, platform_scoped=is_platform_scoped(current_user), user_id=current_user.id, user_email=current_user.email,
     )
-    caller_id = agent["outbound_caller_id"] if agent else None
-    if not caller_id or caller_id == campaign["caller_id"]:
-        return campaign
-    return await campaigns_service.update_campaign(
-        campaign["id"], {"caller_id": caller_id},
-        platform_scoped=scoped, user_id=current_user.id, user_email=current_user.email,
-    )
+
+
+async def _set_status(campaign_id: str, status: str, current_user: CurrentUser) -> dict:
+    try:
+        return await campaigns_service.set_status(
+            campaign_id, status,
+            platform_scoped=is_platform_scoped(current_user), user_id=current_user.id, user_email=current_user.email,
+        )
+    except campaigns_service.InvalidTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 async def _check_readiness(request: Request, campaign: dict) -> readiness.Readiness:
@@ -219,19 +220,13 @@ async def start_campaign(
     result = await _check_readiness(request, campaign)
     if not result.ready:
         return JSONResponse(status_code=409, content={"checks": jsonable_encoder(result.checks)})
-    return await campaigns_service.set_status(
-        campaign_id, "running",
-        platform_scoped=is_platform_scoped(current_user), user_id=current_user.id, user_email=current_user.email,
-    )
+    return await _set_status(campaign_id, "running", current_user)
 
 
 @router.post("/{campaign_id}/pause")
 async def pause_campaign(campaign_id: str, current_user: CurrentUser = Depends(require_role("superadmin", "admin"))):
-    campaign = await _campaign_for(campaign_id, current_user)
-    return await campaigns_service.set_status(
-        campaign_id, "paused",
-        platform_scoped=is_platform_scoped(current_user), user_id=current_user.id, user_email=current_user.email,
-    )
+    await _campaign_for(campaign_id, current_user)
+    return await _set_status(campaign_id, "paused", current_user)
 
 
 @router.post("/{campaign_id}/resume")
@@ -244,10 +239,7 @@ async def resume_campaign(
     result = await _check_readiness(request, campaign)
     if not result.ready:
         return JSONResponse(status_code=409, content={"checks": jsonable_encoder(result.checks)})
-    return await campaigns_service.set_status(
-        campaign_id, "running",
-        platform_scoped=is_platform_scoped(current_user), user_id=current_user.id, user_email=current_user.email,
-    )
+    return await _set_status(campaign_id, "running", current_user)
 
 
 @tenant_scoped_router.get("/call-attempts")
@@ -301,7 +293,8 @@ async def recall_campaign(
     source = await _campaign_for(campaign_id, current_user)
     try:
         return await campaigns_service.recall(
-            source, body.contact_ids, name=body.name, user_id=current_user.id, user_email=current_user.email,
+            source, body.contact_ids, name=body.name, platform_scoped=is_platform_scoped(current_user),
+            user_id=current_user.id, user_email=current_user.email,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))

@@ -345,3 +345,52 @@ async def test_completion_waits_for_an_answered_call_to_end(scratch_pool, redis_
     await wk._dial_next(campaign)
     assert (await w.refreshed(scratch_pool, campaign["id"]))["status"] == "completed"
     assert await campaigns.is_finished(campaign["id"])
+
+
+async def test_b_a_rate_limited_attempt_is_resent_with_the_same_key_once_its_hold_passes(scratch_pool, redis_raw, monkeypatch):
+    world = await _setup(scratch_pool, provider="fake", max_attempts=1)
+    async with scratch_pool.acquire() as conn:
+        contact, att = await w.open_attempt(conn, world, path="cpaas", provider="fake")
+    outcomes, reconciles, sends = [TelephonyRateLimited("slow down", retry_after=1), "vendor-7"], [], []
+
+    async def originate(**kw):
+        sends.append(kw["idempotency_key"])
+        result = outcomes.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def reconcile(**kw):
+        reconciles.append(kw["idempotency_key"])
+        return {"outcome": "unknown", "provider_call_id": None}
+
+    monkeypatch.setattr(telephony_originate, "originate_call", originate)
+    monkeypatch.setattr(telephony_originate, "reconcile_call", reconcile)
+    wk = w.worker(redis_raw)
+    await wk._send_cpaas({**att, "tenant_slug": "t", "agent_slug": "a"})
+    assert (await _attempt(scratch_pool, att["idempotency_key"]))["rate_limited"] is True
+
+    await scratch_pool.execute("UPDATE campaign_attempts SET not_before = now() - interval '1 second' WHERE id = $1", att["id"])
+    await wk._reconcile()
+    row = await _attempt(scratch_pool, att["idempotency_key"])
+    assert sends == [att["idempotency_key"]] * 2 and reconciles == []
+    assert (row["state"], row["provider_call_id"], row["rate_limited"]) == ("sent", "vendor-7", False)
+    assert (await w.contact_row(scratch_pool, contact["id"]))["status"] == "calling"
+
+
+async def test_b_a_rate_limited_attempt_waits_out_its_hold(scratch_pool, redis_raw, monkeypatch):
+    world = await _setup(scratch_pool, provider="fake")
+    async with scratch_pool.acquire() as conn:
+        _, att = await w.open_attempt(conn, world, path="cpaas", provider="fake", age_s=30)
+    await scratch_pool.execute(
+        "UPDATE campaign_attempts SET rate_limited = true, not_before = now() + interval '30 seconds' WHERE id = $1", att["id"],
+    )
+    sends = []
+
+    async def originate(**kw):
+        sends.append(kw["idempotency_key"])
+        return "vendor-8"
+
+    monkeypatch.setattr(telephony_originate, "originate_call", originate)
+    await _reconcile(redis_raw)
+    assert sends == [] and (await _attempt(scratch_pool, att["idempotency_key"]))["state"] == "pending"

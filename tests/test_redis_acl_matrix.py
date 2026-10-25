@@ -65,7 +65,9 @@ def _denied(call) -> bool:
 
 
 def test_allowed_and_denied_matrix(port):
-    fs, camp, conv, tel = (_as(port, u) for u in ("freeswitch", "campaigns", "conversation", "telephony"))
+    fs, camp, conv, tel, gw = (_as(port, u) for u in ("freeswitch", "campaigns", "conversation", "telephony", "gateway"))
+    camp.set("campaign:route:x", "v")
+    assert gw.get("campaign:route:x") == "v"
     camp.set("campaign:intent:x", "v")
     camp.set("campaign:claim:x", "v")
     assert fs.execute_command("GETDEL", "campaign:intent:x") == "v"
@@ -78,6 +80,9 @@ def test_allowed_and_denied_matrix(port):
         lambda: fs.get("did:x"),
         lambda: fs.xadd("campaign:events:cpaas", {"k": "v"}),
         lambda: fs.set("campaign:cbprop:x", "v"),
+        lambda: gw.set("campaign:route:x", "v"),
+        lambda: gw.get("campaign:intent:x"),
+        lambda: fs.set("campaign:route:x", "v"),
         lambda: conv.execute_command("GETDEL", "campaign:intent:x"),
         lambda: conv.xadd("campaign:events:fs", {"k": "v"}),
         lambda: tel.xadd("campaign:events:fs", {"k": "v"}),

@@ -180,6 +180,16 @@ async def test_first_send_stores_the_intent_with_a_ttl_and_the_time_limit(scratc
     await client.close()
 
 
+async def test_first_send_writes_the_route_the_gateway_answers_the_call_with(scratch_redis):
+    client = _client(scratch_redis, _Kamailio())
+    intent = _intent()
+    await client.send(intent, first=True)
+    route_key = f"campaign:route:{intent.call_uuid}"
+    assert json.loads(await scratch_redis.get(route_key)) == {"tenant_slug": intent.tenant_slug, "agent_slug": intent.agent_slug}
+    assert dial_request.INTENT_TTL_S < await scratch_redis.ttl(route_key) <= dial_request.ROUTE_TTL_S
+    await client.close()
+
+
 async def test_second_first_send_is_a_duplicate_with_no_http_request(scratch_redis):
     kamailio = _Kamailio()
     client = _client(scratch_redis, kamailio)

@@ -694,6 +694,8 @@ CREATE INDEX IF NOT EXISTS idx_campaign_attempts_open_tenant
 -- CPS scope of each dial start: 'sip_trunk:pstn' or 'provider_account:<telephony_configs.id>'.
 ALTER TABLE campaign_attempts ADD COLUMN IF NOT EXISTS cps_scope    TEXT NOT NULL DEFAULT 'sip_trunk:pstn';
 ALTER TABLE campaign_attempts ADD COLUMN IF NOT EXISTS last_send_at TIMESTAMPTZ;
+-- The last Path B send was refused with 429: nothing was placed, so the next send skips reconcile_call.
+ALTER TABLE campaign_attempts ADD COLUMN IF NOT EXISTS rate_limited BOOLEAN NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS idx_campaign_attempts_cps ON campaign_attempts(cps_scope, last_send_at);
 
 -- Outbound-only tenant cap, superadmin-set. NULL = only the platform cap applies.
@@ -1548,11 +1550,3 @@ DO $$ BEGIN
   END IF;
 END $$;
 
--- Backfill legacy campaign_contacts phone numbers to E.164 format.
--- Numbers without a leading + are prepended with +, so they become valid E.164.
--- This allows the worker to dial them instead of marking them failed.
-DO $$ BEGIN
-  UPDATE campaign_contacts
-  SET phone_number = '+' || phone_number
-  WHERE phone_number NOT LIKE '+%' AND phone_number ~ '^[0-9]{7,15}$';
-END $$;

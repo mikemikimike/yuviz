@@ -1,4 +1,4 @@
-"""start_voice_ai.lua tells the Gateway a campaign call is outbound, with the caller ID, the campaign's agent slugs and the callee."""
+"""start_voice_ai.lua tells the Gateway a campaign call is outbound, with the caller ID and the callee, never an agent."""
 from __future__ import annotations
 
 import json
@@ -24,15 +24,13 @@ def test_without_a_campaign_key_the_metadata_is_the_inbound_golden_string():
     assert _metadata(INBOUND) == '{"did":"5003","ani":"1001","direction":"inbound","freeswitch_host":"10.0.0.5"}'
 
 
-def test_with_a_campaign_key_the_call_is_outbound_with_the_caller_id_the_agent_slugs_and_the_callee():
+def test_with_a_campaign_key_the_call_is_outbound_with_the_caller_id_and_the_callee():
     meta = json.loads(_metadata(CAMPAIGN))
     assert meta["did"] == "+918065354620"
     assert meta["ani"] == "+919876543210"
     assert meta["direction"] == "outbound"
     assert meta["freeswitch_host"] == "10.0.0.5"
-    assert meta["tenant_slug"] == "yuviz"
-    assert meta["agent_slug"] == "sales"
-    assert "ts" in meta and isinstance(meta["ts"], int)
+    assert meta.keys() == {"did", "ani", "direction", "freeswitch_host"}
 
 
 def test_a_hostile_callee_is_filtered_like_every_other_value():
@@ -42,6 +40,4 @@ def test_a_hostile_callee_is_filtered_like_every_other_value():
     assert meta["ani"] == "+1did5009x"
     assert meta["direction"] == "outbound"
     assert meta["freeswitch_host"] == "10.0.0.5"
-    assert meta["tenant_slug"] == "yuviz"
-    assert meta["agent_slug"] == "sdid5009"
-    assert "ts" in meta and isinstance(meta["ts"], int)
+    assert meta.keys() == {"did", "ani", "direction", "freeswitch_host"}

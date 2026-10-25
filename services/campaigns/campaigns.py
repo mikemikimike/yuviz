@@ -113,11 +113,14 @@ async def create_campaign(
     max_concurrent_calls: int, pacing_seconds: int, max_attempts: int,
     retry_gap_minutes: int = 60, calling_hours_start: str | None = None, calling_hours_end: str | None = None,
     calling_hours_timezone: str = "UTC", scheduled_start_at: datetime | None = None, description: str | None = None,
-    user_id: Any | None = None, user_email: str | None = None,
+    user_id: Any | None = None, user_email: str | None = None, platform_scoped: bool = False,
 ) -> dict[str, Any]:
     pool = await db.get_pool()
     status = "scheduled" if scheduled_start_at else "draft"
-    async with tenant_conn(pool) as conn:
+    conn_cm = (
+        platform_conn(pool, reason="campaign-by-id", stamp_tenant=tenant_id) if platform_scoped else tenant_conn(pool)
+    )
+    async with conn_cm as conn:
         row = await conn.fetchrow(
             "INSERT INTO campaigns "
             "(tenant_id, agent_id, name, status, caller_id, max_concurrent_calls, pacing_seconds, max_attempts, "
@@ -171,18 +174,49 @@ async def update_campaign(
     return new
 
 
+class InvalidTransition(ValueError):
+    pass
+
+
 async def set_status(
     campaign_id: Any, status: str, *,
     platform_scoped: bool = False, user_id: Any | None = None, user_email: str | None = None,
 ) -> dict[str, Any]:
-    """start/pause/resume: worker.py polls for status='running', so this is the whole signal."""
-    if status == "running":
-        pool = await db.get_pool()
-        conn_cm = platform_conn(pool, reason="campaign-by-id") if platform_scoped else tenant_conn(pool)
-        async with conn_cm as conn:
-            await conn.execute("UPDATE campaigns SET started_at = COALESCE(started_at, now()) WHERE id = $1", campaign_id)
+    """The one status writer; its row lock serialises it with claim_next_due, so no dial is claimed after it commits."""
+    pool = await db.get_pool()
+    conn_cm = platform_conn(pool, reason="campaign-by-id") if platform_scoped else tenant_conn(pool)
+    async with conn_cm as conn:
+        old_row = await conn.fetchrow(
+            "SELECT * FROM campaigns WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", campaign_id,
+        )
+        if old_row is None:
+            raise LookupError(f"campaign {campaign_id} not found")
+        if old_row["status"] not in _ALLOWED_FROM[status]:
+            raise InvalidTransition(f"a {old_row['status']} campaign can't be set to {status}")
+        new_row = await conn.fetchrow(
+            "UPDATE campaigns SET status = $2, updated_at = now(), "
+            "started_at = CASE WHEN $2 = 'running' THEN COALESCE(started_at, now()) ELSE started_at END "
+            "WHERE id = $1 RETURNING *",
+            campaign_id, status,
+        )
+        new = dict(new_row)
+        await audit.write_audit(
+            conn, entity_type="campaign", entity_id=campaign_id, action="updated",
+            user_id=user_id, user_email=user_email, old_value=dict(old_row), new_value=new,
+        )
+    return new
+
+
+async def refresh_caller_id(
+    campaign: dict[str, Any], *, platform_scoped: bool = False, user_id: Any | None = None, user_email: str | None = None,
+) -> dict[str, Any]:
+    """Every start picks up the agent's current outbound caller ID, so a fix made on the agent reaches the campaign."""
+    agent = await agent_outbound_settings(campaign["tenant_id"], campaign["agent_id"], platform_scoped=platform_scoped)
+    caller_id = agent["outbound_caller_id"] if agent else None
+    if not caller_id or caller_id == campaign["caller_id"]:
+        return campaign
     return await update_campaign(
-        campaign_id, {"status": status}, platform_scoped=platform_scoped, user_id=user_id, user_email=user_email,
+        campaign["id"], {"caller_id": caller_id}, platform_scoped=platform_scoped, user_id=user_id, user_email=user_email,
     )
 
 
@@ -268,32 +302,43 @@ async def set_wait_reason(campaign_id: Any, reason: capacity.WaitReason | None) 
 
 CANCELLABLE = ("draft", "scheduled", "running", "paused")
 RECALLABLE_OUTCOMES = ("no_answer", "busy", "failed", "declined")
+_ALLOWED_FROM = {
+    "running": ("draft", "scheduled", "paused", "running"),
+    "paused": ("running", "paused"),
+    "completed": ("running",),
+    "cancelled": CANCELLABLE,
+}
 
 
 async def set_cancelled(
     campaign: dict[str, Any], *, platform_scoped: bool = False, user_id: Any | None = None, user_email: str | None = None,
 ) -> dict[str, Any]:
-    if campaign["status"] not in CANCELLABLE:
-        raise ValueError(f"a {campaign['status']} campaign can't be cancelled")
-    updated = await update_campaign(
-        campaign["id"], {"status": "cancelled"},
-        platform_scoped=platform_scoped, user_id=user_id, user_email=user_email,
+    updated = await set_status(
+        campaign["id"], "cancelled", platform_scoped=platform_scoped, user_id=user_id, user_email=user_email,
     )
     await close_unsent_attempts(campaign["id"], platform_scoped=platform_scoped)
     return updated
 
 
 async def close_unsent_attempts(campaign_id: Any, *, platform_scoped: bool = False) -> int:
-    """Attempts never handed to a provider can't be left open; calls already placed are left to finish."""
+    """Attempts never handed to a provider can't be left open, nor their leads left 'calling'; placed calls finish."""
     pool = await db.get_pool()
     conn_cm = platform_conn(pool, reason="campaign-by-id") if platform_scoped else tenant_conn(pool)
     async with conn_cm as conn:
-        status = await conn.execute(
-            "UPDATE campaign_attempts SET state = 'resolved', outcome = 'failed', failure_reason = 'campaign_cancelled', "
-            "resolved_at = now() WHERE campaign_id = $1 AND state = 'pending'",
+        return await conn.fetchval(
+            """
+            WITH closed AS (
+                UPDATE campaign_attempts SET state = 'resolved', outcome = 'failed', failure_reason = 'campaign_cancelled',
+                       resolved_at = now()
+                WHERE campaign_id = $1 AND state = 'pending' RETURNING contact_id
+            ), freed AS (
+                UPDATE campaign_contacts SET status = 'failed', next_attempt_at = NULL
+                WHERE id IN (SELECT contact_id FROM closed) AND status = 'calling' RETURNING id
+            )
+            SELECT count(*) FROM closed
+            """,
             campaign_id,
         )
-    return int(status.split()[-1])
 
 
 async def soft_delete_draft(
@@ -356,13 +401,13 @@ def _digits(value: str | None) -> str:
 
 async def recall(
     source: dict[str, Any], contact_ids: list[str], *, name: str | None,
-    user_id: Any | None = None, user_email: str | None = None,
+    platform_scoped: bool = False, user_id: Any | None = None, user_email: str | None = None,
 ) -> dict[str, Any]:
     """A fresh draft with the same agent, caller ID and settings, holding only the chosen leads who were not reached."""
     from . import campaign_contacts
 
     wanted = set(contact_ids)
-    contacts = await campaign_contacts.list_contacts(source["id"])
+    contacts = await campaign_contacts.list_contacts(source["id"], platform_scoped=platform_scoped)
     eligible = [
         c for c in contacts
         if str(c["id"]) in wanted and c["status"] in RECALLABLE_OUTCOMES
@@ -377,9 +422,10 @@ async def recall(
         retry_gap_minutes=source["retry_gap_minutes"], calling_hours_start=source["calling_hours_start"],
         calling_hours_end=source["calling_hours_end"], calling_hours_timezone=source["calling_hours_timezone"],
         description=f"Re-dial of {source['name']}", user_id=user_id, user_email=user_email,
+        platform_scoped=platform_scoped,
     )
     await campaign_contacts.bulk_insert_contacts(
         new["id"], [{"phone_number": c["phone_number"], "name": c["name"] or ""} for c in eligible],
-        tenant_id=source["tenant_id"],
+        platform_scoped=platform_scoped, tenant_id=source["tenant_id"],
     )
     return new

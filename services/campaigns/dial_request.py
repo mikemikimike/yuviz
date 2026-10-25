@@ -21,6 +21,7 @@ import redis.asyncio as redis
 log = logging.getLogger(__name__)
 
 INTENT_TTL_S = 60
+ROUTE_TTL_S = 180  # outlives the intent plus FreeSWITCH's 45 s ring, so the Gateway still finds it on answer
 EGRESS_GRACE_S = 120
 HTTP_TIMEOUT_S = 3.0
 
@@ -136,6 +137,11 @@ class DialRequestClient:
     async def send(self, intent: DialIntent, *, first: bool) -> SendResult:
         intent_key = f"campaign:intent:{intent.key}"
         if first:
+            # The Gateway routes the answered call by this record alone; written first so no dial lacks it.
+            await self._redis.set(
+                f"campaign:route:{intent.call_uuid}",
+                json.dumps({"tenant_slug": intent.tenant_slug, "agent_slug": intent.agent_slug}), ex=ROUTE_TTL_S,
+            )
             if not await self._redis.set(intent_key, json.dumps(asdict(intent)), nx=True, ex=INTENT_TTL_S):
                 return "duplicate"
         elif not await self._redis.exists(intent_key) or await self._redis.exists(f"campaign:claim:{intent.key}"):

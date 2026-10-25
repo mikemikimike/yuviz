@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, field_validator
 
+_HHMM = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
+
 CampaignStatus = Literal["draft", "scheduled", "running", "paused", "completed", "cancelled"]
 
 
@@ -30,8 +32,8 @@ class CampaignCreate(BaseModel):
     max_attempts:           int = Field(1, ge=1)
     retry_gap_minutes:      int = Field(60, ge=1)
     # "HH:MM" 24h, both or neither; None/None means unrestricted.
-    calling_hours_start:    str | None = None
-    calling_hours_end:      str | None = None
+    calling_hours_start:    str | None = Field(None, pattern=_HHMM)
+    calling_hours_end:      str | None = Field(None, pattern=_HHMM)
     calling_hours_timezone: str = "UTC"
 
     _check_timezone = field_validator("calling_hours_timezone")(_valid_timezone)
@@ -44,8 +46,8 @@ class CampaignUpdate(BaseModel):
     pacing_seconds:         int | None = None
     max_attempts:           int | None = Field(None, ge=1)
     retry_gap_minutes:      int | None = Field(None, ge=1)
-    calling_hours_start:    str | None = None
-    calling_hours_end:      str | None = None
+    calling_hours_start:    str | None = Field(None, pattern=_HHMM)
+    calling_hours_end:      str | None = Field(None, pattern=_HHMM)
     calling_hours_timezone: str | None = None
 
     _check_timezone = field_validator("calling_hours_timezone")(_valid_timezone)
