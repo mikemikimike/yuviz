@@ -288,9 +288,6 @@ export default function KnowledgeBasesPage() {
   return (
     <div className="knowledge-library">
       <div className="knowledge-heading">
-        <div>
-          <h1>Knowledge</h1>
-        </div>
         {usage && (
           <div className="knowledge-usage" aria-label="Knowledge usage">
             <div className="knowledge-usage-group">
