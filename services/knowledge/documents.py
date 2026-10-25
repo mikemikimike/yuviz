@@ -39,7 +39,8 @@ async def list_documents(kb_id: Any) -> list[dict[str, Any]]:
         # Not parent rows (no embedding of their own), and regardless of version: during a re-ingest the document keeps
         # serving its old chunks, so the count stays what is searchable.
         rows = await conn.fetch(
-            f"SELECT d.*, {RETRYABLE_SQL} AS retryable, c.chunk_count, c.token_count "
+            f"SELECT d.*, {RETRYABLE_SQL} AS retryable, "
+            "       COALESCE(c.chunk_count, 0) AS chunk_count, COALESCE(c.token_count, 0) AS token_count "
             "FROM kb_documents d "
             "LEFT JOIN LATERAL (SELECT COUNT(*) AS chunk_count, COALESCE(SUM(token_count), 0) AS token_count "
             "                   FROM kb_chunks WHERE document_id = d.id AND NOT is_parent) c ON true "
