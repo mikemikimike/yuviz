@@ -144,7 +144,7 @@ export interface DocumentText {
   document_id: string;
   text: string;
   // "sections": whole sections in order; "chunks": the indexed windows joined without their overlap.
-  source: "sections" | "chunks";
+  source: "extracted" | "sections" | "chunks";
   truncated: boolean;
 }
 

@@ -259,10 +259,17 @@ def _join_windows(chunks: list[str]) -> str:
 
 
 async def get_document_text(document_id: Any, *, platform_scoped: bool = False) -> dict[str, Any]:
-    """The text the agent searches, rebuilt from indexed chunks: parents are output before their children."""
+    """The text extracted when the document was indexed; for one indexed before that was kept, rebuilt from its chunks
+    (each section once, short sections with no parent included, fixed windows joined without their overlap)."""
     pool = await db.get_pool()
     conn_cm = platform_conn(pool, reason="document-by-id") if platform_scoped else tenant_conn(pool)
     async with conn_cm as conn:
+        stored = await conn.fetchrow("SELECT text, truncated FROM kb_document_texts WHERE document_id = $1", document_id)
+        if stored is not None:
+            return {
+                "document_id": str(document_id), "text": stored["text"], "source": "extracted",
+                "truncated": stored["truncated"],
+            }
         chunks = await conn.fetch(
             "SELECT id, parent_id, content, is_parent, chunk_index FROM kb_chunks "
             "WHERE document_id = $1",

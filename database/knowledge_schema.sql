@@ -142,6 +142,16 @@ BEGIN
     END LOOP;
 END $kb_cross_tenant_report$;
 
+-- ── kb_document_texts — the extracted text of a document's indexed version, for the console's text view ──
+CREATE TABLE IF NOT EXISTS kb_document_texts (
+    document_id UUID PRIMARY KEY REFERENCES kb_documents(id) ON DELETE CASCADE,
+    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    text        TEXT NOT NULL,
+    truncated   BOOLEAN NOT NULL DEFAULT false,
+    version     INT NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ── agent_documents — which documents an agent retrieves from ──────────────
 -- The only source of an agent's knowledge scope; agent_knowledge_bases is read once below, then retired.
 CREATE TABLE IF NOT EXISTS agent_documents (

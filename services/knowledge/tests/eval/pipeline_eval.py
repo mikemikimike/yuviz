@@ -96,7 +96,8 @@ async def run_pipeline_eval(
     previous_tenants = os.environ.get("KNOWLEDGE_ENRICH_TENANTS")
     if llm_config:  # enrichment is per-tenant opt-in: enable exactly this throwaway tenant
         os.environ["KNOWLEDGE_ENRICH_TENANTS"] = slug
-    tenant = dict(await pool.fetchrow("INSERT INTO tenants (name, slug) VALUES ($1, $1) RETURNING *", slug))
+    tenant = dict(await pool.fetchrow(  # the golden corpus is larger than the default per-tenant file limit
+        "INSERT INTO tenants (name, slug, knowledge_max_documents) VALUES ($1, $1, 1000) RETURNING *", slug))
     try:
         agent = dict(await pool.fetchrow(
             "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'golden', 'Golden') RETURNING *", tenant["id"]))

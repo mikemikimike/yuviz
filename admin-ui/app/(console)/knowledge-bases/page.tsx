@@ -59,7 +59,9 @@ function formatBytes(bytes: number | null): string {
 }
 
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return new Date(iso)
+    .toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short", hour12: true })
+    .replace(/\b(am|pm)\b/i, (m) => m.toUpperCase());
 }
 
 const preparing = (d: KbDocument) => d.status === "pending" || d.status === "processing";
@@ -288,7 +290,6 @@ export default function KnowledgeBasesPage() {
       <div className="knowledge-heading">
         <div>
           <h1>Knowledge</h1>
-          <p>Upload documents, then attach them to an agent under Knowledge.</p>
         </div>
         {usage && (
           <div className="knowledge-usage" aria-label="Knowledge usage">
@@ -494,6 +495,12 @@ export default function KnowledgeBasesPage() {
                 ? <span className="badge amber">Reindexing…</span>
                 : <span className={`badge ${FILE_STATUS[detail.status].color}`}>{FILE_STATUS[detail.status].label}</span>}
             </div>
+            {detail.status === "ready_degraded" && !reindexing(detail) && (
+              <p className="knowledge-file-warning">
+                Indexed, but part of it could not be read{detail.error ? `: ${detail.error}` : "."} The agent answers from the
+                text below.
+              </p>
+            )}
             {reindexing(detail) && (
               <p className="knowledge-manage-preparing">Reindexing. The agent answers from the text below until it finishes.</p>
             )}

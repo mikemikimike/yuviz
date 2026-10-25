@@ -293,6 +293,17 @@ END $$;
 
 DO $$
 BEGIN
+    DROP POLICY IF EXISTS kb_document_texts_tenant_isolation ON kb_document_texts;
+    CREATE POLICY kb_document_texts_tenant_isolation ON kb_document_texts
+        FOR ALL TO yuviz_app
+        USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+        WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+    ALTER TABLE kb_document_texts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE kb_document_texts FORCE  ROW LEVEL SECURITY;
+END $$;
+
+DO $$
+BEGIN
     DROP POLICY IF EXISTS telephony_configs_tenant_isolation ON telephony_configs;
     CREATE POLICY telephony_configs_tenant_isolation ON telephony_configs
         FOR ALL TO yuviz_app
