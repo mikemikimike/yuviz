@@ -288,8 +288,24 @@ body {
 .form-row { display: flex; gap: 11px; }
 .form-row .form-group { flex: 1; }
 
-.voice-picker-container { display: flex; flex-direction: column; gap: 8px; }
-.voice-options-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+.voice-picker-container { display: flex; flex-direction: column; gap: 8px; position: relative; }
+.voice-picker-field {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--surf-2); border: 1px solid var(--border-2); border-radius: var(--rs);
+  padding: 6px;
+}
+.voice-picker-trigger {
+  flex: 1; display: flex; align-items: center; gap: 8px; justify-content: space-between;
+  background: none; border: none; color: var(--text); cursor: pointer; font-size: .78rem;
+  padding: 4px 6px; text-align: left; font-family: var(--font);
+}
+.voice-picker-trigger:hover { color: var(--text-2); }
+.voice-picker-text { flex: 1; }
+.voice-options-list {
+  display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto;
+  background: var(--surf); border: 1px solid var(--border); border-radius: var(--rs);
+  margin-top: 4px; padding: 8px;
+}
 .voice-option {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
   background: var(--surf-2); border: 1px solid var(--border-2); border-radius: var(--rs);
