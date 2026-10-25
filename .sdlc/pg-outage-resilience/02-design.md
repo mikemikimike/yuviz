@@ -80,7 +80,7 @@ Unit tests with fakes. Each states what would make it fail (lesson 12). All use 
    - Fails if: any fetch sits outside the `wait_for`.
 4. **Fallback semantics.**
    - Seed a cached entry, then expire it via monotonic.
-   - With the DB failing (`OSError("connect to 10.0.0.5:5432 postgresql://u:p@h/db")`): `only=None` returns the full stale list, `only=[]` returns `[]`, and `only=["x"]` returns a subset of `["x"]`. This holds both on the fallback call and on an in-window call.
+   - With the DB failing (`OSError("connect to 10.0.0.5:5432 postgresql://u:<password>@h/db")`): `only=None` returns the full stale list, `only=[]` returns `[]`, and `only=["x"]` returns a subset of `["x"]`. This holds both on the fallback call and on an in-window call.
    - In-window calls make zero `tenant_conn` entries and log no additional WARNING.
    - Exactly one WARNING is logged, and it contains neither `10.0.0.5`, `5432` nor `postgresql://`.
    - At window + 1 s with the DB healthy: one fetch happens, the cache is refreshed and the backoff entry cleared.
