@@ -29,6 +29,10 @@ class TurnLatency:
     tts_engine:        str | None = None
 
 
+class SessionCollision(RuntimeError):
+    """begin_call() for a session_id another tenant's live call already holds."""
+
+
 class TranscriptBuilder:
     def __init__(
         self,
@@ -174,8 +178,14 @@ class TranscriptBuilder:
         if self._pool is None:
             return
         tenant_slug = tenant_id or "default"
-        self._turn_counts[session_id] = 0
-        self._barge_in_counts[session_id] = 0
+        live_slug = self._tenant_slugs.get(session_id)
+        if live_slug is not None and live_slug != tenant_slug:
+            # Overwriting would re-point the live call's later writes at the new tenant, or let
+            # the first call's end_call() strip the second's bookkeeping.
+            raise SessionCollision(f"session_id already live for another tenant session={session_id}")
+        # A repeat begin_call() for the same live call (delegate handoff) keeps its counters.
+        self._turn_counts.setdefault(session_id, 0)
+        self._barge_in_counts.setdefault(session_id, 0)
         self._tenant_slugs[session_id] = tenant_slug
         self._spawn(session_id, self._begin_call(
             session_id, tenant_slug, call_id, direction, caller_number, called_number,
@@ -245,7 +255,11 @@ class TranscriptBuilder:
             session_id, tenant_slug, close_reason, turn_count, barge_in_count, final_state,
             score_sentiment=score_sentiment,
         ))
-        self._chains[session_id].add_done_callback(lambda _: self._chains.pop(session_id, None))
+        chain = self._chains[session_id]
+        # Only this call's chain: a later call reusing the id may already have replaced it.
+        chain.add_done_callback(
+            lambda _: self._chains.pop(session_id, None) if self._chains.get(session_id) is chain else None
+        )
 
     def _spawn(self, session_id: str, coro) -> None:
         """Schedule *coro*, chained after any write already in flight for this
@@ -277,15 +291,22 @@ class TranscriptBuilder:
             async with tenant_conn(
                 self._pool, explicit_tenant=tenant_slug, reason="conversation-session-write",
             ) as conn:
-                await conn.execute(
+                # A conflict on another tenant's row must not count as success: every later write
+                # is also tenant-guarded, so that stream's writes are dropped, not attached.
+                owned = await conn.fetchval(
                     "INSERT INTO calls "
                     "(session_id, tenant_id, call_id, direction, caller_number, called_number, "
                     "agent_id, agent_config_version, conv_node) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (session_id) DO NOTHING",
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
+                    "ON CONFLICT (session_id) DO UPDATE SET session_id = calls.session_id "
+                    "WHERE calls.tenant_id = EXCLUDED.tenant_id RETURNING 1",
                     session_id, tenant_slug, call_id or None,
                     direction or "inbound", caller_number or None, called_number or None,
                     agent_id, agent_config_version, self._node_id,
                 )
+                if owned is None:
+                    log.error("TranscriptBuilder: session_id belongs to another tenant's call "
+                              "session=%s tenant=%s", session_id, tenant_slug)
         except Exception:
             log.exception("TranscriptBuilder: begin_call failed session=%s", session_id)
 
@@ -299,11 +320,12 @@ class TranscriptBuilder:
             ) as conn:
                 await conn.execute(
                     "UPDATE calls SET nodes_visited = $2::jsonb, disposition = $3, "
-                    "extracted_variables = $4::jsonb WHERE session_id = $1",
+                    "extracted_variables = $4::jsonb WHERE session_id = $1 AND tenant_id = $5",
                     session_id,
                     json.dumps(nodes_visited or []),
                     disposition,
                     json.dumps(extracted_variables or {}),
+                    tenant_slug,
                 )
         except Exception:
             log.exception("TranscriptBuilder: record_workflow_outcome failed session=%s", session_id)
@@ -316,8 +338,8 @@ class TranscriptBuilder:
                 self._pool, explicit_tenant=tenant_slug, reason="conversation-session-write",
             ) as conn:
                 await conn.execute(
-                    "UPDATE calls SET detected_languages = $2 WHERE session_id = $1",
-                    session_id, languages,
+                    "UPDATE calls SET detected_languages = $2 WHERE session_id = $1 AND tenant_id = $3",
+                    session_id, languages, tenant_slug,
                 )
         except Exception:
             log.exception("TranscriptBuilder: record_detected_languages failed session=%s", session_id)
@@ -328,8 +350,8 @@ class TranscriptBuilder:
                 self._pool, explicit_tenant=tenant_slug, reason="conversation-session-write",
             ) as conn:
                 await conn.execute(
-                    "UPDATE calls SET live_stage = $2 WHERE session_id = $1",
-                    session_id, stage,
+                    "UPDATE calls SET live_stage = $2 WHERE session_id = $1 AND tenant_id = $3",
+                    session_id, stage, tenant_slug,
                 )
         except Exception:
             log.exception("TranscriptBuilder: record_live_stage failed session=%s stage=%s", session_id, stage)
@@ -359,12 +381,14 @@ class TranscriptBuilder:
                     "(session_id, turn_number, caller_text, caller_confidence, ai_response, interrupted, "
                     "stt_engine, stt_latency_ms, llm_engine, llm_latency_ms, tts_engine, tts_latency_ms, "
                     "latency_ms) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)",
+"SELECT $1::text, $2::int, $3::text, $4::float8, $5::text, $6::bool, $7::text, $8::int, "
+                    "$9::text, $10::int, $11::text, $12::int, $13::jsonb "
+                    "WHERE EXISTS (SELECT 1 FROM calls WHERE session_id = $1 AND tenant_id = $14)",
                     session_id, turn_number, caller_text, caller_confidence, ai_response, interrupted,
                     latency.stt_engine, _round_or_none(latency.stt_ms),
                     latency.llm_engine, _round_or_none(latency.llm_ms),
                     latency.tts_engine, _round_or_none(latency.tts_ms),
-                    latency_json,
+                    latency_json, tenant_slug,
                 )
         except Exception:
             log.exception(
@@ -386,15 +410,16 @@ class TranscriptBuilder:
                     "duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000, "
                     "close_reason = $2, turn_count = $3, barge_in_count = $4, "
                     "final_state = COALESCE($5, final_state) "
-                    "WHERE session_id = $1",
-                    session_id, close_reason, turn_count, barge_in_count, final_state,
+                    "WHERE session_id = $1 AND tenant_id = $6",
+                    session_id, close_reason, turn_count, barge_in_count, final_state, tenant_slug,
                 )
                 # Read back rather than holding transcripts in memory; chained after all turn writes.
                 if self._sentiment is not None and score_sentiment:
                     rows = await conn.fetch(
-                        "SELECT caller_text, ai_response FROM transcript_entries "
-                        "WHERE session_id = $1 ORDER BY turn_number",
-                        session_id,
+                        "SELECT te.caller_text, te.ai_response FROM transcript_entries te "
+                        "JOIN calls c ON c.session_id = te.session_id "
+                        "WHERE te.session_id = $1 AND c.tenant_id = $2 ORDER BY te.turn_number",
+                        session_id, tenant_slug,
                     )
                     turns = [Turn(caller_text=r["caller_text"], ai_response=r["ai_response"])
                              for r in rows]
@@ -422,8 +447,9 @@ class TranscriptBuilder:
                 self._pool, explicit_tenant=tenant_slug, reason="conversation-session-write",
             ) as conn:
                 await conn.execute(
-                    "UPDATE calls SET sentiment = $2, sentiment_reason = $3 WHERE session_id = $1",
-                    session_id, result.label, result.reason or None,
+                    "UPDATE calls SET sentiment = $2, sentiment_reason = $3 "
+                    "WHERE session_id = $1 AND tenant_id = $4",
+                    session_id, result.label, result.reason or None, tenant_slug,
                 )
         except Exception:
             log.exception("TranscriptBuilder: sentiment write failed session=%s", session_id)

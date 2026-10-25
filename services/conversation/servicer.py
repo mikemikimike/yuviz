@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import logging
 import time
 from typing import AsyncGenerator, Awaitable, AsyncIterator, Callable
@@ -90,6 +91,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
     ) -> None:
         self._handler_factory = handler_factory
         self._stream_tasks: set[asyncio.Task] = set()
+        self._live_sessions: set[str] = set()
 
     async def wait_closed(self, timeout: float) -> None:
         """Wait for open streams to finish their teardown, so end-of-call writes are queued
@@ -131,6 +133,28 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             )
             return
 
+        # Per-session state downstream (transcript bookkeeping, STT stream, call row) is keyed by the
+        # client-supplied session_id, so one live stream per id, across tenants. The refusal text is
+        # the same whichever tenant holds the id.
+        sid = open_req.session_id
+        if sid in self._live_sessions:
+            log.warning("Converse: duplicate live session_id refused session=%s tenant=%s",
+                        sid, open_req.tenant_id)
+            await context.abort(grpc.StatusCode.ALREADY_EXISTS, "session_id already in use")
+            return
+        self._live_sessions.add(sid)
+        try:
+            async with contextlib.aclosing(self._serve(open_req, request_iterator)) as stream:
+                async for message in stream:
+                    yield message
+        finally:
+            self._live_sessions.discard(sid)
+
+    async def _serve(
+        self,
+        open_req: pb.SessionOpenRequest,
+        request_iterator: AsyncIterator[pb.GatewayMessage],
+    ) -> AsyncIterator[pb.ServiceMessage]:
         sid = open_req.session_id
         routing_status = _ROUTING_STATUS.get(open_req.routing_status)
         if routing_status is None:
