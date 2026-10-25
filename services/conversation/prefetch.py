@@ -16,7 +16,7 @@ from .tools.envelope import UNTRUSTED_NOTICE, cap_passages, wrap_untrusted
 MAX_PASSAGES = 3
 MAX_WORDS = 450
 MAX_CHARS = 2400
-_WAIT_MS_DEFAULT = 250
+_WAIT_MS_DEFAULT = 500
 
 
 def enabled(environ: dict[str, str] | None = None) -> bool:
@@ -27,7 +27,12 @@ def enabled(environ: dict[str, str] | None = None) -> bool:
 
 def wait_s() -> float:
     """The longest the turn waits for the search before starting the model without it
-    (VOICEAI_PRE_RETRIEVAL_WAIT_MS, default 250; 0 starts the model at once and uses a finished search only)."""
+    (VOICEAI_PRE_RETRIEVAL_WAIT_MS, default 500; 0 starts the model at once and uses a finished search only).
+
+    A search that is still running costs far less to wait for than to drop: a late result means the model runs
+    without the passages and then calls search_knowledge, a whole extra model pass (~0.8 s) plus a second search.
+    A hosted embedder alone can take its 300 ms budget, then the vector search and the hop to the knowledge service,
+    so the default covers the knowledge service's own 400 ms retrieval deadline plus that hop."""
     return env_ms("VOICEAI_PRE_RETRIEVAL_WAIT_MS", _WAIT_MS_DEFAULT) / 1000
 
 
@@ -61,6 +66,18 @@ _TRIGGERS = frozenset({
 })
 _PHRASES = ("is there", "are there", "does it", "do you have", "do you offer", "do you accept", "tell me about")
 
+# Asking to DO something is not asking to KNOW something. A request to book, change or cancel is handled by the
+# booking tools, and a search here would also taint the turn and hold the write for an extra "yes", so it is checked
+# before any question mark or question word ("Can you book a site visit?", every Hindi "क्या ..."). Nouns that
+# also name a topic ("documents needed for booking", "cancellation policy") are NOT here; those stay questions.
+_ACTION_WORDS = frozenset({
+    "book", "schedule", "reschedule", "rescheduling", "cancel", "cancelling", "canceling", "appointment",
+    "appointments", "slot", "slots", "transfer", "बुक", "शेड्यूल", "रीशेड्यूल", "कैंसल", "रद्द", "अपॉइंटमेंट", "स्लॉट",
+    "ट्रांसफर",
+})
+_ACTION_PHRASES = ("make a booking", "make booking", "a booking for", "my booking", "the booking", "बुकिंग करना",
+                   "बुकिंग करनी", "बुकिंग करवा", "बुकिंग कर")
+
 
 def wants_knowledge(text: str) -> bool:
     """True when the caller's words look like a question or topic the knowledge base answers. Conservative on
@@ -69,6 +86,8 @@ def wants_knowledge(text: str) -> bool:
     folded = (text or "").casefold().strip()
     words = _WORD.findall(folded)
     if len(words) < 3 or all(w in _ACKNOWLEDGEMENTS for w in words):
+        return False
+    if any(w in _ACTION_WORDS for w in words) or any(p in folded for p in _ACTION_PHRASES):
         return False
     if "?" in folded or "？" in folded:
         return True
@@ -82,8 +101,9 @@ def reference_block(
 ) -> str | None:
     """The note that carries the retrieved passages, or None when nothing is left after capping.
     Passages are wrapped as untrusted data exactly like a search_knowledge result. `low_confidence` (the search
-    flagged its best match as weak, as keyword-only evidence always is) tells the model to use them only when they
-    clearly answer the question, as the search_knowledge result does."""
+    flagged its best match as weak) tells the model to use them only when they clearly answer the question, as the
+    search_knowledge result does. The pipeline also passes it for a partial result (a lost search branch): a
+    keyword-only hit that scores well enough is not flagged weak, yet it is still incomplete evidence."""
     kept, _truncated = cap_passages(passages[:MAX_PASSAGES + always_included], always_included, MAX_WORDS, MAX_CHARS)
     if not kept:
         return None

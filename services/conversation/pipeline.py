@@ -1734,11 +1734,14 @@ class PipelineConversationHandler:
         if task not in done:
             task.cancel()
             task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            self._metrics.increment("pre_retrieval_late")
             log.info("pre_retrieval: outcome=late waited_ms=%.0f session=%s", waited_ms, session_id)
             return None
+        self._metrics.observe("pre_retrieval_wait_ms", waited_ms)
         try:
             context = task.result()
         except Exception:  # noqa: BLE001
+            self._metrics.increment("pre_retrieval_error")
             log.warning("pre_retrieval: outcome=error waited_ms=%.0f session=%s", waited_ms, session_id, exc_info=True)
             return None
         if context is None or context.status not in ("ok", "partial") or not context.chunks:
@@ -1753,8 +1756,9 @@ class PipelineConversationHandler:
             [c.content for c in context.chunks],
             int(context.retrieval_metadata.get("always_included") or 0),
             answer_in=language_name(answer_in) if answer_in else None,
-            low_confidence=bool(context.low_confidence),
+            low_confidence=bool(context.low_confidence) or context.status == "partial",
         )
+        self._metrics.increment("pre_retrieval_used" if block else "pre_retrieval_empty")
         log.info(
             "pre_retrieval: outcome=%s status=%s chunks=%d low_confidence=%s waited_ms=%.0f trace_id=%s session=%s",
             "used" if block else "empty", context.status, len(context.chunks), context.low_confidence, waited_ms,

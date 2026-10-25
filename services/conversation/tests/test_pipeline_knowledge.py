@@ -422,10 +422,10 @@ async def test_a_pre_retrieved_turn_keeps_its_tool_messages_and_never_stores_the
 
     executor = _Executor()
     handler, llm, knowledge = _handler_with_tools(
-        "What slots do you have tomorrow?",
-        [[ToolCallEvent(tool_call_id="c1", tool_name="execute_api", arguments={"api_name": "check_availability"})],
-         [TokenEvent(text="We have ten and eleven.")]],
-        executor, read_only={"check_availability"},
+        "What is the status of my order?",
+        [[ToolCallEvent(tool_call_id="c1", tool_name="execute_api", arguments={"api_name": "order_status"})],
+         [TokenEvent(text="It ships tomorrow.")]],
+        executor, read_only={"order_status"},
     )
 
     async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
@@ -434,7 +434,7 @@ async def test_a_pre_retrieved_turn_keeps_its_tool_messages_and_never_stores_the
     assert len(knowledge.calls) == 1 and len(executor.calls) == 1
     history = handler._get_history("s1")
     assert [m.role for m in history] == ["system", "user", "assistant", "tool", "assistant"]   # the tool round survives
-    assert history[1].content == "What slots do you have tomorrow?"
+    assert history[1].content == "What is the status of my order?"
     assert "Timings: 10 AM to 6 PM." not in "".join(m.content or "" for m in history)           # passages never stored
     # ...yet the model saw them on both of the turn's LLM calls
     assert len(llm.seen_messages) == 2
@@ -461,3 +461,54 @@ async def test_a_write_on_a_pre_retrieved_turn_is_held_for_the_callers_confirmat
     assert executor.calls == []                                       # the write did not run
     envelope = json.loads(next(m.content for m in handler._get_history("s1") if m.role == "tool"))
     assert envelope["error"]["code"] == "needs_caller_confirmation"
+
+
+async def test_a_search_as_slow_as_a_hosted_embedder_is_still_used_by_default():
+    """A hosted embedder (300 ms budget) plus the vector search and the hop lands past 250 ms: dropping it there
+    costs a whole extra model pass, so the default wait covers it."""
+    knowledge = _kb(delay_s=0.35)
+    t0 = time.monotonic()
+    _handler, calls = await _turn("What is your refund policy?", knowledge)
+    assert time.monotonic() - t0 < 2.0
+    assert REFUND in calls[0][1].content                                            # used, not dropped as late
+
+
+async def test_a_late_search_is_counted():
+    class _Metrics:
+        def __init__(self):
+            self.counts: dict[str, int] = {}
+
+        def increment(self, name, value=1.0):
+            self.counts[name] = self.counts.get(name, 0) + 1
+
+        def observe(self, name, value):
+            pass
+
+    import os
+    os.environ["VOICEAI_PRE_RETRIEVAL_WAIT_MS"] = "30"
+    try:
+        metrics = _Metrics()
+        stt = _make_stt("What is your refund policy?")
+        llm, _calls = _capturing_llm(["ok"])
+        handler = _make_handler(stt, llm, _make_tts(), knowledge=_kb(delay_s=1.0), node_knowledge=["kb1"],
+                                metrics=metrics)
+        async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+            pass
+    finally:
+        del os.environ["VOICEAI_PRE_RETRIEVAL_WAIT_MS"]
+    assert metrics.counts.get("pre_retrieval_late") == 1
+
+
+async def test_a_confident_keyword_only_hit_is_still_flagged_because_a_branch_was_lost():
+    import dataclasses
+
+    class _PartialButConfident(_CountingKnowledge):
+        async def retrieve(self, tenant_slug, agent_slug, query, policy=None):
+            context = await super().retrieve(tenant_slug, agent_slug, query, policy)
+            return dataclasses.replace(context, status="partial", low_confidence=False,
+                                       degraded=["embedding_unavailable", "lexical_only"])
+
+    knowledge = _PartialButConfident()
+    knowledge.add_chunk("test", "test-agent", REFUND, score=0.95, document_title="Refund Policy")
+    _handler, calls = await _turn("What is your refund policy?", knowledge)
+    assert REFUND in calls[0][1].content and "These matches are weak" in calls[0][1].content

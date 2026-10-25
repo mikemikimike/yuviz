@@ -24,6 +24,33 @@ def test_questions_and_topics_search(text):
 
 
 @pytest.mark.parametrize("text", [
+    # a request to book, change or cancel is not a knowledge question, even with a "?" or a Hindi "क्या"
+    "Can you book a site visit for Saturday?",
+    "क्या मैं शनिवार को विज़िट बुक कर सकता हूँ",
+    "What slots do you have tomorrow?",
+    "Can I cancel my appointment?",
+    "Could you reschedule it to Monday?",
+    "Is it possible to schedule a visit?",
+    "क्या मैं अपॉइंटमेंट कैंसल कर सकता हूँ",
+    "Can I make a booking for Sunday?",
+    "Please transfer me to the sales team?",
+    "क्या आप बुकिंग करना चाहेंगे",
+])
+def test_a_punctuated_or_question_worded_action_request_does_not_search(text):
+    assert not prefetch.wants_knowledge(text)
+
+
+@pytest.mark.parametrize("text", [
+    "What is your cancellation policy?",                     # a topic that merely contains the stem
+    "What documents are needed for booking?",
+    "Do you provide free pickup for the site visit?",
+    "Is there a charge for the site visit?",
+])
+def test_topics_that_only_mention_an_action_noun_still_search(text):
+    assert prefetch.wants_knowledge(text)
+
+
+@pytest.mark.parametrize("text", [
     "My name is Rahul Sharma",
     "Yes please book it",
     "yes",
@@ -47,13 +74,13 @@ def test_two_word_utterances_never_search_even_with_a_trigger_word():
 def test_settings_defaults_and_overrides(monkeypatch):
     monkeypatch.delenv("VOICEAI_PRE_RETRIEVAL", raising=False)
     monkeypatch.delenv("VOICEAI_PRE_RETRIEVAL_WAIT_MS", raising=False)
-    assert prefetch.enabled() and prefetch.wait_s() == 0.25
+    assert prefetch.enabled() and prefetch.wait_s() == 0.5
     for off in ("0", "false", "OFF", "no"):
         assert not prefetch.enabled({"VOICEAI_PRE_RETRIEVAL": off})
     monkeypatch.setenv("VOICEAI_PRE_RETRIEVAL_WAIT_MS", "80")
     assert prefetch.wait_s() == 0.08
     monkeypatch.setenv("VOICEAI_PRE_RETRIEVAL_WAIT_MS", "garbage")
-    assert prefetch.wait_s() == 0.25
+    assert prefetch.wait_s() == 0.5
 
 
 def test_reference_block_wraps_caps_and_names_the_language():
