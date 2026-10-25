@@ -537,3 +537,32 @@ async def test_next_turn_interrupts_background_extract_before_live_generate():
     [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
     await asyncio.wait_for(live_saw_clear.wait(), timeout=1.0)
     await asyncio.wait_for(extract_cancelled.wait(), timeout=1.0)
+
+
+async def test_failed_transition_speech_does_not_strip_the_same_sentence_from_the_spoken_reply():
+    """Transition speech enters the reply only with its audio, so a TTS failure on it must not
+    mark its text as removable: the reply that repeats it was spoken and is stored in full."""
+    graph = copy.deepcopy(GRAPH)
+    graph["edges"][0]["data"]["transition_speech"] = "Thank you."
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_to_book", arguments={})],
+        [TokenEvent(text="Thank you."), TokenEvent(text=" Your appointment is Monday at 10.")],
+    ])
+    transcripts = MagicMock()
+    handler = _handler(llm, _RecordingPolicyResolver(), workflow=graph, transcripts=transcripts)
+    calls: list[str] = []
+
+    async def synthesize(text, sample_rate):
+        calls.append(text)
+        if text == "Thank you." and calls.count(text) == 1:
+            raise RuntimeError("tts down")   # the transition line, not the reply's sentence
+        return b"\x00" * 320
+
+    handler._tts.synthesize = synthesize
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+
+    assert calls.count("Thank you.") == 2
+    assert handler._session("s1").unspoken_sentences == []
+    assert transcripts.record_turn.call_args.args[3] == "Thank you. Your appointment is Monday at 10."
+    assert handler._get_history("s1")[-1].content == "Thank you. Your appointment is Monday at 10."

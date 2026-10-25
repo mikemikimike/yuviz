@@ -443,14 +443,15 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     # pipeline's GeneratorExit handler records the interrupted turn.
                     turn = session.speech_ended(se.duration_ms, se.energy_db)
                     turn_stream = _turn_responses(turn.__aiter__())
+                    # Once a speech_ended / transfer_* is deferred to the outer loop,
+                    # everything behind it belongs to the next utterance and waits in
+                    # `deferred` — except a cancel or end of stream, which still stop
+                    # this turn. One list per turn, handed back to `backlog` only when
+                    # the turn ends, so each message is examined once (not per drain).
+                    deferred: list[pb.GatewayMessage] = []
                     async for response in turn_stream:
                         # Drain BEFORE sending so a cancel_generation that arrived
                         # during synthesis stops this turn's audio from being sent.
-                        # Once a speech_ended / transfer_* is deferred to the outer loop,
-                        # everything behind it belongs to the next utterance and waits in
-                        # `deferred` — except a cancel or end of stream, which still stop
-                        # this turn.
-                        deferred: list[pb.GatewayMessage] = []
                         while backlog or not msg_q.empty():
                             pending = backlog.popleft() if backlog else msg_q.get_nowait()
                             if pending is None:
@@ -517,7 +518,6 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     "Unexpected %s during speech pipeline session=%s",
                                     pcase, sid,
                                 )
-                        backlog.extendleft(reversed(deferred))
 
                         if response is None:
                             continue  # woken by a message, already handled above
@@ -584,6 +584,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                         session_id=sid, text=response.response_text,
                                     )
                                 )
+                    # Deferred messages arrived before anything _turn_responses left in
+                    # `backlog` (late arrivals, or the None for end of stream), so they go first.
+                    backlog.extendleft(reversed(deferred))
 
                     # Empty transcript (noise / filtered hallucination): tell the
                     # gateway so its FSM returns to Listening instead of waiting

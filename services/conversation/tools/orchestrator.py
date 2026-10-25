@@ -527,6 +527,7 @@ def _fold_tool_result_into_history(
         call_dict["provider_metadata"] = event.provider_metadata
     history.append(ChatMessage(role="assistant", content="", tool_calls=[call_dict]))
     envelope = build_envelope(result, read_only=read_only, latency_ms=latency_ms, trace_id=trace_id)
-    history.append(ChatMessage(
-        role="tool", content=json.dumps(envelope, ensure_ascii=False), tool_call_id=event.tool_call_id,
-    ))
+    # ensure_ascii=False keeps non-Latin data readable, but a lone surrogate from a tool's JSON
+    # (e.g. "\ud83d") would then reach the provider's UTF-8 encode and fail every later request.
+    content = json.dumps(envelope, ensure_ascii=False).encode("utf-8", "replace").decode("utf-8")
+    history.append(ChatMessage(role="tool", content=content, tool_call_id=event.tool_call_id))

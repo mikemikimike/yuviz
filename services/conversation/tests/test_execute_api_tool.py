@@ -342,6 +342,26 @@ async def test_non_latin_data_under_the_cap_reaches_the_model_readable():
     assert "सुनीता शर्मा" in history[-1].content and "München" in history[-1].content
 
 
+async def test_a_lone_surrogate_in_tool_data_does_not_break_the_next_llm_request_body():
+    from services.conversation.tools.orchestrator import _fold_tool_result_into_history
+
+    # A JS backend that cut "Ravi 😀" with .slice() sends "Ravi \ud83d"; json.loads keeps it.
+    data = json.loads('{"name": "Ravi \\ud83d", "note": "😀 सुनीता"}')
+    assert data["name"] == "Ravi \ud83d"
+    client = _FakeToolExecClient({"chain_status": "success", "data": data})
+
+    result = await ApiExecExecutor(client).execute(_request())
+    history: list[ChatMessage] = []
+    _fold_tool_result_into_history(
+        history, ToolCallEvent(tool_call_id="call1", tool_name="execute_api", arguments={}), result)
+
+    content = history[-1].content
+    # httpx encodes json= bodies this way; it raised UnicodeEncodeError on the raw surrogate.
+    json.dumps({"messages": [{"role": "tool", "content": content}]}, ensure_ascii=False).encode("utf-8")
+    assert "😀 सुनीता" in content
+    assert json.loads(content)["data"]["name"].startswith("Ravi ")
+
+
 async def test_non_latin_data_is_capped_by_its_readable_length_not_its_escaped_length():
     client = _FakeToolExecClient({"chain_status": "success", "data": {"b": "क" * 1_500}})
 
