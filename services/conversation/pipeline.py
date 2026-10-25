@@ -1094,9 +1094,10 @@ class PipelineConversationHandler:
                 if tts_audio:
                     if first_audio_at is None:
                         first_audio_at = now   # a filler is the first thing the caller hears, so it counts here
-                    if not isinstance(chunk, _FillerText):
+                    is_filler = isinstance(chunk, _FillerText)
+                    if not is_filler:
                         any_audio = True
-                    yield HandlerResponse(tts_payloads=[tts_audio])
+                    yield HandlerResponse(tts_payloads=[tts_audio], filler=is_filler)
                 if cancel_event.is_set():
                     break
         finally:
