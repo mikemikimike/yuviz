@@ -65,14 +65,19 @@ def is_transfer_destination(value: str) -> bool:
 # the tenant has opted into: an expensive destination is billed to the platform.
 # Prefixes are E.164 digits (country code first, no + / 00 / 011): global satellite
 # (881, 882, 883), Inmarsat (87x), international premium rate (979), NANP 900/976,
-# UK 09xx (+449).
-_PREMIUM_RATE_PREFIXES = ("881", "882", "883", "87", "979", "1900", "1976", "449")
+# UK 09xx, 087x revenue-share and 070 personal numbers (+449, +4487, +4470), and India's
+# 1900 premium and 1860 shared-cost numbers (+911900, +911860). India's 1800 toll-free
+# numbers are not premium and stay allowed.
+_PREMIUM_RATE_PREFIXES = (
+    "881", "882", "883", "87", "979", "1900", "1976", "449", "4487", "4470", "911900", "911860",
+)
 # The same ranges dialled nationally, which only mean premium in their own country:
 # keyed by the tenant's home calling code. India's 09876543210 and mobiles that
 # begin 900/976 must not match, so there is deliberately no catch-all.
 _NATIONAL_PREMIUM_RATE_RE = {
     "1": re.compile(r"1?(?:900|976)[0-9]{7}"),
-    "44": re.compile(r"09[0-9]{8,9}"),
+    "44": re.compile(r"09[0-9]{8,9}|0(?:87|70)[0-9]{8}"),
+    "91": re.compile(r"1(?:900|860)[0-9]{6,7}"),
 }
 
 # NANP area codes outside the US and Canada. They share country code 1 but are
@@ -113,16 +118,17 @@ class TransferPolicy:
 
 def _international_digits(number: str, home_calling_code: str) -> str | None:
     """E.164 digits (country code first) of a dial number written with an international
-    prefix: + or 00, and 011 where the home country is the NANP. A NANP national number
-    (optional trunk 1) is the home-country form of the same thing. None for an
-    extension or any other nationally dialled number."""
+    prefix: +, 00 and 011. A number starting 011 that is exactly 11 digits long is read as
+    an Indian or UK trunk-0 national number (Delhi 011, Sheffield 0114) unless the home
+    country is the NANP. A NANP national number (optional trunk 1) is the home-country
+    form of the same thing. None for an extension or any other nationally dialled number."""
     if number.startswith("+"):
         return number[1:]
     if number.startswith("00"):
         return number[2:]
+    if number.startswith("011") and (home_calling_code == "1" or len(number) != 11):
+        return number[3:]
     if home_calling_code == "1":
-        if number.startswith("011"):
-            return number[3:]
         if re.fullmatch(r"1?[2-9][0-9]{9}", number):
             return "1" + number[-10:]
     return None

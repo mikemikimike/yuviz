@@ -183,7 +183,7 @@ def test_national_premium_ranges_apply_in_their_own_country(home, value):
 
 
 @pytest.mark.parametrize("value", [
-    "09876543210", "9005551234", "9765551234", "19005551234", "08012345678", "9876543210",
+    "09876543210", "9005551234", "9765551234", "08012345678", "9876543210",
     "+919005551234", "00919765551234",
 ])
 def test_indian_numbers_are_not_premium(value):
@@ -269,3 +269,52 @@ def test_separated_home_numbers_and_extensions_still_pass(monkeypatch):
 def test_separators_the_gateway_refuses_are_refused_at_write_time(value):
     assert not is_transfer_destination(value)
     assert transfer_policy_problem(value, OPEN) is not None
+
+
+IN = TransferPolicy(home_calling_code="91")
+UK = TransferPolicy(home_calling_code="44")
+IN_OPEN = TransferPolicy(home_calling_code="91", allow_international=True)
+UK_OPEN = TransferPolicy(home_calling_code="44", allow_international=True)
+
+
+@pytest.mark.parametrize("policy", [IN_OPEN, UK_OPEN])
+@pytest.mark.parametrize("value", [
+    "011882123456", "sip:011882123456@carrier.example", "sip:011-882-123456@carrier.example",
+    "0118821234567", "011979123456", "011449123456789",
+])
+def test_011_is_an_international_prefix_whatever_the_home_code(policy, value):
+    assert transfer_policy_problem(value, policy) is not None
+
+
+@pytest.mark.parametrize("policy", [IN, UK])
+def test_011_international_number_needs_the_opt_in_under_any_home_code(policy):
+    assert transfer_policy_problem("011331234567890", policy) is not None
+    assert transfer_policy_problem("011331234567890", TransferPolicy(policy.home_calling_code, True)) is None
+
+
+@pytest.mark.parametrize("value", [
+    "+911900123456", "00911900123456", "1900123456", "19001234567",
+    "+911860123456", "1860123456", "18601234567", "sip:+911900123456@carrier.example",
+])
+@pytest.mark.parametrize("policy", [IN, IN_OPEN])
+def test_indian_premium_and_shared_cost_numbers_are_refused(policy, value):
+    assert transfer_policy_problem(value, policy) is not None
+
+
+@pytest.mark.parametrize("value", [
+    "9876543210", "09876543210", "+919876543210", "1800123456", "18001234567", "+911800123456",
+    "+918012345678", "1140123456", "01123456789", "+911123456789", "9005551234", "9765551234",
+])
+def test_indian_mobiles_landlines_and_toll_free_still_pass(value):
+    assert transfer_policy_problem(value, IN) is None
+
+
+@pytest.mark.parametrize("value", ["08712345678", "07012345678", "09012345678", "+448712345678", "+447012345678"])
+def test_uk_revenue_share_and_personal_numbers_are_refused(value):
+    assert transfer_policy_problem(value, UK_OPEN) is not None
+    assert transfer_policy_problem(value, UK) is not None
+
+
+@pytest.mark.parametrize("value", ["07911123456", "02071234567", "01142345678", "01134960000", "+447911123456", "+442071234567", "08001234567"])
+def test_uk_mobiles_landlines_and_freephone_still_pass(value):
+    assert transfer_policy_problem(value, UK) is None
