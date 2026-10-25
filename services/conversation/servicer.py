@@ -29,6 +29,7 @@ from .rejection import RejectedCallHangup
 from .session import (
     AgentUnavailable, ConversationSession, IConversationHandler, RoutingStatus, SessionContext,
 )
+from .transcript_builder import SessionCollision
 
 from .generated.voiceai.v1 import conversation_pb2 as pb
 from .generated.voiceai.v1 import conversation_pb2_grpc as pb_grpc
@@ -36,6 +37,9 @@ from .generated.voiceai.v1 import conversation_pb2_grpc as pb_grpc
 log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "1.0"
+
+# One refusal text for a live session_id, whichever tenant holds it.
+_SESSION_IN_USE = "session_id already in use"
 
 # UNSPECIFIED is a non-gateway client: webcall, vobiz, tests.
 _ROUTING_STATUS = {
@@ -140,13 +144,17 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         if sid in self._live_sessions:
             log.warning("Converse: duplicate live session_id refused session=%s tenant=%s",
                         sid, open_req.tenant_id)
-            await context.abort(grpc.StatusCode.ALREADY_EXISTS, "session_id already in use")
+            await context.abort(grpc.StatusCode.ALREADY_EXISTS, _SESSION_IN_USE)
             return
         self._live_sessions.add(sid)
         try:
             async with contextlib.aclosing(self._serve(open_req, request_iterator)) as stream:
                 async for message in stream:
                     yield message
+        except SessionCollision:
+            log.warning("Converse: session_id held by another tenant refused session=%s tenant=%s",
+                        sid, open_req.tenant_id)
+            await context.abort(grpc.StatusCode.ALREADY_EXISTS, _SESSION_IN_USE)
         finally:
             self._live_sessions.discard(sid)
 
@@ -752,13 +760,15 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             yield pb.ServiceMessage(
                 error=pb.ServiceError(session_id=sid, code="CALL_REJECTED", message=str(exc), fatal=True)
             )
-        except Exception as exc:
+        except SessionCollision:
+            raise  # Converse() refuses it exactly as it refuses a duplicate live id
+        except Exception:
             log.exception("Converse error session=%s", sid)
             yield pb.ServiceMessage(
                 error=pb.ServiceError(
                     session_id=sid,
                     code="INTERNAL",
-                    message=str(exc),
+                    message="internal error",
                     fatal=True,
                 )
             )

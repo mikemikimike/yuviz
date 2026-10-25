@@ -129,6 +129,46 @@ async def test_session_id_is_released_when_the_handler_factory_fails():
     assert "fail-1" not in servicer._live_sessions
 
 
+def _greeting_raising(exc: Exception) -> ConversationServicer:
+    async def factory(ctx):
+        handler = AsyncMock()
+        handler.greeting.side_effect = exc
+        handler.out_responses = None
+        return handler
+
+    return ConversationServicer(factory)
+
+
+async def test_a_collision_is_refused_exactly_like_a_duplicate_live_id():
+    """For one principal, the refusal must not reveal whether the id is held by a stream or by another tenant."""
+    servicer, _ = _servicer()
+    first = _Stream(servicer, "same-1", TENANT_A)
+    await asyncio.wait_for(first.ready.wait(), 2)
+    duplicate = _Stream(servicer, "same-1", TENANT_A)
+    await asyncio.wait_for(duplicate.task, 2)
+    await first.hang_up()
+
+    collided = _Stream(
+        _greeting_raising(SessionCollision("session_id already live for another tenant session=same-2")),
+        "same-2", TENANT_A,
+    )
+    await asyncio.wait_for(collided.task, 2)
+
+    assert collided.context.abort.await_args.args == duplicate.context.abort.await_args.args
+    assert collided.context.abort.await_args.args == (grpc.StatusCode.ALREADY_EXISTS, "session_id already in use")
+    assert not [m for m in collided.messages if m.HasField("error")]
+
+
+async def test_an_unexpected_error_does_not_send_its_text_to_the_gateway():
+    stream = _Stream(_greeting_raising(RuntimeError("secret detail: db password=hunter2")), "boom-1", TENANT_A)
+    await asyncio.wait_for(stream.task, 2)
+
+    errors = [m.error for m in stream.messages if m.HasField("error")]
+    assert [e.code for e in errors] == ["INTERNAL"]
+    assert "hunter2" not in errors[0].message
+    assert "tenant" not in errors[0].message
+
+
 # ── TranscriptBuilder: bookkeeping and tenant-scoped writes (needs Postgres) ─
 
 
