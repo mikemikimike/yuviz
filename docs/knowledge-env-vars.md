@@ -122,9 +122,9 @@ The Postgres-backed ingestion queue and the worker process.
 | Variable | Default | Type | Meaning | Read at |
 |---|---|---|---|---|
 | `KB_INGEST_PER_TENANT_CAP` | `2` | int | Ingestion jobs one tenant may have running at once. | `services/knowledge/ingestion_worker.py:55` |
-| `KNOWLEDGE_DEFAULT_MAX_DOCUMENTS` | `20` | int | Live documents per tenant when the tenant has no `knowledge_max_documents` (409 above it). | `services/knowledge/quotas.py:14` |
-| `KNOWLEDGE_DEFAULT_MAX_STORAGE_BYTES` | `104857600` | int | Stored bytes per tenant when the tenant has no `knowledge_max_storage_bytes` (413 above it). | `services/knowledge/quotas.py:15` |
-| `KNOWLEDGE_MAX_UPLOAD_BYTES` | `10485760` | int | Upload size cap (413 above it). | `services/knowledge/routers/documents.py:34` |
+| `KNOWLEDGE_DEFAULT_MAX_DOCUMENTS` | `10` | int | Live documents per tenant when the tenant has no `knowledge_max_documents` (409 above it). | `services/knowledge/quotas.py:14` |
+| `KNOWLEDGE_DEFAULT_MAX_STORAGE_BYTES` | `10485760` | int | Stored bytes per tenant when the tenant has no `knowledge_max_storage_bytes` (413 above it). | `services/knowledge/quotas.py:15` |
+| `KNOWLEDGE_MAX_UPLOAD_BYTES` | `2097152` | int | Upload size cap (413 above it). | `services/knowledge/routers/documents.py:35` |
 | `KNOWLEDGE_STORAGE_ROOT` | `'./data/knowledge_documents'` | str | Directory for uploaded files (local storage, single node). | `services/knowledge/storage.py:26` |
 
 ## Chunking

@@ -11,8 +11,8 @@ from libs.tenancy import tenant_conn
 from . import db
 from .envparse import env_int
 
-DEFAULT_MAX_DOCUMENTS = env_int("KNOWLEDGE_DEFAULT_MAX_DOCUMENTS", 20, lo=1, hi=100_000)
-DEFAULT_MAX_STORAGE_BYTES = env_int("KNOWLEDGE_DEFAULT_MAX_STORAGE_BYTES", 100 * 1024 * 1024, lo=1, hi=10**12)
+DEFAULT_MAX_DOCUMENTS = env_int("KNOWLEDGE_DEFAULT_MAX_DOCUMENTS", 10, lo=1, hi=100_000)
+DEFAULT_MAX_STORAGE_BYTES = env_int("KNOWLEDGE_DEFAULT_MAX_STORAGE_BYTES", 10 * 1024 * 1024, lo=1, hi=10**12)
 
 
 class QuotaExceeded(Exception):

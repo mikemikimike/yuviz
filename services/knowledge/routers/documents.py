@@ -32,7 +32,7 @@ usage_router = APIRouter(
 )
 _storage = LocalStorageProvider()
 
-MAX_UPLOAD_BYTES = int(os.environ.get("KNOWLEDGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+MAX_UPLOAD_BYTES = int(os.environ.get("KNOWLEDGE_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
 _READ_CHUNK_BYTES = 64 * 1024
 
 
