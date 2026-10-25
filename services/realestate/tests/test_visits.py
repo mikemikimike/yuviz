@@ -197,3 +197,32 @@ async def test_a_visit_that_has_started_cannot_be_cancelled_and_staff_status_is_
         core._visit_by_reference = original
     assert not result["ok"]
     assert await pool.fetchval("SELECT status FROM re_site_visits WHERE reference = $1", ref) == "completed"
+
+
+async def test_a_spoken_number_never_renames_or_requalifies_someone_elses_lead(run, pool, tenant):
+    owner, stranger = "+919811100030", "+919899999998"
+    await run(core.save_lead, caller_phone=owner, name="Rohit Mehra", project="AVL", property_type=None, budget=None,
+              timeline=None, notes=None)
+    await pool.execute("UPDATE re_leads SET status = 'closed' WHERE tenant_id = $1 AND phone = $2", tenant["id"], owner)
+
+    # a stranger books a visit and asks for a callback, both on the owner's number said aloud
+    prep = await run(core.prepare_visit, project="GFH", slot_start=tomorrow_at(11), visitor_name="Someone Else",
+                     visitor_phone=owner, caller_phone=stranger, language="en")
+    done = await run(core.book_visit, project_code=prep["project_code"], slot_start=prep["slot_start"],
+                     visitor_name="Someone Else", visitor_phone=prep["visitor_phone"], caller_phone=stranger,
+                     notes=None, language="en")
+    assert done["ok"]
+    await run(core.request_callback, caller_phone=stranger, phone=owner, name="Prank Name", preferred_time=None,
+              topic="price", language="en")
+    row = await pool.fetchrow("SELECT * FROM re_leads WHERE tenant_id = $1 AND phone = $2", tenant["id"], owner)
+    assert (row["name"], row["project_code"], row["status"]) == ("Rohit Mehra", "AVL", "closed")
+    assert "callback: price" in row["notes"]
+
+    # a new number said aloud still becomes a lead, and the owner's own call still updates theirs
+    fresh = "+919811100031"
+    await run(core.request_callback, caller_phone=stranger, phone=fresh, name="Asha", preferred_time=None,
+              topic=None, language="en")
+    assert await pool.fetchval("SELECT name FROM re_leads WHERE tenant_id = $1 AND phone = $2", tenant["id"], fresh) == "Asha"
+    await run(core.save_lead, caller_phone=owner, name="Rohit K Mehra", project=None, property_type=None, budget=None,
+              timeline=None, notes=None)
+    assert await pool.fetchval("SELECT name FROM re_leads WHERE tenant_id = $1 AND phone = $2", tenant["id"], owner) == "Rohit K Mehra"

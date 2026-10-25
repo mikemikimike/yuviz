@@ -372,17 +372,23 @@ async def prepare_visit(conn: Any, co: Company, *, project: str, slot_start: str
 
 async def _upsert_lead(conn: Any, co: Company, *, phone: str, name: str = "", project_code: str | None = None,
                        property_type: str = "", budget: str = "", timeline: str = "", notes: str = "",
-                       status: str | None = None) -> None:
+                       status: str | None = None, own_number: bool = True) -> None:
+    """`own_number` is False when `phone` is only a number the caller said (booking or a callback for someone
+    else): it may create that lead, or add a note to it, but never rename it, re-point it or change its status."""
     await conn.execute(
         "INSERT INTO re_leads (tenant_id, phone, name, project_code, property_type, budget, timeline, notes, status) "
         "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 'new')) "
         "ON CONFLICT (tenant_id, phone) DO UPDATE SET "
-        "  name = COALESCE(NULLIF($3, ''), re_leads.name), project_code = COALESCE($4, re_leads.project_code), "
+        "  name = CASE WHEN $10 THEN COALESCE(NULLIF($3, ''), re_leads.name) "
+        "    ELSE COALESCE(NULLIF(re_leads.name, ''), $3) END, "
+        "  project_code = CASE WHEN $10 THEN COALESCE($4, re_leads.project_code) "
+        "    ELSE COALESCE(re_leads.project_code, $4) END, "
         "  property_type = COALESCE(NULLIF($5, ''), re_leads.property_type), budget = COALESCE(NULLIF($6, ''), re_leads.budget), "
         "  timeline = COALESCE(NULLIF($7, ''), re_leads.timeline), notes = CASE WHEN $8 = '' THEN re_leads.notes "
         "    WHEN re_leads.notes = '' THEN $8 ELSE re_leads.notes || ' | ' || $8 END, "
-        "  status = COALESCE($9, re_leads.status), updated_at = now()",
-        co.tenant_id, phone, name[:120], project_code, property_type[:60], budget[:80], timeline[:80], notes[:500], status)
+        "  status = CASE WHEN $10 THEN COALESCE($9, re_leads.status) ELSE re_leads.status END, updated_at = now()",
+        co.tenant_id, phone, name[:120], project_code, property_type[:60], budget[:80], timeline[:80], notes[:500], status,
+        own_number)
 
 
 async def book_visit(conn: Any, co: Company, *, project_code: str, slot_start: str, visitor_name: str,
@@ -421,7 +427,8 @@ async def book_visit(conn: Any, co: Company, *, project_code: str, slot_start: s
             continue  # reference collision: draw another
     if row is None:
         raise RuntimeError("could not allocate a visit reference")
-    await _upsert_lead(conn, co, phone=phone, name=name, project_code=proj["code"], status="qualified")
+    await _upsert_lead(conn, co, phone=phone, name=name, project_code=proj["code"], status="qualified",
+                       own_number=phone == caller)
     log.info("realestate: visit booked tenant=%s ref=%s project=%s start=%s", co.tenant_id, row["reference"],
              proj["code"], start.isoformat())
     when = co.when(start, language)
@@ -573,7 +580,8 @@ async def request_callback(conn: Any, co: Company, *, caller_phone: str | None, 
                 break
             except asyncpg.UniqueViolationError:
                 continue
-    await _upsert_lead(conn, co, phone=number, name=(name or "").strip(), notes=f"callback: {(topic or '').strip()}"[:200])
+    await _upsert_lead(conn, co, phone=number, name=(name or "").strip(), notes=f"callback: {(topic or '').strip()}"[:200],
+                       own_number=number == phones.normalize_phone(caller_phone))
     digits = phones.spoken_last_digits(number)
     if _hi(language):
         spoken = (f"ठीक है, हमारी सेल्स टीम आपको {when if when else 'जल्द ही'} मोबाइल नंबर के आख़िरी अंक {digits} पर कॉल करेगी। "
