@@ -188,3 +188,27 @@ def transfer_policy_problem(value: str, policy: TransferPolicy) -> str | None:
             return "SIP addresses outside this platform need international transfers enabled for your account"
         return None
     return _number_problem(value, policy)
+
+
+def transfer_policy_prefix_problem(prefix: str, policy: TransferPolicy) -> str | None:
+    """Publish-time check of the literal text before a template in a destination such as
+    "+44{{ x }}": only what the prefix already decides. A national prefix, or one too short
+    to place in a country, is left to the check on the rendered number at call time."""
+    home = policy.home_calling_code
+    if not re.fullmatch(r"\+?[0-9]+", prefix) or not (
+        prefix.startswith(("+", "00")) or (prefix.startswith("011") and home == "1")
+    ):
+        return None
+    digits = _international_digits(prefix, home)
+    if not digits:
+        return None
+    if digits.startswith(_PREMIUM_RATE_PREFIXES):
+        return _PREMIUM_MESSAGE
+    if policy.allow_international:
+        return None
+    in_home = digits.startswith(home) or home.startswith(digits)
+    if home == "1" and len(digits) >= 4 and digits[1:4] in _NANP_NON_US_CA_AREA_CODES:
+        in_home = False
+    if in_home:
+        return None
+    return "international numbers need international transfers enabled for your account"
