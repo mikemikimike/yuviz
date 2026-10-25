@@ -13,12 +13,14 @@ from libs.config_sdk.workflow import (
     graph_warnings,
     graphs_equivalent,
     literal_destination_errors,
+    literal_destination_policy_errors,
     parse_graph,
 )
 from libs.tenancy import tenant_conn
 
 from . import agents as agents_service
 from . import audit, cache, db, phone_numbers
+from . import tenants as tenants_service
 
 
 class WorkflowValidationError(Exception):
@@ -224,6 +226,11 @@ async def publish(
             raise ValueError("nothing to publish — this agent has no workflow draft")
         if not graphs_equivalent(candidate, peeked):
             warnings = await validate(candidate)
+        policy_errs = literal_destination_policy_errors(
+            parse_graph(candidate), await tenants_service.transfer_policy_on(conn, old["tenant_id"]),
+        )
+        if policy_errs:
+            raise WorkflowValidationError(policy_errs)
 
         current = _as_graph(old["workflow"])
         if graphs_equivalent(candidate, current):
