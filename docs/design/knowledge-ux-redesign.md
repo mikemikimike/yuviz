@@ -158,7 +158,7 @@ Phases 1 to 3 ship as one PR: after phase 1 the old folder-link routes return 41
 
 ## Open questions
 
-1. Default limits. Proposal: 100 documents and 100 MB per tenant, overridable per tenant.
+1. Default limits. Decided: 100 documents and 100 MB per tenant, overridable per tenant by a superadmin.
 2. Should a tenant member who is not an admin see extracted text? Proposal: yes, as they can already see titles.
 3. pgvector version on production, which decides the recall fix.
 
