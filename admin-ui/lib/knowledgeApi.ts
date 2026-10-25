@@ -89,6 +89,8 @@ export interface KbDocument {
   version: number;
   usage_mode: UsageMode;
   chunk_count: number;
+  // Sum of the searchable chunks' tokens; 0 until the first indexing finishes.
+  token_count: number;
   // Whether Retry will work now: failed (or a failed re-index) and no job already pending or running.
   retryable?: boolean;
   // null for documents uploaded before sizes were recorded.
@@ -103,13 +105,15 @@ export const uploadDocument = (
   kbId: string,
   file: File,
   title: string,
-  opts?: { language?: string | null; tags?: Record<string, unknown> },
+  opts?: { language?: string | null; tags?: Record<string, unknown>; replaces?: string },
 ) => {
   const form = new FormData();
   form.append("file", file);
   form.append("title", title);
   if (opts?.language) form.append("language", opts.language);
   if (opts?.tags) form.append("tags", JSON.stringify(opts.tags));
+  // The document this upload replaces: the quota counts the net change and the new file keeps its agents.
+  if (opts?.replaces) form.append("replaces", opts.replaces);
   return request<KbDocument & { ingestion_job_id: string }>(`/knowledge-bases/${kbId}/documents`, {
     method: "POST",
     body: form,
@@ -130,6 +134,39 @@ export const deleteDocument = (documentId: string) =>
 
 export const retryDocument = (documentId: string) =>
   request<KbDocument>(`/documents/${documentId}/retry`, { method: "POST" });
+// Ready or failed documents only; a ready one keeps answering from its old chunks until the new ones are in.
+export const reindexDocument = (documentId: string) =>
+  request<KbDocument>(`/documents/${documentId}/reindex`, { method: "POST" });
+
+export interface DocumentText {
+  document_id: string;
+  text: string;
+  // "sections": whole sections in order; "chunks": the indexed windows joined without their overlap.
+  source: "sections" | "chunks";
+  truncated: boolean;
+}
+
+export const getDocumentText = (documentId: string) => request<DocumentText>(`/documents/${documentId}/text`);
+
+export interface DocumentAgent {
+  agent_id: string;
+  agent_slug: string;
+  agent_name: string;
+  tenant_id: string;
+}
+
+export const listDocumentAgents = (documentId: string) =>
+  request<DocumentAgent[]>(`/documents/${documentId}/agents`);
+
+export interface KnowledgeUsage {
+  documents: number;
+  max_documents: number;
+  storage_bytes: number;
+  max_storage_bytes: number;
+  max_upload_bytes: number;
+}
+
+export const getKnowledgeUsage = (tenantId: string) => request<KnowledgeUsage>(`/tenants/${tenantId}/knowledge-usage`);
 
 // ── Reverse lookup: which agents use this KB ────────────────────────────
 
@@ -145,31 +182,25 @@ export interface KbAgent {
 
 export const listKbAgents = (kbId: string) => request<KbAgent[]>(`/knowledge-bases/${kbId}/agents`);
 
-// ── Agent ↔ Knowledge Base assignment ───────────────────────────────────
+// ── Agent ↔ document links ──────────────────────────────────────────────
 
-export interface AgentKnowledgeBase {
-  agent_id: string;
+export interface AgentDocument {
+  document_id: string;
   kb_id: string;
-  enabled: boolean;
-  created_at: string;
-  kb_slug: string;
-  kb_name: string;
+  title: string;
+  content_type: string;
+  byte_size: number | null;
+  status: DocumentStatus;
+  linked_at: string;
 }
 
-export const listAgentKnowledgeBases = (agentId: string) =>
-  request<AgentKnowledgeBase[]>(`/agents/${agentId}/knowledge-bases`);
-export const assignKnowledgeBase = (agentId: string, kbId: string, enabled = true) =>
-  request<AgentKnowledgeBase>(`/agents/${agentId}/knowledge-bases`, {
-    method: "POST",
-    body: JSON.stringify({ kb_id: kbId, enabled }),
+export const listAgentDocuments = (agentId: string) => request<AgentDocument[]>(`/agents/${agentId}/documents`);
+// Replaces the agent's whole set: what is not listed is unlinked.
+export const replaceAgentDocuments = (agentId: string, documentIds: string[]) =>
+  request<AgentDocument[]>(`/agents/${agentId}/documents`, {
+    method: "PUT",
+    body: JSON.stringify({ document_ids: documentIds }),
   });
-export const setKnowledgeBaseEnabled = (agentId: string, kbId: string, enabled: boolean) =>
-  request<AgentKnowledgeBase>(`/agents/${agentId}/knowledge-bases/${kbId}`, {
-    method: "PATCH",
-    body: JSON.stringify({ enabled }),
-  });
-export const detachKnowledgeBase = (agentId: string, kbId: string) =>
-  request<void>(`/agents/${agentId}/knowledge-bases/${kbId}`, { method: "DELETE" });
 
 // ── Retrieval Policy ─────────────────────────────────────────────────────
 // Unset fields fall back to the server-side system default.

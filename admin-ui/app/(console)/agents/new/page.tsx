@@ -20,7 +20,7 @@ import {
   listTenants,
   updateAgent,
 } from "@/lib/api";
-import { KnowledgeBase, assignKnowledgeBase, listKnowledgeBases } from "@/lib/knowledgeApi";
+import { KbDocument, listDocuments, listKnowledgeBases, replaceAgentDocuments } from "@/lib/knowledgeApi";
 import { CustomApi, listCustomApis, setAgentCustomApiEnabled } from "@/lib/toolexecApi";
 import {
   AgentVoiceSettings, agentLocalModels, isLanguageError, multilingualPayload, notReadyModels,
@@ -63,7 +63,7 @@ export default function NewAgentPage() {
   const [step, setStep] = useState<Step>("identity");
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
-  const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
+  const [documents, setDocuments] = useState<KbDocument[]>([]);
   const [customApis, setCustomApis] = useState<CustomApi[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -100,7 +100,7 @@ export default function NewAgentPage() {
   const [fallbackResponse, setFallbackResponse] = useState("");
 
   // Step 4 — Knowledge & tools
-  const [selectedKbIds, setSelectedKbIds] = useState<Set<string>>(new Set());
+  const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [selectedApiIds, setSelectedApiIds] = useState<Set<string>>(new Set());
 
   // Step 5 — Review
@@ -161,7 +161,7 @@ export default function NewAgentPage() {
       setTransferAnnouncement(d.transferAnnouncement);
       setComplianceInstructions(d.complianceInstructions);
       setFallbackResponse(d.fallbackResponse);
-      setSelectedKbIds(new Set(d.selectedKbIds));
+      setSelectedDocIds(new Set(d.selectedDocumentIds ?? []));
       setSelectedApiIds(new Set(d.selectedApiIds));
       setGreeting(d.greeting);
       setSystemPrompt(d.systemPrompt);
@@ -191,7 +191,7 @@ export default function NewAgentPage() {
         ttsByLanguage, sttId, llmId, ttsId,
         maxCallDuration, goodbyeGraceMs, escalationThreshold, transferType, transferDestination,
         transferCondition, transferAnnouncement, complianceInstructions, fallbackResponse,
-        selectedKbIds: Array.from(selectedKbIds), selectedApiIds: Array.from(selectedApiIds),
+        selectedDocumentIds: Array.from(selectedDocIds), selectedApiIds: Array.from(selectedApiIds),
         greeting, systemPrompt, promptEdited,
       };
       saveAgentDraft(draft);
@@ -203,7 +203,7 @@ export default function NewAgentPage() {
     ttsByLanguage,
     sttId, llmId, ttsId, maxCallDuration, goodbyeGraceMs, escalationThreshold, transferType,
     transferDestination, transferCondition, transferAnnouncement, complianceInstructions, fallbackResponse,
-    selectedKbIds, selectedApiIds, greeting, systemPrompt, promptEdited,
+    selectedDocIds, selectedApiIds, greeting, systemPrompt, promptEdited,
   ]);
 
   const startOver = () => {
@@ -240,7 +240,10 @@ export default function NewAgentPage() {
       })
       .catch(() => {});
     const loadKnowledge = () => {
-      listKnowledgeBases(tenant.id).then(setKbs).catch(() => {});
+      listKnowledgeBases(tenant.id)
+        .then((kbs) => Promise.all(kbs.map((kb) => listDocuments(kb.id))))
+        .then((perKb) => setDocuments(perKb.flat().sort((a, b) => a.title.localeCompare(b.title))))
+        .catch(() => {});
       listCustomApis(tenant.id).then(setCustomApis).catch(() => {});
     };
     loadKnowledge();
@@ -260,7 +263,7 @@ export default function NewAgentPage() {
         persona,
         tone,
         language,
-        hasKnowledgeBase: selectedKbIds.size > 0,
+        hasKnowledgeBase: selectedDocIds.size > 0,
         transferType: transferType ?? "none",
         transferCondition,
         complianceInstructions,
@@ -269,12 +272,12 @@ export default function NewAgentPage() {
     );
      
   }, [
-    name, purpose, persona, tone, language, selectedKbIds.size, transferType, transferCondition,
+    name, purpose, persona, tone, language, selectedDocIds.size, transferType, transferCondition,
     complianceInstructions, fallbackResponse, promptEdited,
   ]);
 
-  const toggleKb = (id: string) =>
-    setSelectedKbIds((prev) => {
+  const toggleDoc = (id: string) =>
+    setSelectedDocIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -300,7 +303,7 @@ export default function NewAgentPage() {
         persona,
         tone,
         language,
-        has_knowledge_base: selectedKbIds.size > 0,
+        has_knowledge_base: selectedDocIds.size > 0,
         transfer_condition: transferType === "none" ? null : transferCondition,
         compliance_instructions: complianceInstructions,
         fallback_response: fallbackResponse,
@@ -370,7 +373,9 @@ export default function NewAgentPage() {
         });
 
         await Promise.all([
-          ...kbs.filter((kb) => selectedKbIds.has(kb.id)).map((kb) => assignKnowledgeBase(fresh.id, kb.id, true)),
+          ...(selectedDocIds.size
+            ? [replaceAgentDocuments(fresh.id, documents.filter((d) => selectedDocIds.has(d.id)).map((d) => d.id))]
+            : []),
           ...apiIds.map((apiId) => setAgentCustomApiEnabled(fresh.id, apiId, true)),
         ]);
         settingsApplied.current = true;
@@ -639,19 +644,19 @@ export default function NewAgentPage() {
           <div className="card-body">
             <div className="form-group">
               <label className="form-label">Knowledge</label>
-              {kbs.length === 0 ? (
+              {documents.length === 0 ? (
                 <div className="form-hint">
-                  No knowledge bases yet in this account.{" "}
+                  No files yet in this account.{" "}
                   <a href="/knowledge-bases" target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)" }}>
-                    Add a knowledge base ↗
+                    Add a file ↗
                   </a>{" "}
                   It opens in a new tab and shows up here when you come back.
                 </div>
               ) : (
-                kbs.map((kb) => (
-                  <label key={kb.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
-                    <input type="checkbox" checked={selectedKbIds.has(kb.id)} onChange={() => toggleKb(kb.id)} />
-                    {kb.name}
+                documents.map((d) => (
+                  <label key={d.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
+                    <input type="checkbox" checked={selectedDocIds.has(d.id)} onChange={() => toggleDoc(d.id)} />
+                    {d.title}
                   </label>
                 ))
               )}

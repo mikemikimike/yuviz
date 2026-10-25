@@ -153,7 +153,11 @@ Phases 1 to 3 ship as one PR: after phase 1 the old folder-link routes return 41
 
 1. Schema, migration and retrieval switch, with the link routes and tests. Done on this branch.
 2. Reindex route, text route, token totals and quotas with the usage route. Done on this branch.
-3. Admin UI: Knowledge page and agent tab. Prompt mode removed from the UI.
+3. Admin UI: Knowledge page and agent tab. Prompt mode removed from the UI. Done on this branch:
+   - Files added on the Knowledge page go into a per-tenant `default` folder. Ingestion needs an embedding provider on the folder, so the UI reuses the tenant's or creates the standard local one (Ollama `nomic-embed-text`). Folders the old upload dialog created had none and failed at the embed stage.
+   - The folder detail page and the folder-picking upload dialog are removed; the delete confirmation names the agents using that one document (`GET /documents/{id}/agents`).
+   - The new-agent wizard picks documents (one `PUT` after the agent is created); drafts that held folder ids ignore them.
+   - The agent page's search settings now fall back to the server defaults (match threshold 0.3); before, an agent with no saved settings showed 0 and saving wrote 0.
 4. Follow-up release: drop `agent_knowledge_bases`.
 
 ## Open questions
