@@ -398,6 +398,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     # Stream SttResult/TTS chunks as the pipeline produces them —
                     # buffering the whole turn would trip the gateway's SttTimeout.
                     tts_started_sent      = False
+                    audio_sent            = False
                     cancelled             = False
                     stt_sent              = False
                     end_call_requested    = False
@@ -524,6 +525,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             # advances C++ FSM Thinking→Synthesizing→Speaking so
                             # barge-in detection works during playback.
                             if response.tts_payloads:
+                                audio_sent = True
                                 if not tts_started_sent:
                                     yield pb.ServiceMessage(
                                         tts_started=pb.TtsStarted(session_id=sid)
@@ -581,8 +583,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         )
 
                     # Sent after the final TtsChunk so the gateway waits for the goodbye to drain.
-                    # Requires TTS this turn, else the flag leaks into a later turn's playback.
-                    if end_call_requested and not cancelled and tts_started_sent:
+                    # Requires audio this turn (not just the synthetic TtsStarted), else the flag leaks
+                    # into a later turn's playback.
+                    if end_call_requested and not cancelled and audio_sent:
                         log.info(
                             "Converse: sending EndCall grace_period_ms=%d session=%s",
                             end_call_grace_period, sid,
@@ -594,7 +597,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 grace_period_ms=end_call_grace_period,
                             )
                         )
-                    elif end_call_requested and not cancelled and not tts_started_sent:
+                    elif end_call_requested and not cancelled:
                         log.warning(
                             "Converse: end-call marker detected but turn produced no "
                             "TTS audio — not sending EndCall (would leak into a later "
