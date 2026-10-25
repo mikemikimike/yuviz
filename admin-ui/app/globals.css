@@ -2072,6 +2072,7 @@ button.topbar-cta { border: 0; font-family: inherit; }
 .modal.knowledge-detail { width: min(720px, 100vw); max-width: none; height: 100vh; max-height: none; margin: 0 0 0 auto; border-radius: 0; display: flex; flex-direction: column; }
 .modal.knowledge-detail .modal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
 .knowledge-detail-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: .76rem; color: var(--text-3); }
+.knowledge-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .knowledge-detail-label { font-size: .66rem; letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
 .knowledge-text { flex: 1; min-height: 240px; margin: 0; overflow: auto; padding: 16px 18px; border: 1px solid var(--border); border-radius: var(--rs); background: var(--surf-2); font-family: var(--mono); font-size: .78rem; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
 .knowledge-delete-body { font-size: .82rem; color: var(--text-2); line-height: 1.6; }

@@ -273,6 +273,16 @@ export default function KnowledgeBasesPage() {
   );
   const columns = isAllTenants ? 8 : 7;
 
+  const reindexButton = detail && canManage ? (
+    <button
+      className="btn btn-ghost btn-sm"
+      disabled={busyId === detail.id || preparing(detail) || reindexing(detail)}
+      onClick={() => reindex(detail)}
+    >
+      <RefreshCw size={13} /> Reindex
+    </button>
+  ) : null;
+
   return (
     <div className="knowledge-library">
       <div className="knowledge-heading">
@@ -473,15 +483,6 @@ export default function KnowledgeBasesPage() {
         onClose={() => setDetailId(null)}
         trapFocus
         className="knowledge-detail"
-        footer={detail && canManage ? (
-          <button
-            className="btn btn-ghost btn-sm"
-            disabled={busyId === detail.id || preparing(detail) || reindexing(detail)}
-            onClick={() => reindex(detail)}
-          >
-            <RefreshCw size={13} /> Reindex
-          </button>
-        ) : undefined}
       >
         {detail && (
           <>
@@ -502,13 +503,20 @@ export default function KnowledgeBasesPage() {
               <p className="knowledge-file-warning">
                 We couldn’t prepare this file{detail.error ? `: ${detail.error}` : "."} Replace it, or reindex to try again.
               </p>
-            ) : detailError ? (
+            ) : null}
+            {detail.status === "failed" && reindexButton && (
+              <div className="knowledge-detail-head">{reindexButton}</div>
+            )}
+            {preparing(detail) || detail.status === "failed" ? null : detailError ? (
               <div className="error-banner" role="alert">{detailError}</div>
             ) : !detailText ? (
               <div className="empty-state">Loading text…</div>
             ) : (
               <>
-                <div className="knowledge-detail-label">What the agent reads</div>
+                <div className="knowledge-detail-head">
+                  <div className="knowledge-detail-label">What the agent reads</div>
+                  {reindexButton}
+                </div>
                 <pre className="knowledge-text" tabIndex={0}>{detailText.text || "This file has no readable text."}</pre>
                 {detailText.truncated && <p className="kb-source-sub">Showing the first part of a long file.</p>}
               </>
