@@ -409,6 +409,11 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     async for response in turn_stream:
                         # Drain BEFORE sending so a cancel_generation that arrived
                         # during synthesis stops this turn's audio from being sent.
+                        # Once a speech_ended / transfer_* is deferred to the outer loop,
+                        # everything behind it belongs to the next utterance and waits in
+                        # `deferred` — except a cancel or end of stream, which still stop
+                        # this turn.
+                        deferred: list[pb.GatewayMessage] = []
                         while backlog or not msg_q.empty():
                             pending = backlog.popleft() if backlog else msg_q.get_nowait()
                             if pending is None:
@@ -418,7 +423,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 backlog.appendleft(None)  # so outer loop exits
                                 break
                             pcase = pending.WhichOneof("payload")
-                            if pcase == "cancel_generation":
+                            if deferred and pcase != "cancel_generation":
+                                deferred.append(pending)
+                            elif pcase == "cancel_generation":
                                 await session.cancel()
                                 cancelled = True
                                 # Ack now so C++ leaves BargeIn without waiting for
@@ -461,20 +468,19 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             elif pcase == "speech_ended":
                                 # New utterance while this turn's pipeline still runs —
                                 # leave it for the outer loop.
-                                backlog.appendleft(pending)
-                                break
+                                deferred.append(pending)
                             elif pcase in (
                                 "transfer_initiated", "transfer_completed", "transfer_failed",
                             ):
                                 # Defer: transfer_failed streams its own TTS, which would
                                 # interleave with this turn's audio.
-                                backlog.appendleft(pending)
-                                break
+                                deferred.append(pending)
                             else:
                                 log.warning(
                                     "Unexpected %s during speech pipeline session=%s",
                                     pcase, sid,
                                 )
+                        backlog.extendleft(reversed(deferred))
 
                         if response is None:
                             continue  # woken by a message, already handled above
