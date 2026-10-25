@@ -189,6 +189,13 @@ start_clinic_service() {
   PORT=8700 python3 -m services.clinic
 }
 
+# ── Block 13d: Real-estate service (site visits, leads, callbacks; port 8710) ──
+start_realestate_service() {
+  _require JWT_SECRET || return 0
+  cd "$REPO"
+  python3 -m services.realestate
+}
+
 # ── Block 14: Admin UI (Next.js, port 3000) ───────────────────────────────────
 start_admin_ui() {
   cd "$REPO/admin-ui"
@@ -255,4 +262,4 @@ portmap() {
 EOF
 }
 
-echo "start_local.sh loaded. Functions: start_mysql, start_kamailio, start_data, start_ollama, start_config_service, start_knowledge_service, start_knowledge_worker, start_campaigns_service, start_toolexec_service, start_clinic_service, start_telephony_service, start_conv1, start_conv2, start_envoy, start_gateway, start_freeswitch, start_admin_ui, install_network_sync, remove_network_sync, verify, portmap"
+echo "start_local.sh loaded. Functions: start_mysql, start_kamailio, start_data, start_ollama, start_config_service, start_knowledge_service, start_knowledge_worker, start_campaigns_service, start_toolexec_service, start_clinic_service, start_realestate_service, start_telephony_service, start_conv1, start_conv2, start_envoy, start_gateway, start_freeswitch, start_admin_ui, install_network_sync, remove_network_sync, verify, portmap"

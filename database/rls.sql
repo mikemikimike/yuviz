@@ -518,6 +518,26 @@ BEGIN
     END LOOP;
 END $$;
 
+-- ── Real-estate sales (database/realestate_schema.sql) ──────────────────────
+-- Every re_* table carries tenant_id. Skipped when realestate_schema.sql was not applied.
+DO $$
+DECLARE t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        're_settings', 're_api_keys', 're_projects', 're_site_visits', 're_leads', 're_callbacks'
+    ] LOOP
+        CONTINUE WHEN to_regclass(t) IS NULL;
+        EXECUTE format('DROP POLICY IF EXISTS %I ON %I', t || '_tenant_isolation', t);
+        EXECUTE format(
+            'CREATE POLICY %I ON %I FOR ALL TO yuviz_app '
+            'USING (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid) '
+            'WITH CHECK (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid)',
+            t || '_tenant_isolation', t);
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+        EXECUTE format('ALTER TABLE %I FORCE  ROW LEVEL SECURITY', t);
+    END LOOP;
+END $$;
+
 -- ── Intentionally without RLS ───────────────────────────────────────────────
 -- tenants: it IS the tenant, and tenant_conn()'s own resolver reads it.
 -- conversation_node_heartbeats: infrastructure, not tenant-owned.

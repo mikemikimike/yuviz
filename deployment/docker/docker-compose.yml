@@ -215,6 +215,28 @@ services:
       retries: 30
       start_period: 20s
 
+  realestate:
+    <<: *python-service
+    command: ["python", "-m", "services.realestate"]
+    environment:
+      REALESTATE_SERVICE_URL: http://realestate:8710
+      LISTEN_HOST: "0.0.0.0"
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      JWT_SECRET: ${JWT_SECRET}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+      ADMIN_UI_ORIGINS: ${ADMIN_UI_URL:-http://localhost:3000}
+      CONFIG_SERVICE_URL: http://config:8000
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${REALESTATE_PORT:-8710}:8710"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8710/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
   conversation:
     <<: *python-service
     command: ["python", "-m", "services.conversation",
