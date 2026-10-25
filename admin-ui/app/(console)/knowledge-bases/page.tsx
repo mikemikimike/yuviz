@@ -409,7 +409,7 @@ export default function KnowledgeBasesPage() {
                       {isAllTenants && <td data-label="Account" className="kb-source-sub">{r.tenantName}</td>}
                       <td data-label="Type">{sourceType(r)}</td>
                       <td data-label="Size" className="tabular">{formatBytes(r.byte_size)}</td>
-                      <td data-label="Tokens" className="tabular">{preparing(r) ? "—" : r.token_count.toLocaleString()}</td>
+                      <td data-label="Tokens" className="tabular">{preparing(r) || r.token_count == null ? "—" : r.token_count.toLocaleString()}</td>
                       <td data-label="Status">
                         <span className={`badge ${FILE_STATUS[r.status].color}`}>{FILE_STATUS[r.status].label}</span>
                       </td>
