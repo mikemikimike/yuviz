@@ -158,6 +158,15 @@ export default function KnowledgeBasesPage() {
     }
   };
 
+  useEffect(() => {
+    if (!detail || !detail.id) return;
+    if (detail.status !== "ready" && detail.status !== "ready_degraded") return;
+    getDocumentText(detail.id)
+      .then((t) => { if (current()) setDetailText(t); })
+      .catch((e) => { if (current()) setDetailError(e instanceof ApiError ? e.detail : String(e)); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.id, detail?.status, detail?.version]);
+
   // ?add=1 (the top bar's "+ Add file") and ?manage=<id> deep links.
   useEffect(() => {
     if (searchParams.get("add") === "1") {

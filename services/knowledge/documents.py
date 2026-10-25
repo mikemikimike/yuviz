@@ -256,22 +256,33 @@ def _join_windows(chunks: list[str]) -> str:
 
 
 async def get_document_text(document_id: Any, *, platform_scoped: bool = False) -> dict[str, Any]:
-    """The text the agent searches, rebuilt from the indexed chunks: whole sections in order where the chunker kept
-    them (parents, chunk_index -1 - ordinal), otherwise the windows with their overlap removed."""
+    """The text the agent searches, rebuilt from the indexed chunks: sections (parent rows) interspersed with
+    children that have no parent, and windows for documents with only fixed-window chunks (no parents)."""
     pool = await db.get_pool()
     conn_cm = platform_conn(pool, reason="document-by-id") if platform_scoped else tenant_conn(pool)
     async with conn_cm as conn:
-        sections = await conn.fetch(
-            "SELECT content FROM kb_chunks WHERE document_id = $1 AND is_parent ORDER BY chunk_index DESC", document_id,
+        chunks = await conn.fetch(
+            "SELECT id, parent_id, content, is_parent, chunk_index FROM kb_chunks "
+            "WHERE document_id = $1 ORDER BY chunk_index ASC, is_parent DESC",
+            document_id,
         )
-        if sections:
-            text, source = "\n\n".join(r["content"] for r in sections), "sections"
-        else:
-            windows = await conn.fetch(
-                "SELECT content FROM kb_chunks WHERE document_id = $1 AND NOT is_parent ORDER BY chunk_index",
-                document_id,
-            )
-            text, source = _join_windows([r["content"] for r in windows]), "chunks"
+    if not chunks:
+        return {"document_id": str(document_id), "text": "", "source": "chunks", "truncated": False}
+    has_parent = any(c["is_parent"] for c in chunks)
+    if has_parent:
+        text_parts: list[str] = []
+        seen_parents: set = set()
+        for chunk in chunks:
+            if chunk["parent_id"] and chunk["parent_id"] not in seen_parents:
+                parent = next((c for c in chunks if c["id"] == chunk["parent_id"]), None)
+                if parent:
+                    text_parts.append(parent["content"])
+                    seen_parents.add(chunk["parent_id"])
+            if not chunk["is_parent"]:
+                text_parts.append(chunk["content"])
+        text, source = "\n\n".join(text_parts), "sections"
+    else:
+        text, source = _join_windows([c["content"] for c in chunks]), "chunks"
     return {
         "document_id": str(document_id), "text": text[:TEXT_MAX_CHARS], "source": source,
         "truncated": len(text) > TEXT_MAX_CHARS,
@@ -291,15 +302,22 @@ async def soft_delete_document(
         platform_conn(pool, reason="document-admin-by-id", stamp_tenant=stamp_tenant)
         if platform_scoped else tenant_conn(pool)
     )
+    agent_ids: list[Any] = []
     async with conn_cm as conn:
         old_row = await conn.fetchrow("SELECT * FROM kb_documents WHERE id = $1 FOR UPDATE", document_id)
         if old_row is None:
             raise LookupError(f"kb_document {document_id} not found")
         old = dict(old_row)
+        agent_ids = [row["agent_id"] for row in await conn.fetch(
+            "SELECT DISTINCT agent_id FROM agent_documents WHERE document_id = $1", document_id,
+        )]
 
         await conn.execute("UPDATE kb_documents SET deleted_at = now() WHERE id = $1", document_id)
         await audit.write_audit(
             conn, entity_type="kb_document", entity_id=document_id, action="deleted",
             user_id=user_id, user_email=user_email, old_value=old,
         )
-    plans.invalidate_tenant_id(old["tenant_id"])  # a deleted prompt-mode document must stop being served now
+    plans.invalidate_tenant_id(old["tenant_id"])
+    from . import agent_kb
+    for agent_id in agent_ids:
+        await agent_kb._refresh_flag(agent_id)
