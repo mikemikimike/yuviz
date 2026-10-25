@@ -256,33 +256,34 @@ def _join_windows(chunks: list[str]) -> str:
 
 
 async def get_document_text(document_id: Any, *, platform_scoped: bool = False) -> dict[str, Any]:
-    """The text the agent searches, rebuilt from the indexed chunks: sections (parent rows) interspersed with
-    children that have no parent, and windows for documents with only fixed-window chunks (no parents)."""
+    """The text the agent searches, rebuilt from indexed chunks: parents are output before their children."""
     pool = await db.get_pool()
     conn_cm = platform_conn(pool, reason="document-by-id") if platform_scoped else tenant_conn(pool)
     async with conn_cm as conn:
         chunks = await conn.fetch(
             "SELECT id, parent_id, content, is_parent, chunk_index FROM kb_chunks "
-            "WHERE document_id = $1 ORDER BY chunk_index ASC, is_parent DESC",
+            "WHERE document_id = $1",
             document_id,
         )
     if not chunks:
         return {"document_id": str(document_id), "text": "", "source": "chunks", "truncated": False}
     has_parent = any(c["is_parent"] for c in chunks)
     if has_parent:
+        chunk_map = {c["id"]: c for c in chunks}
+        children = sorted([c for c in chunks if not c["is_parent"]], key=lambda c: c["chunk_index"])
         text_parts: list[str] = []
         seen_parents: set = set()
-        for chunk in chunks:
-            if chunk["parent_id"] and chunk["parent_id"] not in seen_parents:
-                parent = next((c for c in chunks if c["id"] == chunk["parent_id"]), None)
+        for child in children:
+            if child.get("parent_id") and child["parent_id"] not in seen_parents:
+                parent = chunk_map.get(child["parent_id"])
                 if parent:
                     text_parts.append(parent["content"])
-                    seen_parents.add(chunk["parent_id"])
-            if not chunk["is_parent"]:
-                text_parts.append(chunk["content"])
+                    seen_parents.add(child["parent_id"])
+            text_parts.append(child["content"])
         text, source = "\n\n".join(text_parts), "sections"
     else:
-        text, source = _join_windows([c["content"] for c in chunks]), "chunks"
+        windows = sorted([c for c in chunks if not c["is_parent"]], key=lambda c: c["chunk_index"])
+        text, source = _join_windows([c["content"] for c in windows]), "chunks"
     return {
         "document_id": str(document_id), "text": text[:TEXT_MAX_CHARS], "source": source,
         "truncated": len(text) > TEXT_MAX_CHARS,
