@@ -1126,6 +1126,7 @@ class PipelineConversationHandler:
         # At most one transfer per turn: directive, then workflow, then pending escalation.
         # Computed before end_call, since yielding end_call first would tear the session down.
         transfer_request: TransferRequest | None = None
+        refused_reason: str | None = None
         if not cancel_event.is_set():
             transfer_directive = next(
                 (d for d in directives if isinstance(d, TransferDirective)), None,
@@ -1136,6 +1137,7 @@ class PipelineConversationHandler:
             )
             if directive_problem is not None:
                 log.warning("Transfer directive rejected: %s session=%s", directive_problem, session_id)
+                refused_reason = "destination_not_permitted"
             elif transfer_directive is not None:
                 decision = self._transfer_engine.evaluate(
                     self._decision_context(session_id),
@@ -1144,6 +1146,8 @@ class PipelineConversationHandler:
                 if decision.accepted:
                     transfer_request = decision.request
                     self._session(session_id).transfer_requested = True
+                elif decision.rejection_reason != "already_transferring":
+                    refused_reason = decision.rejection_reason
             if transfer_request is None:
                 transfer_request = await self._workflow_transfer(session_id)
             # Also covers a directive rejected as already_transferring because of this pending request.
@@ -1183,6 +1187,11 @@ class PipelineConversationHandler:
                 async for chunk in self._synthesize_sentence_stream(announcement, session_id):
                     yield HandlerResponse(tts_payloads=[chunk])
             yield HandlerResponse(transfer_request=transfer_request)
+        elif refused_reason is not None and not end_call and not cancel_event.is_set():
+            # The model's own words ("connecting you") are already spoken by now, so tell it the transfer is not
+            # happening and let it correct itself and carry on.
+            async for response in self.on_transfer_failed(session_id, "", refused_reason):
+                yield response
 
     async def on_cancel(self, session_id: str) -> None:
         self._cancel_event(session_id).set()

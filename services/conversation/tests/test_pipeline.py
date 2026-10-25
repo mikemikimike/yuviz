@@ -1426,6 +1426,55 @@ async def test_transfer_directive_refuses_stored_destination_outside_tenant_poli
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("handler_kwargs, reason", [
+    ({"transfer_type": "cold", "transfer_destination": "+442071234567"}, "destination_not_permitted"),
+    ({"transfer_type": "none"}, "transfer_disabled"),
+])
+async def test_refused_transfer_directive_tells_the_model_so_it_can_correct_itself(handler_kwargs, reason):
+    """The model already said "connecting you"; it must be told the transfer is not happening."""
+    import json as _json
+
+    seen = []
+
+    async def llm_generate(messages):
+        seen.append(list(messages))
+        yield "Okay, connecting you. " if len(seen) == 1 else "Sorry, I can't transfer you, but I can help here. "
+        if len(seen) == 1:
+            yield '[[TRANSFER reason="x"]]'
+
+    llm = MagicMock()
+    llm.generate = llm_generate
+    handler = _make_handler(_make_stt("transfer me"), llm, _make_tts(b"\x00" * 640), **handler_kwargs)
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert [r for r in responses if r.transfer_request] == []
+    assert len(seen) == 2
+    event = _json.loads(seen[1][-1].content.split("\n\n")[0])
+    assert event == {"type": "system_event", "event": "transfer_failed", "reason": reason}
+
+
+@pytest.mark.asyncio
+async def test_accepted_transfer_directive_does_not_run_the_failure_recovery_turn():
+    seen = []
+
+    async def llm_generate(messages):
+        seen.append(messages)
+        yield "Connecting you. "
+        yield '[[TRANSFER reason="x"]]'
+
+    llm = MagicMock()
+    llm.generate = llm_generate
+    handler = _make_handler(
+        _make_stt("transfer me"), llm, _make_tts(b"\x00" * 640),
+        transfer_type="cold", transfer_destination="+15550009999",
+    )
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert len([r for r in responses if r.transfer_request]) == 1
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
 async def test_transfer_directive_dials_international_destination_after_opt_in():
     transfers = await _directive_transfers(
         '[[TRANSFER reason="x"]]', transfer_type="cold", transfer_destination="+442071234567",

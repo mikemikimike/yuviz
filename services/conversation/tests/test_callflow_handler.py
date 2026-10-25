@@ -251,6 +251,8 @@ async def test_dial_node_outside_tenant_policy_is_never_dialled(destination, pol
     response = await asyncio.wait_for(handler.out_responses.get(), timeout=1)
     assert response.transfer_request is None
     assert response.end_call is True
+    # The node's "Connecting." is never synthesized; the caller hears that the transfer is not possible.
+    assert tts.calls == ["I can't transfer this call right now. Please try again later. Goodbye."]
 
 
 @pytest.mark.asyncio

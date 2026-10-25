@@ -14,6 +14,7 @@ from typing import Any, AsyncGenerator, Awaitable, Callable
 from libs.config_sdk.dial_targets import TransferPolicy, transfer_policy_problem
 
 from ..directives import TransferRequest, TransferType
+from ..i18n import t
 from ..session import HandlerResponse
 from ..session_finalizer import FinalizationResult, FinalizationStatus
 from .runner import Action, CallFlowRunner, Dial, Handoff, Hangup, Listen, Speak, SetVoice, Store
@@ -99,6 +100,14 @@ class CallFlowConversationHandler:
     async def _run_actions(self, actions: list[Action]) -> None:
         """Each action list ends in exactly one Listen/Hangup/Dial/Handoff."""
         self._cancel_timers()
+        if any(isinstance(a, Dial) and transfer_policy_problem(a.destination, self._transfer_policy) for a in actions):
+            # A flow published before the tenant's policy tightened. The node's own "connecting you" speech
+            # must not play for a call that will not connect, so it is replaced before anything is spoken.
+            log.warning("callflow: dial destination refused by transfer policy session=%s", self._session_id)
+            actions = [
+                *(a for a in actions if isinstance(a, SetVoice)),
+                Speak(t("callflow_dial_refused", "en")), Hangup("transfer_refused"),
+            ]
         pcm: list[bytes] = []
         for action in actions:
             if isinstance(action, SetVoice):
@@ -118,11 +127,6 @@ class CallFlowConversationHandler:
                 return
             elif isinstance(action, Dial):
                 self._ended = True
-                if transfer_policy_problem(action.destination, self._transfer_policy):
-                    # A flow published before the tenant's policy tightened; never dial it.
-                    log.warning("callflow: dial destination refused by transfer policy session=%s", self._session_id)
-                    await self.out_responses.put(HandlerResponse(tts_payloads=pcm, end_call=True))
-                    return
                 await self.out_responses.put(HandlerResponse(
                     tts_payloads=pcm,
                     transfer_request=TransferRequest(
