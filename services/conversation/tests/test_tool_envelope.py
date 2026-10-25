@@ -815,7 +815,19 @@ async def test_a_turn_that_starts_tainted_holds_a_write_with_no_search_having_ru
     assert executor.calls == []
 
 
-async def test_a_turn_that_starts_clean_is_untouched_and_the_next_turn_does_not_inherit_a_pre_taint():
+async def test_the_next_turn_does_not_inherit_a_pre_taint():
+    """Turn 2 calls a write that was never held, so only the taint (not a confirmation) can block it."""
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor)
+    await _turn(orchestrator, [_call(1, api_name="cancel_booking"), [TokenEvent(text="Sure?")]], pre_tainted=True)
+
+    history, _ = await _turn(orchestrator, [_call(1, api_name="book_appointment"), [TokenEvent(text="Done.")]])
+
+    assert _envelopes(history)[0]["status"] == "ok"
+    assert [c.arguments["api_name"] for c in executor.calls] == ["book_appointment"]
+
+
+async def test_a_write_held_by_a_pre_taint_runs_when_the_caller_confirms_on_the_next_turn():
     executor = _Executor()
     orchestrator = _taint_orchestrator(executor)
     await _turn(orchestrator, [_call(1, api_name="cancel_booking"), [TokenEvent(text="Sure?")]], pre_tainted=True)
