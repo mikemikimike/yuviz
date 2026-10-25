@@ -442,6 +442,17 @@ END $$;
 
 DO $$
 BEGIN
+    DROP POLICY IF EXISTS agent_documents_tenant_isolation ON agent_documents;
+    CREATE POLICY agent_documents_tenant_isolation ON agent_documents
+        FOR ALL TO yuviz_app
+        USING      (EXISTS (SELECT 1 FROM agents p WHERE p.id = agent_documents.agent_id))
+        WITH CHECK (EXISTS (SELECT 1 FROM agents p WHERE p.id = agent_documents.agent_id));
+    ALTER TABLE agent_documents ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE agent_documents FORCE  ROW LEVEL SECURITY;
+END $$;
+
+DO $$
+BEGIN
     DROP POLICY IF EXISTS agent_retrieval_policies_tenant_isolation ON agent_retrieval_policies;
     CREATE POLICY agent_retrieval_policies_tenant_isolation ON agent_retrieval_policies
         FOR ALL TO yuviz_app

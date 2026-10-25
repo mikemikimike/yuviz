@@ -41,8 +41,12 @@ async def caller(pool, tenant_agent):
     own_kb = await pool.fetchrow(
         "INSERT INTO knowledge_bases (tenant_id, slug, name) VALUES ($1, 'own', 'Own') RETURNING *", tenant["id"],
     )
+    own_document = await pool.fetchrow(
+        "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type) "
+        "VALUES ($1, $2, 'Ours', 'ref', 'text/plain') RETURNING *", own_kb["id"], tenant["id"],
+    )
     yield {
-        "tenant": tenant, "agent": agent, "own_kb": dict(own_kb),
+        "tenant": tenant, "agent": agent, "own_kb": dict(own_kb), "own_document": dict(own_document),
         "headers": {"Authorization": f"Bearer {config_auth.create_access_token(user)}"},
     }
     await pool.execute("UPDATE users SET deleted_at = now(), tenant_id = NULL WHERE id = $1", user["id"])
@@ -69,7 +73,7 @@ async def foreign(pool, other_tenant_admin):
     ))
     yield {"kb": kb, "document": document, "agent": agent, "headers": {
         "Authorization": f"Bearer {other_tenant_admin['token']}"}}
-    await pool.execute("DELETE FROM agent_knowledge_bases WHERE agent_id = $1 OR kb_id = $2", agent["id"], kb["id"])
+    await pool.execute("DELETE FROM agent_documents WHERE agent_id = $1 OR document_id = $2", agent["id"], document["id"])
     await pool.execute("DELETE FROM kb_ingestion_jobs WHERE document_id = $1", document["id"])
     await pool.execute("DELETE FROM kb_documents WHERE id = $1", document["id"])
     await pool.execute("DELETE FROM knowledge_bases WHERE id = $1", kb["id"])
@@ -77,81 +81,76 @@ async def foreign(pool, other_tenant_admin):
     await pool.execute("DELETE FROM agents WHERE id = $1", agent["id"])
 
 
-async def _insert_cross_tenant_row(pool, agent_id, kb_id):
+async def _insert_cross_tenant_row(pool, agent_id, document_id):
     """Plants the row the trigger forbids, as a pre-fix database could hold it."""
     async with pool.acquire() as conn, conn.transaction():
-        await conn.execute("ALTER TABLE agent_knowledge_bases DISABLE TRIGGER agent_knowledge_bases_same_tenant")
-        await conn.execute("INSERT INTO agent_knowledge_bases (agent_id, kb_id) VALUES ($1, $2)", agent_id, kb_id)
-        await conn.execute("ALTER TABLE agent_knowledge_bases ENABLE TRIGGER agent_knowledge_bases_same_tenant")
+        await conn.execute("ALTER TABLE agent_documents DISABLE TRIGGER agent_documents_same_tenant")
+        await conn.execute("INSERT INTO agent_documents (agent_id, document_id) VALUES ($1, $2)", agent_id, document_id)
+        await conn.execute("ALTER TABLE agent_documents ENABLE TRIGGER agent_documents_same_tenant")
 
 
-async def _attached(pool, agent_id) -> list:
-    return await pool.fetch("SELECT * FROM agent_knowledge_bases WHERE agent_id = $1", agent_id)
+async def _linked(pool, agent_id) -> list:
+    return await pool.fetch("SELECT * FROM agent_documents WHERE agent_id = $1", agent_id)
 
 
-# ── (1a) attach route ───────────────────────────────────────────────────────────
+# ── (1a) link route ─────────────────────────────────────────────────────────────
 
-async def test_attach_own_kb_succeeds(client, pool, caller):
-    resp = await client.post(
-        f"/agents/{caller['agent']['id']}/knowledge-bases",
-        json={"kb_id": str(caller["own_kb"]["id"])}, headers=caller["headers"],
+async def test_linking_an_own_document_succeeds(client, pool, caller):
+    resp = await client.put(
+        f"/agents/{caller['agent']['id']}/documents",
+        json={"document_ids": [str(caller["own_document"]["id"])]}, headers=caller["headers"],
     )
-    assert resp.status_code == 201
-    assert len(await _attached(pool, caller["agent"]["id"])) == 1
+    assert resp.status_code == 200
+    assert len(await _linked(pool, caller["agent"]["id"])) == 1
 
 
-async def test_attach_foreign_kb_is_refused_like_a_nonexistent_kb(client, pool, caller, foreign):
-    url = f"/agents/{caller['agent']['id']}/knowledge-bases"
-    foreign_resp = await client.post(url, json={"kb_id": str(foreign["kb"]["id"])}, headers=caller["headers"])
-    unknown_resp = await client.post(url, json={"kb_id": UNKNOWN_ID}, headers=caller["headers"])
+async def test_linking_a_foreign_document_is_refused_like_a_nonexistent_one(client, pool, caller, foreign):
+    url = f"/agents/{caller['agent']['id']}/documents"
+    foreign_resp = await client.put(url, json={"document_ids": [str(foreign["document"]["id"])]}, headers=caller["headers"])
+    unknown_resp = await client.put(url, json={"document_ids": [UNKNOWN_ID]}, headers=caller["headers"])
 
     assert unknown_resp.status_code == 404
     assert foreign_resp.status_code == unknown_resp.status_code
-    assert foreign_resp.json()["detail"] == unknown_resp.json()["detail"].replace(UNKNOWN_ID, str(foreign["kb"]["id"]))
-    assert await _attached(pool, caller["agent"]["id"]) == []
+    assert foreign_resp.json()["detail"] == unknown_resp.json()["detail"]
+    assert await _linked(pool, caller["agent"]["id"]) == []
 
 
-async def test_attach_to_foreign_agent_is_refused_like_an_unknown_agent(client, pool, caller, foreign):
-    foreign_resp = await client.post(
-        f"/agents/{foreign['agent']['id']}/knowledge-bases",
-        json={"kb_id": str(caller["own_kb"]["id"])}, headers=caller["headers"],
-    )
-    unknown_resp = await client.post(
-        f"/agents/{UNKNOWN_ID}/knowledge-bases",
-        json={"kb_id": str(caller["own_kb"]["id"])}, headers=caller["headers"],
-    )
+async def test_linking_to_a_foreign_agent_is_refused_like_an_unknown_agent(client, pool, caller, foreign):
+    body = {"document_ids": [str(caller["own_document"]["id"])]}
+    foreign_resp = await client.put(f"/agents/{foreign['agent']['id']}/documents", json=body, headers=caller["headers"])
+    unknown_resp = await client.put(f"/agents/{UNKNOWN_ID}/documents", json=body, headers=caller["headers"])
     assert unknown_resp.status_code == 404
     assert foreign_resp.status_code == unknown_resp.status_code
     assert foreign_resp.json()["detail"] == unknown_resp.json()["detail"].replace(UNKNOWN_ID, str(foreign["agent"]["id"]))
-    assert await _attached(pool, foreign["agent"]["id"]) == []
+    assert await _linked(pool, foreign["agent"]["id"]) == []
 
 
-async def test_attach_malformed_kb_id_is_the_same_404(client, caller):
-    resp = await client.post(
-        f"/agents/{caller['agent']['id']}/knowledge-bases", json={"kb_id": "not-a-uuid"}, headers=caller["headers"],
+async def test_linking_a_malformed_document_id_is_the_same_404(client, caller):
+    resp = await client.put(
+        f"/agents/{caller['agent']['id']}/documents", json={"document_ids": ["not-a-uuid"]}, headers=caller["headers"],
     )
     assert resp.status_code == 404
 
 
 # ── (1c) the row cannot exist ───────────────────────────────────────────────────
 
-async def test_database_refuses_a_cross_tenant_attachment(pool, caller, foreign):
+async def test_database_refuses_a_cross_tenant_link(pool, caller, foreign):
     with pytest.raises(asyncpg.CheckViolationError):
         await pool.execute(
-            "INSERT INTO agent_knowledge_bases (agent_id, kb_id) VALUES ($1, $2)",
-            caller["agent"]["id"], foreign["kb"]["id"],
+            "INSERT INTO agent_documents (agent_id, document_id) VALUES ($1, $2)",
+            caller["agent"]["id"], foreign["document"]["id"],
         )
 
 
-async def test_database_refuses_repointing_an_attachment_across_tenants(pool, caller, foreign):
+async def test_database_refuses_repointing_a_link_across_tenants(pool, caller, foreign):
     await pool.execute(
-        "INSERT INTO agent_knowledge_bases (agent_id, kb_id) VALUES ($1, $2)",
-        caller["agent"]["id"], caller["own_kb"]["id"],
+        "INSERT INTO agent_documents (agent_id, document_id) VALUES ($1, $2)",
+        caller["agent"]["id"], caller["own_document"]["id"],
     )
     with pytest.raises(asyncpg.CheckViolationError):
         await pool.execute(
-            "UPDATE agent_knowledge_bases SET kb_id = $2 WHERE agent_id = $1",
-            caller["agent"]["id"], foreign["kb"]["id"],
+            "UPDATE agent_documents SET document_id = $2 WHERE agent_id = $1",
+            caller["agent"]["id"], foreign["document"]["id"],
         )
 
 
@@ -159,13 +158,13 @@ async def test_database_refuses_repointing_an_attachment_across_tenants(pool, ca
 
 async def test_a_stray_cross_tenant_row_is_invisible_to_retrieval_and_listing(pool, caller, foreign):
     tenant, agent = caller["tenant"], caller["agent"]
-    await _insert_cross_tenant_row(pool, agent["id"], foreign["kb"]["id"])
+    await _insert_cross_tenant_row(pool, agent["id"], foreign["document"]["id"])
     set_caller_tenant(str(tenant["id"]))
 
     async with pool.acquire() as conn:
         plan = await retrieval_plan.load_plan(conn, tenant["slug"], agent["slug"])
     assert plan is not None
-    assert plan.kb_ids == []
+    assert plan.kb_ids == [] and plan.document_ids == []
     assert plan.groups == {}
     assert await agent_kb_service.has_enabled_kb(tenant["slug"], agent["slug"]) is False
     assert await agent_kb_service.list_for_agent(agent["id"]) == []
@@ -175,7 +174,7 @@ async def test_a_stray_cross_tenant_row_is_invisible_to_retrieval_and_listing(po
 # ── (4) foreign is identical to unknown on the by-id routes ─────────────────────
 
 @pytest.mark.parametrize("method, path, foreign_key, kind", [
-    ("get", "/agents/{id}/knowledge-bases", "agent", "agent"),
+    ("get", "/agents/{id}/documents", "agent", "agent"),
     ("get", "/knowledge-bases/{id}/documents", "kb", "knowledge_base"),
     ("get", "/documents/{id}", "document", "kb_document"),
     ("delete", "/documents/{id}", "document", "kb_document"),

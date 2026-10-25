@@ -11,7 +11,7 @@ import uuid
 import asyncpg
 import pytest
 import pytest_asyncio
-from rag_fakes import add_document, embed_text, make_kb, vec_literal
+from rag_fakes import add_document, embed_text, link_to_kb_agents, make_kb, vec_literal
 
 from libs.tenancy import set_caller_tenant
 from services.config import provider_configs
@@ -386,9 +386,10 @@ async def _ingest(m, manager, title="late upload"):
     doc = await documents_service.upload_document(
         tenant_id=m["tenant"]["id"], kb_id=m["kb"]["id"], title=title, filename=f"{title}.txt",
         content_type="text/plain", content=_DOC, storage=LocalStorageProvider())
-    set_caller_tenant(None)
     from services.knowledge.db import get_pool
     p = await get_pool()
+    await link_to_kb_agents(p, m["kb"]["id"], doc["id"])
+    set_caller_tenant(None)
     job = dict(await p.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
     await process_one_job(p, LocalStorageProvider(), manager, job)
     return doc

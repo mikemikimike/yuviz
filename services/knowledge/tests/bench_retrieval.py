@@ -81,7 +81,6 @@ async def seed(pool, n_chunks: int):
         tenant_id=tenant["id"], name="E", role="embedding", engine="ollama", allow_pointer_schemes=False)
     kb = await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="kb", name="kb", embedding_config_id=cfg["id"])
-    await agent_kb.assign(agent["id"], kb["id"])
     docs = max(1, n_chunks // 20)
     for d in range(docs):
         doc = await pool.fetchrow(
@@ -101,6 +100,9 @@ async def seed(pool, n_chunks: int):
         await pool.executemany(
             "INSERT INTO kb_chunks (document_id, kb_id, tenant_id, chunk_index, content, token_count, embedding, "
             "parent_id) VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8)", rows)
+    await pool.execute("INSERT INTO agent_documents (agent_id, document_id) "
+                       "SELECT $1, id FROM kb_documents WHERE kb_id = $2", agent["id"], kb["id"])
+    await agent_kb._refresh_flag(agent["id"])
     await pool.execute("ANALYZE kb_chunks")
     return tenant, agent, kb, cfg
 

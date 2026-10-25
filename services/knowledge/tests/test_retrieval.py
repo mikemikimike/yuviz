@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from libs.tenancy import set_caller_tenant, tenant_conn
 from services.config import provider_configs
-from services.knowledge import agent_kb as agent_kb_service
 from services.knowledge import documents as documents_service
 from services.knowledge import knowledge_bases as kb_service
 from services.knowledge import retrieval_policies as policy_service
@@ -14,6 +13,7 @@ from services.knowledge.secret_resolver import CompositeSecretResolver
 from services.knowledge.storage import LocalStorageProvider
 from services.knowledge.vector_repository import PgVectorRepository
 from services.knowledge.tests.ollama_gate import requires_ollama_embeddings
+from services.knowledge.tests.rag_fakes import use_kb
 
 
 async def test_resolve_policy_uses_system_default_when_nothing_set(pool, tenant_agent):
@@ -60,7 +60,6 @@ async def test_retrieve_end_to_end_with_real_ollama_embeddings(pool, tenant_agen
     kb = await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="policies", name="Policies", embedding_config_id=embedding_cfg["id"],
     )
-    await agent_kb_service.assign(agent["id"], kb["id"])
 
     document = dict(await pool.fetchrow(
         "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type, status) "
@@ -82,6 +81,7 @@ async def test_retrieve_end_to_end_with_real_ollama_embeddings(pool, tenant_agen
 
     vector_repo = PgVectorRepository()
     async with tenant_conn(pool) as conn:
+        await use_kb(pool, agent["id"], kb["id"])
         result = await retrieve(
             conn, vector_repo, manager,
             tenant_slug=tenant["slug"], agent_slug=agent["slug"], query="How long until I get my money back?",
@@ -97,7 +97,6 @@ async def test_prompt_mode_document_always_included_regardless_of_query_relevanc
     tenant, agent = tenant_agent
     set_caller_tenant(str(tenant["id"]))
     kb = await kb_service.create_knowledge_base(tenant_id=tenant["id"], slug="notices", name="Notices")
-    await agent_kb_service.assign(agent["id"], kb["id"])
 
     # Tiny doc auto-inlines as prompt-mode, so the KB needs no embedding config.
     from services.knowledge.ingestion_worker import process_one_job
@@ -113,6 +112,7 @@ async def test_prompt_mode_document_always_included_regardless_of_query_relevanc
 
     vector_repo = PgVectorRepository()
     async with tenant_conn(pool) as conn:
+        await use_kb(pool, agent["id"], kb["id"])
         result = await retrieve(
             conn, vector_repo, manager,
             tenant_slug=tenant["slug"], agent_slug=agent["slug"],
@@ -135,7 +135,6 @@ async def test_prompt_mode_document_coexists_with_vector_search_results(pool, te
     kb = await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="mixed", name="Mixed", embedding_config_id=embedding_cfg["id"],
     )
-    await agent_kb_service.assign(agent["id"], kb["id"])
 
     manager = EmbeddingProviderManager(CompositeSecretResolver())
     provider = await manager.get(EmbeddingProviderConfig(id=str(embedding_cfg["id"]), engine="ollama"))
@@ -167,6 +166,7 @@ async def test_prompt_mode_document_coexists_with_vector_search_results(pool, te
 
     vector_repo = PgVectorRepository()
     async with tenant_conn(pool) as conn:
+        await use_kb(pool, agent["id"], kb["id"])
         result = await retrieve(
             conn, vector_repo, manager,
             tenant_slug=tenant["slug"], agent_slug=agent["slug"], query="How long until I get my money back?",
@@ -218,7 +218,6 @@ async def test_agent_with_prompt_only_kb_and_no_embedding_provider_still_retriev
     tenant, agent = tenant_agent
     set_caller_tenant(str(tenant["id"]))
     kb = await kb_service.create_knowledge_base(tenant_id=tenant["id"], slug="no-embed", name="No Embed")
-    await agent_kb_service.assign(agent["id"], kb["id"])
 
     from services.knowledge.ingestion_worker import process_one_job
 
@@ -232,6 +231,7 @@ async def test_agent_with_prompt_only_kb_and_no_embedding_provider_still_retriev
 
     vector_repo = PgVectorRepository()
     async with tenant_conn(pool) as conn:
+        await use_kb(pool, agent["id"], kb["id"])
         result = await retrieve(
             conn, vector_repo, manager,
             tenant_slug=tenant["slug"], agent_slug=agent["slug"], query="anything at all",

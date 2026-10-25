@@ -29,13 +29,8 @@ class DocumentUpdate(BaseModel):
     usage_mode: str | None = None
 
 
-class AgentKnowledgeBaseCreate(BaseModel):
-    kb_id: str
-    enabled: bool = True
-
-
-class AgentKnowledgeBaseUpdate(BaseModel):
-    enabled: bool
+class AgentDocumentsUpdate(BaseModel):
+    document_ids: list[str] = Field(max_length=2000)
 
 
 class RetrieveRequest(BaseModel):

@@ -28,7 +28,7 @@ from services.knowledge.routers import retrieve as retrieve_router
 from services.knowledge.runtime import get_vector_repo
 from services.knowledge.storage import LocalStorageProvider
 from services.knowledge.tests.corpus import builders
-from services.knowledge.tests.rag_fakes import FakeEmbedder, make_kb, make_manager
+from services.knowledge.tests.rag_fakes import FakeEmbedder, link_to_kb_agents, make_kb, make_manager
 from services.knowledge.tests.test_ingestion_queue import _drain_pending
 
 PDF_TYPE = "application/pdf"
@@ -84,6 +84,7 @@ class World:
             data={"title": title or name}, headers=self.auth(t.admin_token),
         )
         assert resp.status_code == 201, resp.text
+        await link_to_kb_agents(self.pool, t.kb["id"], resp.json()["id"])
         return resp.json()
 
     async def ingest(self, doc: dict, embedder: FakeEmbedder | None = None, tenant: Tenant | None = None) -> dict:

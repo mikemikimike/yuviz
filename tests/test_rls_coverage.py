@@ -42,6 +42,7 @@ WAVE_B_TABLES = {
     "api_chain_steps",
     "transcript_entries",
     "agent_knowledge_bases",
+    "agent_documents",
     "agent_retrieval_policies",
     "kb_ingestion_jobs",
 }
