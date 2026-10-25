@@ -1,24 +1,24 @@
 # Run report: pg-outage-resilience
-Status: halted at build: combined-tree suite fails — services/clinic tests can't reach Postgres (asyncpg FileNotFoundError: test DSN doesn't point at the running server). services/conversation passes fully (1430 passed).
-PR: none
+Status: shipped
+PR: https://github.com/yuviz-ai/yuviz/pull/214 (base redesign)
 
 | Stage | Verdict | Rounds | Output tokens (exact) | Est. cost (est.) |
 |---|---|---|---|---|
-| prd | GREEN | 2 | sonnet 21,228 · opus 16,321 | ~$1.08 |
-| design | AMBER (passed) | 1 | opus 26,026 | ~$1.04 |
+| prd | GREEN | 2 | sonnet 21,228 · opus 16,321 | ~$1.09 |
+| design | AMBER (passed) | 1 | opus 26,026 | ~$1.02 |
 | security_design | GREEN | 1 | opus 4,587 | ~$0.18 |
-| plan | AMBER (passed) | 2 | opus 13,788 | ~$0.55 |
-| build | halted | 0 | sonnet 51,359 · haiku 1,038 | ~$1.15 |
-| _state_writes | — | 0 | haiku 43,430 | ~$0.46 |
+| plan | AMBER (passed) | 2 | opus 13,788 | ~$0.54 |
+| build | GREEN | 1 (after 2 env halts) | sonnet 56,383 · haiku 2,387 | ~$1.22 |
+| review | GREEN | 1 | opus 7,830 | ~$0.31 |
+| security_code | GREEN | 1 | not recorded | — |
+| test | GREEN | 1 | sonnet 1,724 | ~$0.04 |
+| independent review (outside workflow) | AMBER → GREEN | 2 | not metered | — |
+| _state_writes | — | — | haiku 50,838 | ~$0.54 |
 
 Open findings — decide:
-- [minor] prd — criterion 3: the recovery bound should say the attempt starts within 7 s and succeeds within its 5 s timeout (12 s worst case)
-- [minor] design — no test that an uncached routed call reaching deps-None → UNAVAILABLE carries no host/DSN text
-- [minor] design — concurrent failing lookups each log a WARNING (criterion 18 wants exactly one)
-- [minor] design — test 1's fake clock never exercises the real 5 s wait_for timeout; needs a real-time hang-then-recover test
-- [minor] design — the heartbeat _spawn call needs the "heartbeat" name argument
-- [low] security_design — the fallback can re-arm on every backoff window, so a stale policy (including disabled tools) can be served with no time limit during a long outage
-- [minor] plan — T2: check that reconcile_inactive_calls still runs in an iteration where reconcile_dead_nodes raised
-- [minor] plan — T5: add the _LOOKUP_TIMEOUT_S ≤ 3 tripwire, and check narrowing on the short-circuit path
+- [minor] independent — follow-up: add a pool release or command timeout so a blackholed DB can't hold connections for the TCP timeout
+- [minor] independent — no test that cancelling the first single-flight caller leaves the other waiters with the result
+- [minor] independent — `from .bounded import run_bounded` import order (cosmetic)
+- [env] five DB-fixture test files need a local Postgres socket; pre-existing, identical on base 0fc91a8
 Lessons added: None
-Workflow run: wf_8e43b378-eb3 (resume within this session with resumeFromRunId)
+Workflow run: wf_96acb9f1-47e (resume within this session with resumeFromRunId)

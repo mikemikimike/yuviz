@@ -1,8 +1,8 @@
 {
   "slug": "pg-outage-resilience",
   "base": "0fc91a8ff67e3d14edaaa2283d985a1513e6473a",
-  "stage": "ship",
-  "status": "gate_ship",
+  "stage": "qa",
+  "status": "shipped",
   "started_at": "Sun Oct 25 09:57:00 UTC 2026",
   "stages": {
     "security_design": {
@@ -123,7 +123,8 @@
   "open": [],
   "retro_sources": [],
   "gates": {
-    "prd": "approved"
+    "prd": "approved",
+    "ship": "approved (user pre-approved: ship when all reviews and independent review are GREEN)"
   },
   "build_phase_done": "Phase 3: Peer error messages carry no exception text",
   "verify": {
@@ -136,5 +137,11 @@
     "backend": 12,
     "admin_ui": 0
   },
-  "updated_at": "2026-10-25T14:26:51Z"
+  "updated_at": "2026-10-25T14:26:51Z",
+  "pr": "https://github.com/yuviz-ai/yuviz/pull/214",
+  "independent_review": {
+    "rounds": 2,
+    "verdict": "GREEN",
+    "findings_path": ".sdlc/pg-outage-resilience/05-review-independent.md"
+  }
 }
