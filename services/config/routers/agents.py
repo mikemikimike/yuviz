@@ -477,10 +477,12 @@ async def validate_workflow(
     body: WorkflowDraft,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    await _resolve_tenant(tenant_slug, current_user)
+    tenant = await _resolve_tenant(tenant_slug, current_user)
     _parse_agent_id(agent_id)
     try:
-        return {"valid": True, "warnings": await workflows_service.validate(body.graph)}
+        warnings = await workflows_service.validate(body.graph)
+        workflows_service.check_transfer_policy(body.graph, tenants_service.transfer_policy(tenant))
+        return {"valid": True, "warnings": warnings}
     except workflows_service.WorkflowValidationError as exc:
         return {"valid": False, "errors": [e.to_dict() for e in exc.errors], "warnings": []}
 

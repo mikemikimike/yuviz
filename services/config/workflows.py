@@ -7,6 +7,7 @@ import asyncio
 import json
 from typing import Any
 
+from libs.config_sdk.dial_targets import TransferPolicy
 from libs.config_sdk.workflow import (
     WorkflowError,
     WorkflowInvalid,
@@ -49,6 +50,14 @@ def _validate_sync(graph: dict[str, Any]) -> list[dict[str, Any]]:
 async def validate(graph: dict[str, Any]) -> list[dict[str, Any]]:
     """CPU-bound parse + warnings off the event loop (Config also serves call setup)."""
     return await asyncio.to_thread(_validate_sync, graph)
+
+
+def check_transfer_policy(graph: dict[str, Any], policy: TransferPolicy) -> None:
+    """Raises WorkflowValidationError for a destination the tenant's policy refuses. The graph
+    has already passed validate(); every route that stores or checks a published graph calls this."""
+    errors = literal_destination_policy_errors(parse_graph(graph), policy)
+    if errors:
+        raise WorkflowValidationError(errors)
 
 
 def prompts_from_graph(graph: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -226,11 +235,7 @@ async def publish(
             raise ValueError("nothing to publish — this agent has no workflow draft")
         if not graphs_equivalent(candidate, peeked):
             warnings = await validate(candidate)
-        policy_errs = literal_destination_policy_errors(
-            parse_graph(candidate), await tenants_service.transfer_policy_on(conn, old["tenant_id"]),
-        )
-        if policy_errs:
-            raise WorkflowValidationError(policy_errs)
+        check_transfer_policy(candidate, await tenants_service.transfer_policy_on(conn, old["tenant_id"]))
 
         current = _as_graph(old["workflow"])
         if graphs_equivalent(candidate, current):

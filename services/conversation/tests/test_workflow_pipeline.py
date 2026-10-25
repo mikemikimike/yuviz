@@ -566,3 +566,31 @@ async def test_failed_transition_speech_does_not_strip_the_same_sentence_from_th
     assert handler._session("s1").unspoken_sentences == []
     assert transcripts.record_turn.call_args.args[3] == "Thank you. Your appointment is Monday at 10."
     assert handler._get_history("s1")[-1].content == "Thank you. Your appointment is Monday at 10."
+
+
+async def test_an_end_node_turn_whose_tts_failed_leaves_the_call_up_for_the_next_turn():
+    """The goodbye never reached the caller, so the end node must not stay latched and hang up on their next reply."""
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_all_done", arguments={})],
+        [TokenEvent(text="Goodbye!")],
+        [TokenEvent(text="Of course, what is your question?")],
+    ])
+    tts = _make_tts()
+    handler = _make_handler(
+        _make_stt("that's all"), llm, tts, system_prompt="You are Ada.", workflow=TRANSFER_GRAPH,
+        tool_orchestrator=ToolCallOrchestrator(
+            llm_adapter=LLMAdapter(llm), policy_resolver=_RecordingPolicyResolver(),
+            provider_manager=None, executor_registry=ExecutorRegistry(),
+        ),
+    )
+
+    tts.synthesize.side_effect = RuntimeError("tts down")
+    turn1 = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+    assert not any(r.tts_payloads or r.end_call for r in turn1)
+    assert handler._workflow.node.name == "greeting"
+    assert handler._workflow.pending_end is False
+
+    tts.synthesize.side_effect = None
+    turn2 = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+    assert any(r.tts_payloads for r in turn2)
+    assert not any(r.end_call for r in turn2)

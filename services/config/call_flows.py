@@ -137,6 +137,12 @@ async def _dial_destination_errors(conn: Any, graph: dict[str, Any], tenant_id: 
     return errs
 
 
+async def dial_policy_errors(tenant_id: Any, graph: dict[str, Any]) -> list[CallFlowError]:
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        return await _dial_destination_errors(conn, graph, tenant_id)
+
+
 async def list_call_flows(tenant_id: Any) -> list[dict[str, Any]]:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
@@ -286,6 +292,11 @@ async def create_call_flow(
         # A clone may name an agent deleted/deactivated since; land it as a draft.
         if publishable and await _agent_reference_errors(conn, graph, tenant_id):
             publishable = False
+        # Unlike a blank step, a refused destination is a 400: publish would refuse the same graph.
+        if publishable:
+            dial_errs = await _dial_destination_errors(conn, graph, tenant_id)
+            if dial_errs:
+                raise CallFlowValidationError(dial_errs)
         row = await conn.fetchrow(
             "INSERT INTO call_flows (tenant_id, slug, name, description, direction, graph, graph_draft) "
             "VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb) RETURNING *",

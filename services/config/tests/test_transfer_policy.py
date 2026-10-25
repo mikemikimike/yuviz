@@ -218,3 +218,101 @@ async def test_workflow_publish_leaves_a_templated_transfer_destination_for_runt
 ):
     resp = await _publish_workflow(admin_client, test_tenant, agent, "{{ branch_number }}")
     assert resp.status_code == 200, resp.text
+
+
+async def _set_policy(tenant, **fields):
+    from services.config import tenants
+    await tenants.update_tenant(tenant["id"], **fields)
+
+
+async def _create_agent_with_workflow(client, tenant, destination, slug="wfdesk"):
+    return await client.post(
+        f"/tenants/{tenant['slug']}/agents",
+        json={"slug": slug, "name": "Wf Desk", "workflow": _transfer_workflow(destination)},
+    )
+
+
+async def _validate_workflow_route(client, tenant, agent, destination):
+    return await client.post(
+        f"/tenants/{tenant['slug']}/agents/{agent['id']}/workflow/validate",
+        json={"graph": _transfer_workflow(destination)},
+    )
+
+
+async def test_agent_create_with_workflow_refuses_a_destination_outside_the_policy(
+    admin_client, test_tenant, pool,
+):
+    resp = await _create_agent_with_workflow(admin_client, test_tenant, "+447911123456")
+    assert resp.status_code == 400, resp.text
+    assert [(e["id"], e["field"]) for e in resp.json()["errors"]] == [("n2", "transfer_destination")]
+    assert await pool.fetchval("SELECT count(*) FROM agents WHERE tenant_id = $1", test_tenant["id"]) == 0
+
+
+async def test_agent_create_with_workflow_allows_the_destination_after_opt_in(admin_client, test_tenant):
+    await _set_policy(test_tenant, allow_international_transfers=True)
+    resp = await _create_agent_with_workflow(admin_client, test_tenant, "+447911123456")
+    assert resp.status_code == 201, resp.text
+
+
+async def test_agent_create_with_workflow_leaves_a_templated_destination_for_runtime(admin_client, test_tenant):
+    resp = await _create_agent_with_workflow(admin_client, test_tenant, "{{ branch_number }}")
+    assert resp.status_code == 201, resp.text
+
+
+async def test_agent_create_with_workflow_for_a_home_91_tenant_allows_91_and_refuses_44(
+    admin_client, test_tenant,
+):
+    await _set_policy(test_tenant, home_calling_code="91")
+    assert (await _create_agent_with_workflow(admin_client, test_tenant, "+919876543210")).status_code == 201
+    refused = await _create_agent_with_workflow(admin_client, test_tenant, "+447911123456", slug="wfdesk2")
+    assert refused.status_code == 400, refused.text
+
+
+@pytest.mark.parametrize("destination", ["+8821234567890", "+449091234567"])
+async def test_agent_create_with_workflow_refuses_premium_even_after_opt_in(admin_client, test_tenant, destination):
+    await _set_policy(test_tenant, allow_international_transfers=True)
+    resp = await _create_agent_with_workflow(admin_client, test_tenant, destination)
+    assert resp.status_code == 400, resp.text
+
+
+@pytest.mark.parametrize("destination, home, refused", [
+    ("+44{{ x }}", "1", True),
+    ("+44791112{{ x }}", "1", True),
+    ("0044{{ x }}", "1", True),
+    ("+882{{ x }}", "1", True),
+    ("+1900{{ x }}", "1", True),
+    ("+1345{{ x }}", "1", True),
+    ("+1212{{ x }}", "1", False),
+    ("+1{{ x }}", "1", False),
+    ("+{{ x }}", "1", False),
+    ("1001{{ x }}", "1", False),
+    ("+91{{ x }}", "91", False),
+    ("+44{{ x }}", "91", True),
+])
+async def test_literal_prefix_of_a_templated_destination_is_checked(
+    admin_client, test_tenant, destination, home, refused,
+):
+    await _set_policy(test_tenant, home_calling_code=home)
+    resp = await _create_agent_with_workflow(admin_client, test_tenant, destination)
+    assert resp.status_code == (400 if refused else 201), resp.text
+
+
+async def test_literal_prefix_of_a_templated_destination_is_allowed_after_opt_in(admin_client, test_tenant):
+    await _set_policy(test_tenant, allow_international_transfers=True)
+    assert (await _create_agent_with_workflow(admin_client, test_tenant, "+44{{ x }}")).status_code == 201
+
+
+async def test_workflow_validate_reports_what_publish_refuses(admin_client, test_tenant, agent):
+    resp = await _validate_workflow_route(admin_client, test_tenant, agent, "+447911123456")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["valid"] is False
+    assert [(e["id"], e["field"]) for e in body["errors"]] == [("n2", "transfer_destination")]
+    published = await _publish_workflow(admin_client, test_tenant, agent, "+447911123456")
+    assert [(e["id"], e["field"]) for e in published.json()["errors"]] == [("n2", "transfer_destination")]
+
+
+async def test_workflow_validate_accepts_what_publish_accepts(admin_client, test_tenant, agent):
+    for destination in ("{{ branch_number }}", "+12125550100"):
+        resp = await _validate_workflow_route(admin_client, test_tenant, agent, destination)
+        assert resp.json()["valid"] is True, resp.text

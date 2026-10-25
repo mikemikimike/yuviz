@@ -559,7 +559,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             # advances C++ FSM Thinking→Synthesizing→Speaking so
                             # barge-in detection works during playback.
                             if response.tts_payloads:
-                                audio_sent = True
+                                # A filler replays from cache even while TTS is down, so it is not the goodbye.
+                                audio_sent = audio_sent or not response.filler
                                 if not tts_started_sent:
                                     yield pb.ServiceMessage(
                                         tts_started=pb.TtsStarted(session_id=sid)
@@ -620,8 +621,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         )
 
                     # Sent after the final TtsChunk so the gateway waits for the goodbye to drain.
-                    # Requires audio this turn (not just the synthetic TtsStarted), else the flag leaks
-                    # into a later turn's playback.
+                    # Requires reply or goodbye audio this turn (not a filler or the synthetic TtsStarted),
+                    # else the flag leaks into a later turn's playback.
                     if end_call_requested and not cancelled and audio_sent:
                         log.info(
                             "Converse: sending EndCall grace_period_ms=%d session=%s",

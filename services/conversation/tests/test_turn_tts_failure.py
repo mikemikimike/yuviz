@@ -6,7 +6,16 @@ from services.conversation.generated.voiceai.v1 import conversation_pb2 as pb
 from services.conversation.servicer import ConversationServicer
 from services.conversation.session import HandlerResponse
 
-from .test_pipeline import _make_handler, _make_llm, _make_stt, _silence
+from ..pipeline import _END_CALL_MARKER
+from .test_pipeline import (
+    _FIRST_TURN_PHRASES,
+    _make_handler,
+    _make_llm,
+    _make_slow_llm,
+    _make_stt,
+    _make_tts,
+    _silence,
+)
 
 
 def _tts_failing_on(marker: str) -> MagicMock:
@@ -82,13 +91,8 @@ async def test_a_turn_with_no_audio_still_sends_the_terminal_chunk(monkeypatch):
     assert kinds[-3:] == ["stt_result", "tts_started", "tts_chunk"]
 
 
-async def test_an_end_call_turn_whose_tts_produced_no_audio_does_not_send_end_call():
-    """The synthetic TtsStarted closes the turn but is not audio: EndCall would hang up silently, or
-    stay latched on the gateway for the caller's next reply."""
-    async def turn(session_id, audio, duration_ms, energy_db):
-        yield HandlerResponse(stt_text="bye")
-        yield HandlerResponse(end_call=True)
-
+async def _kinds_after_turn(turn) -> list[str]:
+    """Message kinds the servicer sends for one speech_ended turn, up to just after the final chunk."""
     handler = AsyncMock()
     handler.out_responses = None
     handler.on_speech_ended = turn
@@ -123,9 +127,84 @@ async def test_an_end_call_turn_whose_tts_produced_no_audio_does_not_send_end_ca
             await task
         except asyncio.CancelledError:
             pass
+    return kinds
+
+
+async def test_an_end_call_turn_whose_tts_produced_no_audio_does_not_send_end_call():
+    """The synthetic TtsStarted closes the turn but is not audio: EndCall would hang up silently, or
+    stay latched on the gateway for the caller's next reply."""
+    async def turn(session_id, audio, duration_ms, energy_db):
+        yield HandlerResponse(stt_text="bye")
+        yield HandlerResponse(end_call=True)
+
+    kinds = await _kinds_after_turn(turn)
 
     assert kinds[-3:] == ["stt_result", "tts_started", "tts_chunk"]
     assert "end_call" not in kinds
+
+
+async def test_an_end_call_turn_that_played_only_a_filler_does_not_send_end_call():
+    """A filler replays from cache while TTS is down, so hearing it does not mean the goodbye was heard."""
+    async def turn(session_id, audio, duration_ms, energy_db):
+        yield HandlerResponse(stt_text="bye")
+        yield HandlerResponse(tts_payloads=[b"\x00" * 320], filler=True)
+        yield HandlerResponse(end_call=True)
+
+    kinds = await _kinds_after_turn(turn)
+
+    assert kinds[-4:] == ["stt_result", "tts_started", "tts_chunk", "tts_chunk"]
+    assert "end_call" not in kinds
+
+
+async def test_an_end_call_turn_whose_goodbye_played_after_a_filler_sends_end_call():
+    async def turn(session_id, audio, duration_ms, energy_db):
+        yield HandlerResponse(stt_text="bye")
+        yield HandlerResponse(tts_payloads=[b"\x00" * 320], filler=True)
+        yield HandlerResponse(tts_payloads=[b"\x00" * 320])
+        yield HandlerResponse(end_call=True)
+
+    kinds = await _kinds_after_turn(turn)
+
+    assert kinds[-1] == "end_call"
+
+
+def _tts_speaking_only(phrases) -> MagicMock:
+    """A provider that is down for everything except the cached filler phrases."""
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        if text not in phrases:
+            raise RuntimeError("tts down")
+        yield b"\x00" * 320
+
+    tts.synthesize_stream = _stream
+    return tts
+
+
+async def test_a_filler_is_marked_and_a_turn_whose_reply_and_goodbye_failed_does_not_end_the_call(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "20")
+    handler = _make_handler(
+        _make_stt("goodbye"), _make_slow_llm(0.3, ["Bye now. ", _END_CALL_MARKER]),
+        _tts_speaking_only(_FIRST_TURN_PHRASES),
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    audio = [r for r in responses if r.tts_payloads]
+    assert audio and all(r.filler for r in audio)
+    assert not any(r.end_call for r in responses)
+
+
+async def test_a_spoken_reply_is_not_marked_as_a_filler_and_ends_the_call(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "20")
+    handler = _make_handler(
+        _make_stt("goodbye"), _make_slow_llm(0.3, ["Bye now. ", _END_CALL_MARKER]), _make_tts(),
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert any(r.tts_payloads and not r.filler for r in responses)
+    assert any(r.end_call for r in responses)
 
 
 def _tts_failing_on_exactly(sentence: str) -> MagicMock:

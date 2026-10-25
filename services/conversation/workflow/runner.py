@@ -64,7 +64,7 @@ class WorkflowRunner:
         self.pending_transfer: Node | None = None
         self.ended_off_graph: bool = False
         self.last_transition: str = ""
-        self._pre_transfer_node: Node | None = None
+        self._pre_terminal_node: Node | None = None
 
     @property
     def node(self) -> Node:
@@ -165,16 +165,24 @@ class WorkflowRunner:
 
     def abandon_transfer(self) -> None:
         """Move off a rejected transfer node so the caller is not dead-ended."""
-        if self._pre_transfer_node is None or self._node.type != "transfer":
-            self.pending_transfer = None
-            return
-        source = self._pre_transfer_node
-        self._node = source
-        self._pre_transfer_node = None
         self.pending_transfer = None
+        self._move_back_from("transfer")
+
+    def abandon_end(self) -> None:
+        """Move off an end node (or an [[END_CALL]]) whose goodbye never reached the caller, so the call goes on."""
+        self.pending_end = False
+        self.ended_off_graph = False
+        self._move_back_from("end")
+
+    def _move_back_from(self, node_type: str) -> None:
+        if self._pre_terminal_node is None or self._node.type != node_type:
+            return
+        source = self._pre_terminal_node
+        self._node = source
+        self._pre_terminal_node = None
         if self.visited and self.visited[-1] != source.name:
             self.visited.pop()
-        log.info("workflow: transfer rejected — reverted to %s", source.name)
+        log.info("workflow: %s abandoned — reverted to %s", node_type, source.name)
 
     async def _transition(
         self,
@@ -198,12 +206,12 @@ class WorkflowRunner:
 
         if self._node.type == "end":
             self.pending_end = True
-            self._pre_transfer_node = None
+            self._pre_terminal_node = source
         elif self._node.type == "transfer":
             self.pending_transfer = self._node
-            self._pre_transfer_node = source
+            self._pre_terminal_node = source
         else:
-            self._pre_transfer_node = None
+            self._pre_terminal_node = None
 
         # Swap prompt mid-turn so the rest of this generate uses the new node.
         prompt: str | None = None

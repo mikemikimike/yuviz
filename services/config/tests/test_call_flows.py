@@ -513,3 +513,55 @@ async def test_publish_of_a_flow_whose_tenant_row_is_gone_raises_lookup_error(te
         async with tenant_conn(await db.get_pool()) as conn:
             with pytest.raises(LookupError):
                 await call_flows._dial_destination_errors(conn, _dial_graph("+18005550100"), uuid.uuid4())
+
+
+async def _post_flow(client, tenant, **body):
+    return await client.post(
+        f"/tenants/{tenant['slug']}/call-flows",
+        json={"slug": f"flow-{uuid.uuid4().hex[:6]}", "name": "Policy Flow", **body},
+    )
+
+
+async def test_call_flow_create_refuses_a_dial_outside_the_policy_and_stores_nothing(
+    test_tenant, test_admin, pool,
+):
+    async with _client_as(test_admin["user"]) as client:
+        resp = await _post_flow(client, test_tenant, graph=_dial_graph("+447911123456"))
+    assert resp.status_code == 400, resp.text
+    assert [(e["id"], e["field"]) for e in resp.json()["errors"]] == [("n2", "destination")]
+    assert await pool.fetchval("SELECT count(*) FROM call_flows WHERE tenant_id = $1", test_tenant["id"]) == 0
+
+
+async def test_call_flow_create_allows_the_dial_after_opt_in(test_tenant, test_admin):
+    await tenants.update_tenant(test_tenant["id"], allow_international_transfers=True)
+    async with _client_as(test_admin["user"]) as client:
+        resp = await _post_flow(client, test_tenant, graph=_dial_graph("+447911123456"))
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["config_version"] == 1
+
+
+async def test_call_flow_create_for_a_home_91_tenant_allows_91_and_refuses_premium(test_tenant, test_admin):
+    await tenants.update_tenant(test_tenant["id"], home_calling_code="91", allow_international_transfers=True)
+    async with _client_as(test_admin["user"]) as client:
+        assert (await _post_flow(client, test_tenant, graph=_dial_graph("+919876543210"))).status_code == 201
+        assert (await _post_flow(client, test_tenant, graph=_dial_graph("+8821234567890"))).status_code == 400
+
+
+async def test_call_flow_clone_refuses_a_dial_the_policy_no_longer_allows(test_tenant, test_admin):
+    await tenants.update_tenant(test_tenant["id"], allow_international_transfers=True)
+    async with _client_as(test_admin["user"]) as client:
+        source = (await _post_flow(client, test_tenant, graph=_dial_graph("+447911123456"))).json()
+        await tenants.update_tenant(test_tenant["id"], allow_international_transfers=False)
+        resp = await _post_flow(client, test_tenant, clone_from_id=source["id"])
+    assert resp.status_code == 400, resp.text
+
+
+async def test_call_flow_validate_reports_what_publish_refuses(test_tenant, test_admin):
+    flow = await _flow(test_tenant)
+    async with _client_as(test_admin["user"]) as client:
+        resp = await client.post(
+            f"/call-flows/{flow['id']}/validate",
+            json={"graph": _dial_graph("+447911123456")},
+        )
+    assert resp.status_code == 400, resp.text
+    assert [(e["id"], e["field"]) for e in resp.json()["errors"]] == [("n2", "destination")]

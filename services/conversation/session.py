@@ -56,6 +56,8 @@ class HandlerResponse:
     """One result from an IConversationHandler turn.
 
     end_call_grace_period_ms: 0 = gateway default. response_text accompanies, never replaces, tts_payloads.
+    filler: the tts_payloads are a "one moment" filler, not the reply, so they never count as the caller
+    having heard an answer or a goodbye.
     """
     stt_text:       str         = ""
     stt_confidence: float       = 0.0
@@ -64,6 +66,7 @@ class HandlerResponse:
     end_call_grace_period_ms: int = 0
     transfer_request: TransferRequest | None = None
     response_text:  str         = ""
+    filler:         bool        = False
 
 
 class IConversationHandler(Protocol):
