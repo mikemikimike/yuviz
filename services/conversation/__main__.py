@@ -15,7 +15,8 @@ import logging
 import signal
 import socket
 import sys
-from collections.abc import Coroutine
+import time
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 import grpc.aio
@@ -51,6 +52,7 @@ from .providers.llm.ollama import OllamaLLM
 from .secret_resolver import CompositeSecretResolver
 from .servicer import ConversationServicer
 from .session import AgentUnavailable, RoutingStatus, SessionContext
+from .bounded import run_bounded
 from .tools.executor_registry import ExecutorRegistry
 from .tools.executors.api_exec_executor import ApiExecExecutor
 from .tools.factory import orchestrator_factory
@@ -66,6 +68,16 @@ from .workflow import graph_for
 from .generated.voiceai.v1 import conversation_pb2_grpc as pb_grpc
 
 SERVICE_NAME = "voiceai.v1.ConversationService"
+
+log = logging.getLogger(__name__)
+
+HEARTBEAT_INTERVAL_S = 15
+# Node is considered dead after 3 missed heartbeats (45s).
+REAP_WINDOW_S = 3 * HEARTBEAT_INTERVAL_S
+# Gateway ends silent callers in ~19s, so minutes without transcript activity means a zombie call.
+INACTIVE_CALL_TIMEOUT_S = 300
+HEARTBEAT_STEP_TIMEOUT_S = 5
+HEARTBEAT_RETRY_BACKOFF_S = 2
 
 
 async def _resolve_session_deps(
@@ -214,6 +226,46 @@ def _spawn(coro: Coroutine[Any, Any, None], name: str) -> asyncio.Task:
     task = asyncio.create_task(coro, name=name)
     task.add_done_callback(_log_task_failure)
     return task
+
+
+async def _bounded_step(name: str, coro: Awaitable[object]) -> bool:
+    """Run one heartbeat-loop step under a timeout; True on success. Failures are logged here and
+    never raised, so a slow or down Postgres cannot kill the loop. CancelledError still propagates."""
+    try:
+        await run_bounded(coro, HEARTBEAT_STEP_TIMEOUT_S)
+    except TimeoutError:
+        log.warning("Heartbeat step %s timed out after %ss", name, HEARTBEAT_STEP_TIMEOUT_S)
+        return False
+    except Exception:
+        log.exception("Heartbeat step %s failed", name)
+        return False
+    return True
+
+
+async def _run_heartbeat_loop(
+    transcripts: TranscriptBuilder, *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Write this node's heartbeat and run the reconcile sweeps until cancelled.
+
+    After a failed write, retry quickly and hold off reaping peers until REAP_WINDOW_S of good
+    writes: our own gap would otherwise look like theirs, and we would close live calls."""
+    healthy_since = float("-inf")
+    while True:
+        if not await _bounded_step("heartbeat", transcripts.heartbeat()):
+            healthy_since = None
+            await sleep(HEARTBEAT_RETRY_BACKOFF_S)
+            continue
+        if healthy_since is None:
+            healthy_since = clock()
+        if clock() - healthy_since >= REAP_WINDOW_S:
+            await _bounded_step(
+                "reconcile_dead_nodes", transcripts.reconcile_dead_nodes(stale_after_seconds=REAP_WINDOW_S))
+        await _bounded_step(
+            "reconcile_inactive_calls",
+            transcripts.reconcile_inactive_calls(inactive_after_seconds=INACTIVE_CALL_TIMEOUT_S))
+        await sleep(HEARTBEAT_INTERVAL_S)
 
 
 async def _await_stopped(task: asyncio.Task) -> None:
@@ -501,19 +553,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
 
     load_task = _spawn(_load_and_promote(), "startup load")
 
-    # Node is considered dead after 3 missed heartbeats (45s).
-    HEARTBEAT_INTERVAL_S = 15
-    # Gateway ends silent callers in ~19s, so minutes without transcript activity means a zombie call.
-    INACTIVE_CALL_TIMEOUT_S = 300
-
-    async def _heartbeat_loop() -> None:
-        while True:
-            await transcripts.heartbeat()
-            await transcripts.reconcile_dead_nodes(stale_after_seconds=HEARTBEAT_INTERVAL_S * 3)
-            await transcripts.reconcile_inactive_calls(inactive_after_seconds=INACTIVE_CALL_TIMEOUT_S)
-            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
-
-    heartbeat_task = _spawn(_heartbeat_loop(), "heartbeat")
+    heartbeat_task = _spawn(_run_heartbeat_loop(transcripts), "heartbeat")
     # Keeps outage copies of agent configs recent; cold path, off the call path.
     refresh_task = _spawn(config.run_refresh(), "config refresh") if isinstance(
         config, CacheAsideConfigProvider) else None

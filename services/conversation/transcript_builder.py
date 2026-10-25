@@ -100,18 +100,17 @@ class TranscriptBuilder:
         return count
 
     async def heartbeat(self) -> None:
-        """Liveness UPSERT for other instances' reconcile_dead_nodes(); shares no state with the call path."""
+        """Liveness UPSERT for other instances' reconcile_dead_nodes(); shares no state with the call path.
+
+        Raises on a DB failure: the heartbeat loop must tell a failed write from a good one."""
         if self._pool is None or not self._node_id:
             return
-        try:
-            async with platform_conn(self._pool, reason="conversation-reconcile-sweep") as conn:
-                await conn.execute(
-                    "INSERT INTO conversation_node_heartbeats (node_id, last_seen_at) VALUES ($1, NOW()) "
-                    "ON CONFLICT (node_id) DO UPDATE SET last_seen_at = NOW()",
-                    self._node_id,
-                )
-        except Exception:
-            log.exception("TranscriptBuilder: heartbeat write failed node_id=%s", self._node_id)
+        async with platform_conn(self._pool, reason="conversation-reconcile-sweep") as conn:
+            await conn.execute(
+                "INSERT INTO conversation_node_heartbeats (node_id, last_seen_at) VALUES ($1, NOW()) "
+                "ON CONFLICT (node_id) DO UPDATE SET last_seen_at = NOW()",
+                self._node_id,
+            )
 
     async def reconcile_dead_nodes(self, *, stale_after_seconds: int) -> int:
         """Close live calls owned by any node whose heartbeat is missing or older than stale_after_seconds."""
