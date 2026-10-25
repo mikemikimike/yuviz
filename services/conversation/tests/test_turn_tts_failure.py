@@ -6,7 +6,16 @@ from services.conversation.generated.voiceai.v1 import conversation_pb2 as pb
 from services.conversation.servicer import ConversationServicer
 from services.conversation.session import HandlerResponse
 
-from .test_pipeline import _make_handler, _make_llm, _make_stt, _silence
+from ..pipeline import _END_CALL_MARKER
+from .test_pipeline import (
+    _FIRST_TURN_PHRASES,
+    _make_handler,
+    _make_llm,
+    _make_slow_llm,
+    _make_stt,
+    _make_tts,
+    _silence,
+)
 
 
 def _tts_failing_on(marker: str) -> MagicMock:
@@ -157,6 +166,45 @@ async def test_an_end_call_turn_whose_goodbye_played_after_a_filler_sends_end_ca
     kinds = await _kinds_after_turn(turn)
 
     assert kinds[-1] == "end_call"
+
+
+def _tts_speaking_only(phrases) -> MagicMock:
+    """A provider that is down for everything except the cached filler phrases."""
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        if text not in phrases:
+            raise RuntimeError("tts down")
+        yield b"\x00" * 320
+
+    tts.synthesize_stream = _stream
+    return tts
+
+
+async def test_a_filler_is_marked_and_a_turn_whose_reply_and_goodbye_failed_does_not_end_the_call(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "20")
+    handler = _make_handler(
+        _make_stt("goodbye"), _make_slow_llm(0.3, ["Bye now. ", _END_CALL_MARKER]),
+        _tts_speaking_only(_FIRST_TURN_PHRASES),
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    audio = [r for r in responses if r.tts_payloads]
+    assert audio and all(r.filler for r in audio)
+    assert not any(r.end_call for r in responses)
+
+
+async def test_a_spoken_reply_is_not_marked_as_a_filler_and_ends_the_call(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "20")
+    handler = _make_handler(
+        _make_stt("goodbye"), _make_slow_llm(0.3, ["Bye now. ", _END_CALL_MARKER]), _make_tts(),
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert any(r.tts_payloads and not r.filler for r in responses)
+    assert any(r.end_call for r in responses)
 
 
 def _tts_failing_on_exactly(sentence: str) -> MagicMock:

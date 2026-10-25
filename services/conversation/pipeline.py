@@ -1225,15 +1225,23 @@ class PipelineConversationHandler:
                 async for chunk in self._synthesize_sentence_stream(self._farewell_message, session_id):
                     got_farewell_audio = True
                     yield HandlerResponse(tts_payloads=[chunk])
+            got_goodbye_audio = False
             if not any_audio and not got_farewell_audio:
                 # The servicer needs some audio to key EndCall off.
                 goodbye = t("fallback_goodbye", self._spoken_language(session_id))
                 async for chunk in self._synthesize_sentence_stream(goodbye, session_id):
+                    got_goodbye_audio = True
                     yield HandlerResponse(tts_payloads=[chunk])
-            yield HandlerResponse(
-                end_call=True,
-                end_call_grace_period_ms=self._goodbye_grace_period_ms,
-            )
+            if any_audio or got_farewell_audio or got_goodbye_audio:
+                yield HandlerResponse(
+                    end_call=True,
+                    end_call_grace_period_ms=self._goodbye_grace_period_ms,
+                )
+            else:
+                # Hanging up now would end the call with no answer and no goodbye, and an end node left
+                # latched would hang up on the caller's next reply: carry on from the step before it.
+                log.warning("End of call withheld: no reply or goodbye audio was produced session=%s", session_id)
+                self._workflow.abandon_end()
 
         if transfer_request is not None:
             announcement = (
