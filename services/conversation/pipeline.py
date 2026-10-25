@@ -1149,7 +1149,8 @@ class PipelineConversationHandler:
                 elif decision.rejection_reason != "already_transferring":
                     refused_reason = decision.rejection_reason
             if transfer_request is None:
-                transfer_request = await self._workflow_transfer(session_id)
+                transfer_request, workflow_refusal = await self._workflow_transfer(session_id)
+                refused_reason = refused_reason or workflow_refusal
             # Also covers a directive rejected as already_transferring because of this pending request.
             if transfer_request is None:
                 state = self._session(session_id)
@@ -1389,10 +1390,11 @@ class PipelineConversationHandler:
         else:
             history.insert(0, prompt)
 
-    async def _workflow_transfer(self, session_id: str) -> TransferRequest | None:
+    async def _workflow_transfer(self, session_id: str) -> tuple[TransferRequest | None, str | None]:
+        """The accepted request, or the refusal reason the model is told about (None when nothing was refused)."""
         node = self._workflow.pending_transfer
         if node is None:
-            return None
+            return None, None
         self._workflow.pending_transfer = None
         # Do not let a queued summary race the transfer path on the call LLM.
         self._summarizer.cancel()
@@ -1424,7 +1426,7 @@ class PipelineConversationHandler:
                 node.name, problem, session_id,
             )
             self._workflow.abandon_transfer()
-            return None
+            return None, "destination_not_permitted"
         decision = self._transfer_engine.evaluate(
             self._decision_context(session_id, destination_override=destination),
             TransferTrigger(
@@ -1437,9 +1439,9 @@ class PipelineConversationHandler:
                 node.name, decision.rejection_reason, session_id,
             )
             self._workflow.abandon_transfer()
-            return None
+            return None, (None if decision.rejection_reason == "already_transferring" else decision.rejection_reason)
         self._session(session_id).transfer_requested = True
-        return decision.request
+        return decision.request, None
 
     def _interrupt_workflow_background_llm(self) -> None:
         self._extractor.interrupt_for_live_turn()

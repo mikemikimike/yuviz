@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -66,9 +68,11 @@ class _ScriptedToolLLM:
         self._generations = list(generations)
         self.seen_prompts: list[str] = []
         self.seen_tool_names: list[list[str]] = []
+        self.seen_last_messages: list[str] = []
 
     async def generate(self, messages):
         self.seen_prompts.append(messages[0].content if messages else "")
+        self.seen_last_messages.append(messages[-1].content if messages else "")
         self.seen_tool_names.append([])
         for event in self._generations.pop(0):
             assert isinstance(event, TokenEvent)
@@ -76,6 +80,7 @@ class _ScriptedToolLLM:
 
     async def generate_with_tools(self, messages, schemas, tool_choice=None):
         self.seen_prompts.append(messages[0].content if messages else "")
+        self.seen_last_messages.append(messages[-1].content if messages else "")
         self.seen_tool_names.append([s["name"] for s in schemas])
         for event in self._generations.pop(0):
             yield event
@@ -251,6 +256,34 @@ async def test_workflow_transfer_rejected_when_agent_transfer_disabled():
     assert handler._workflow.node.name == "greeting"
     assert handler._workflow.pending_transfer is None
     assert not any(r.transfer_request for r in responses)
+
+
+def _transfer_graph_to(destination):
+    graph = copy.deepcopy(TRANSFER_GRAPH)
+    graph["nodes"][2]["data"]["transfer_destination"] = destination
+    return graph
+
+
+@pytest.mark.parametrize("workflow, kwargs, reason", [
+    (TRANSFER_GRAPH, {"transfer_type": "none"}, "transfer_disabled"),
+    (_transfer_graph_to("call me maybe"), {"transfer_type": "warm"}, "destination_not_permitted"),
+    (_transfer_graph_to("{{extracted.number}}"), {"transfer_type": "warm"}, "destination_not_permitted"),
+])
+async def test_a_refused_workflow_transfer_tells_the_model_it_did_not_happen(workflow, kwargs, reason):
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_a_human", arguments={})],
+        [TokenEvent(text="Connecting you now.")],
+        [TokenEvent(text="Sorry, I could not transfer you.")],
+    ])
+    handler = _handler(llm, _RecordingPolicyResolver(), workflow=workflow, **kwargs)
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+
+    assert not any(r.transfer_request for r in responses)
+    assert json.loads(llm.seen_last_messages[-1].split("\n\n")[0]) == {
+        "type": "system_event", "event": "transfer_failed", "reason": reason,
+    }
+    assert handler._session("s1").pending_recovery_turns[-1][0] == f"[transfer_failed: {reason}]"
 
 
 async def test_session_end_persists_workflow_outcome_even_when_extraction_times_out():
