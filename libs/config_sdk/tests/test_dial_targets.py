@@ -4,7 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from libs.config_sdk.dial_targets import (
-    TransferPolicy, is_dial_number, is_transfer_destination, transfer_policy_problem,
+    TransferPolicy, is_dial_number, is_transfer_destination, transfer_policy_prefix_problem,
+    transfer_policy_problem, transfer_policy_sip_template_problem,
 )
 from services.config.schemas import AgentUpdate
 
@@ -318,3 +319,31 @@ def test_uk_revenue_share_and_personal_numbers_are_refused(value):
 @pytest.mark.parametrize("value", ["07911123456", "02071234567", "01142345678", "01134960000", "+447911123456", "+442071234567", "08001234567"])
 def test_uk_mobiles_landlines_and_freephone_still_pass(value):
     assert transfer_policy_problem(value, UK) is None
+
+
+@pytest.mark.parametrize("prefix", ["+44 20 ", "+44-20", "+44.20", "00 44 20"])
+def test_prefix_check_reads_past_separators(prefix):
+    assert transfer_policy_prefix_problem(prefix, TransferPolicy()) is not None
+    assert transfer_policy_prefix_problem(prefix, TransferPolicy("44")) is None
+
+
+@pytest.mark.parametrize("prefix", ["+91 98", "+91-98"])
+def test_prefix_check_keeps_a_home_number_with_separators(prefix):
+    assert transfer_policy_prefix_problem(prefix, TransferPolicy("91")) is None
+
+
+@pytest.mark.parametrize("destination", [
+    "sip:{{ x }}@evil.example.com", "sip:+4420{{ x }}@evil.example.com", "sip:agent@{{ x }}",
+    "sip:{{ x }}",
+])
+def test_templated_sip_destination_needs_the_opt_in_unless_the_host_is_allowlisted(monkeypatch, destination):
+    monkeypatch.setenv("VOICEAI_TRANSFER_SIP_HOSTS", "pbx.acme.example")
+    assert transfer_policy_sip_template_problem(destination, TransferPolicy()) is not None
+    assert transfer_policy_sip_template_problem(destination, TransferPolicy(allow_international=True)) is None
+
+
+def test_templated_sip_destination_on_an_allowlisted_host_is_allowed_but_its_number_prefix_is_not(monkeypatch):
+    monkeypatch.setenv("VOICEAI_TRANSFER_SIP_HOSTS", "pbx.acme.example")
+    assert transfer_policy_sip_template_problem("sip:{{ x }}@pbx.acme.example", TransferPolicy()) is None
+    assert transfer_policy_sip_template_problem("sip:+44{{ x }}@pbx.acme.example", TransferPolicy()) is not None
+    assert transfer_policy_sip_template_problem("sip:+91{{ x }}@pbx.acme.example", TransferPolicy("91")) is None

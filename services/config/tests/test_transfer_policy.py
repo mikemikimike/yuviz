@@ -288,6 +288,13 @@ async def test_agent_create_with_workflow_refuses_premium_even_after_opt_in(admi
     ("1001{{ x }}", "1", False),
     ("+91{{ x }}", "91", False),
     ("+44{{ x }}", "91", True),
+    ("+44 20 {{ x }}", "1", True),
+    ("+44-20{{ x }}", "1", True),
+    ("+91-98{{ x }}", "91", False),
+    ("sip:{{ x }}@external.host", "1", True),
+    ("sip:+4420{{ x }}@external.host", "1", True),
+    ("sip:agent@{{ x }}", "1", True),
+    ("sip:{{ x }}@external.host", "91", True),
 ])
 async def test_literal_prefix_of_a_templated_destination_is_checked(
     admin_client, test_tenant, destination, home, refused,
