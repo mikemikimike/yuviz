@@ -180,6 +180,34 @@ async def test_call_flow_dial_and_workflow_transfer_destinations_are_evidence(sc
     assert len(await _audit_rows(conn, templated)) == 1
 
 
+async def _caller_id_agent(conn, tenant, outbound_caller_id: str, *, deleted: bool = False) -> None:
+    await conn.execute(
+        "INSERT INTO agents (tenant_id, slug, name, outbound_caller_id, deleted_at) "
+        "VALUES ($1, $2, 'c', $3, CASE WHEN $4 THEN now() END)",
+        tenant, f"c-{uuid.uuid4().hex[:6]}", outbound_caller_id, deleted,
+    )
+
+
+async def test_outbound_caller_id_is_evidence(scratch_db, conn):
+    campaign_only = await _tenant(conn)
+    await _caller_id_agent(conn, campaign_only, "+919999900000")
+    # One vote per distinct number: the same +1 number as a destination and a caller id, against
+    # one +91 caller id, is a tie.
+    repeated = await _tenant(conn, destinations=("+14155550100",))
+    await _caller_id_agent(conn, repeated, "+14155550100")
+    await _caller_id_agent(conn, repeated, "+918012345678")
+    # Plain digits cannot name a country, and a deleted agent's caller id no longer counts.
+    no_evidence = await _tenant(conn)
+    await _caller_id_agent(conn, no_evidence, "919999900001")
+    await _caller_id_agent(conn, no_evidence, "+919999900002", deleted=True)
+    _upgrade(scratch_db)
+    assert await _home(conn, campaign_only) == "91"
+    assert await _home(conn, repeated) == "1"
+    assert len(await _audit_rows(conn, repeated)) == 1
+    assert await _home(conn, no_evidence) == "1"
+    assert len(await _audit_rows(conn, no_evidence)) == 1
+
+
 async def test_a_number_repeated_across_sources_is_one_vote(scratch_db, conn):
     # One +1 number against the same +91 number in three agents and a flow: one vote each, a tie.
     repeated = await _tenant(conn, destinations=("+14155550100", "+918012345678", "00918012345678", "+918012345678"))

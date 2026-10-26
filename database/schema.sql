@@ -1451,8 +1451,9 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS call_flow_id UUID REFERENCES call_fl
 -- the column is added), so a code a superadmin has set since is never overwritten.
 -- Evidence is one vote per DISTINCT number per tenant, and only numbers written with an explicit
 -- country code (+CC... or 00CC...): an agent transfer destination, a published call-flow Dial
--- node destination (call_flows.graph) and a published workflow transfer node destination
--- (agents.workflow), pooled, so the same number in three places is one vote, not three.
+-- node destination (call_flows.graph), a published workflow transfer node destination
+-- (agents.workflow) and an agent's outbound_caller_id (stored as +CC..., validated as a number
+-- the tenant owns), pooled, so the same number in three places is one vote, not three.
 -- DIDs never vote: they are normalized to plain digits earlier in this file, and a plain-digit
 -- string cannot name a country (18001021234 is Indian toll-free and also a well-formed NANP
 -- number). A national-form number, an extension, a SIP URI and a {{template}} vote for nothing.
@@ -1510,6 +1511,9 @@ BEGIN
         FROM agents a,
              jsonb_path_query(a.workflow, '$.nodes[*] ? (@.type == "transfer").data.transfer_destination') AS n(v)
        WHERE a.deleted_at IS NULL AND btrim(n.v #>> '{}') ~ '^(\+|00)[1-9][0-9]{6,14}$'
+      UNION
+      SELECT tenant_id, regexp_replace(outbound_caller_id, '^\+', '') FROM agents
+       WHERE deleted_at IS NULL AND outbound_caller_id ~ '^\+[1-9][0-9]{6,14}$'
     ), counted AS (
       SELECT e.tenant_id, c.code, count(*) AS n
         FROM evidence e JOIN codes c ON e.digits LIKE c.code || '%'
