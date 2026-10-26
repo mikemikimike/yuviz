@@ -594,3 +594,59 @@ async def test_an_end_node_turn_whose_tts_failed_leaves_the_call_up_for_the_next
     turn2 = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
     assert any(r.tts_payloads for r in turn2)
     assert not any(r.end_call for r in turn2)
+
+
+async def _turn_with_barge_in_at(handler, spoken):
+    """One turn in which the caller interrupts as the sentence containing `spoken` is synthesized."""
+    async def synthesize(text, sample_rate):
+        if spoken in text:
+            await handler.on_cancel("s1")
+        return b"\x00" * 320
+
+    handler._tts.synthesize = synthesize
+    turn = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+
+    async def plain(text, sample_rate):
+        return b"\x00" * 320
+
+    handler._tts.synthesize = plain
+    return turn
+
+
+async def test_a_barge_in_during_an_end_nodes_goodbye_keeps_the_call_up():
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_all_done", arguments={})],
+        [TokenEvent(text="Thanks for calling. Have a lovely day. Goodbye!")],
+        [TokenEvent(text="Sure, what else can I help with?")],
+    ])
+    handler = _handler(llm, _RecordingPolicyResolver(), workflow=TRANSFER_GRAPH)
+
+    turn1 = await _turn_with_barge_in_at(handler, "Thanks for calling")
+    assert not any(r.end_call for r in turn1)
+    assert handler._workflow.node.name == "greeting"
+    assert handler._workflow.pending_end is False
+
+    turn2 = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+    assert any(r.tts_payloads for r in turn2)
+    assert not any(r.end_call for r in turn2)
+
+
+async def test_a_barge_in_during_a_transfer_nodes_announcement_does_not_transfer_after_the_next_reply():
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_a_human", arguments={})],
+        [TokenEvent(text="Connecting you now. One moment please.")],
+        [TokenEvent(text="Sure, what else can I help with?")],
+    ])
+    handler = _handler(
+        llm, _RecordingPolicyResolver(), workflow=TRANSFER_GRAPH,
+        transfer_type="warm", transfer_destination="+15550001111",
+    )
+
+    turn1 = await _turn_with_barge_in_at(handler, "Connecting you now")
+    assert not any(r.transfer_request for r in turn1)
+    assert handler._workflow.node.name == "greeting"
+    assert handler._workflow.pending_transfer is None
+
+    turn2 = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+    assert any(r.tts_payloads for r in turn2)
+    assert not any(r.transfer_request for r in turn2)

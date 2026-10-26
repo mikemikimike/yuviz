@@ -34,7 +34,7 @@ from .directives import (
     TransferRequest,
     strip_markdown_chars,
 )
-from . import phrase_audio
+from . import phrase_audio, prefetch
 from .fillers import FillerSelector
 from .i18n import closure_phrases, farewell_phrases, first_turn_fillers, has_phrase_tables, t, tool_fillers
 from .guardrails import GuardrailCounter, GuardrailDetector
@@ -335,6 +335,14 @@ _FILLER_DELAY_MS_DEFAULT = 1200
 _FIRST_TURN = "__first_turn__"
 
 
+def _merge_turn_notes(*notes: ChatMessage | None) -> ChatMessage | None:
+    """One transient note from several: they are folded into the caller's turn together (with_directive takes one)."""
+    present = [n for n in notes if n is not None]
+    if len(present) <= 1:
+        return present[0] if present else None
+    return ChatMessage(role="user", content="\n\n".join(n.content for n in present))
+
+
 def _filler_delay_s() -> float:
     """VOICEAI_FILLER_DELAY_MS (default 1200; blank or unusable values use the default). 0 = always, immediately."""
     return env_ms("VOICEAI_FILLER_DELAY_MS", _FILLER_DELAY_MS_DEFAULT) / 1000
@@ -535,6 +543,8 @@ class PipelineConversationHandler:
         self._direction     = direction
         self._caller_number = caller_number
         self._called_number = called_number
+        # caller/called are from/to, so on an outbound call the customer is the called party.
+        self._remote_number = called_number if direction == "outbound" else caller_number
         # Legacy path uses ""/0; calls.agent_id is a UUID FK, so map to None.
         self._agent_id             = runtime_config.agent.id or None
         self._agent_config_version = runtime_config.version or None
@@ -549,7 +559,7 @@ class PipelineConversationHandler:
         # Date / caller-number / directive tokens appended after each node's prompt.
         self._prompt_suffix = (
             _build_current_date_context()
-            + (_build_caller_number_context(self._caller_number)
+            + (_build_caller_number_context(self._remote_number)
                if (has_booking_tool if confirm_caller_number is None else confirm_caller_number) else "")
             + _build_end_call_instruction(
                 runtime_config.conversation.end_call_prompt,
@@ -1043,14 +1053,23 @@ class PipelineConversationHandler:
         # mid-call transition lands before the next generation.
         self._refresh_node_prompt(history, session_id)
         history.append(ChatMessage(role="user", content=stt_result.text))
+        pre_retrieval = self._start_pre_retrieval(stt_result.text)
 
         # The first reply's filler is armed here and spoken only if the reply is slow (_with_filler_timer).
         first_turn_filler = is_first_turn and not self._session(session_id).first_turn_filler_spoken
         if first_turn_filler:
             self._session(session_id).first_turn_filler_spoken = True
 
-        # Knowledge retrieval is the `search_knowledge` local tool, called only when needed.
+        # Knowledge retrieval is the `search_knowledge` local tool, called only when needed. A turn that looks like
+        # a knowledge question searches up front instead (prefetch.py), so the model answers in one pass. The
+        # passages are a note folded into the caller's turn on every LLM call (turn_context): never stored in
+        # history, and the history list stays the one the turn's tool messages are appended to.
         messages_for_llm = history
+        turn_context: ChatMessage | None = None
+        if pre_retrieval is not None:
+            block = await self._pre_retrieval_block(pre_retrieval, session_id)
+            if block:
+                turn_context = ChatMessage(role="user", content=block)
 
         directives: list[Directive] = []
         full_response = progress.reply_tokens
@@ -1069,6 +1088,7 @@ class PipelineConversationHandler:
                 async for item in self._llm_to_tts(
                     messages_for_llm, cancel_event, session_id, directives, tool_calls_made,
                     store=history, caller_text=stt_result.text, first_turn_filler=first_turn_filler,
+                    turn_context=turn_context,
                 ):
                     await items.put(item)
                 await items.put(_STREAM_END)
@@ -1181,6 +1201,10 @@ class PipelineConversationHandler:
             end_call = True
         elif end_call:
             self._workflow.ended_off_graph = True
+        if ended_on_end_node and cancel_event.is_set():
+            # The caller barged in on the goodbye: carry on from the step before the end node,
+            # or the next reply would be followed by a hangup.
+            self._workflow.abandon_end()
 
         # At most one transfer per turn: directive, then workflow, then pending escalation.
         # Computed before end_call, since yielding end_call first would tear the session down.
@@ -1215,6 +1239,9 @@ class PipelineConversationHandler:
                 state = self._session(session_id)
                 transfer_request = state.pending_transfer
                 state.pending_transfer = None
+        elif self._workflow.pending_transfer is not None:
+            # Barge-in on the announcement: the caller interrupted, so the node must not transfer after the next reply.
+            self._workflow.abandon_transfer()
 
         # Not on barge-in (stale decision), a pending transfer, or a fabricated claim
         # (keep the line open for the correction turn).
@@ -1314,7 +1341,7 @@ class PipelineConversationHandler:
             caller_id_policy=self._caller_id_policy,
             platform_did=self._platform_did,
             custom_caller_id=self._custom_caller_id,
-            caller_number=self._caller_number,
+            caller_number=self._remote_number,
             waiting_experience=self._waiting_experience,
         )
 
@@ -1564,11 +1591,15 @@ class PipelineConversationHandler:
         tool_calls_made: list[str],
         store: list[ChatMessage] | None = None,
         carry_taint: bool = False,
+        turn_context: ChatMessage | None = None,
     ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
-        """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech."""
+        """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech.
+        turn_context (pre-retrieved passages) rides on every LLM call of the turn with the reply-language line,
+        folded into the caller's turn and never stored, and starts the turn tainted: it is retrieved, tenant-uploaded
+        text, so a write is held for the caller's yes as after a search_knowledge lookup."""
+        trailing = _merge_turn_notes(turn_context, self._reply_directive(session_id))
         if self._tool_orchestrator is None:
-            directive = self._reply_directive(session_id)
-            async for event in LLMAdapter(self._llm).generate(with_directive(history, directive)):
+            async for event in LLMAdapter(self._llm).generate(with_directive(history, trailing)):
                 assert isinstance(event, ToolTokenEvent)
                 yield event.text
             return
@@ -1582,7 +1613,7 @@ class PipelineConversationHandler:
             caller_number=self._caller_number, called_number=self._called_number,
             call_direction=self._direction, cancel_event=cancel_event,
             local_tools=local_tools, only_tools=only_tools, carry_taint=carry_taint,
-            trailing_message=self._reply_directive(session_id),
+            trailing_message=trailing, pre_tainted=turn_context is not None,
         ):
             if isinstance(event, ToolCallStartedEvent):
                 if not event.filler_only:
@@ -1613,6 +1644,7 @@ class PipelineConversationHandler:
         silent_turn_text: str = "fallback_llm_error",
         caller_text:  str = "",
         first_turn_filler: bool = False,
+        turn_context: ChatMessage | None = None,
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """Stream LLM tokens and synthesize per sentence, yielding (raw_token, tts_bytes, end_call).
         Directives are stripped before TTS and appended to `directives` in place.
@@ -1629,7 +1661,9 @@ class PipelineConversationHandler:
         first_piece_sent = False  # the reply's first sentence or clause has gone to TTS
         try:
             async for item in _with_filler_timer(
-                self._token_stream(history, session_id, cancel_event, tool_calls_made, store, carry_taint),
+                self._token_stream(
+                    history, session_id, cancel_event, tool_calls_made, store, carry_taint, turn_context,
+                ),
                 _filler_delay_s(), arm_first=first_turn_filler,
             ):
                 if cancel_event.is_set():
@@ -1780,6 +1814,64 @@ class PipelineConversationHandler:
         if self._knowledge is not None and self._workflow.knowledge_enabled():
             tools[SEARCH_KNOWLEDGE.name] = (SEARCH_KNOWLEDGE, self._make_knowledge_handler(session_id))
         return tools
+
+    def _start_pre_retrieval(self, text: str) -> "asyncio.Task | None":
+        """Start the knowledge search for a turn that looks like a question the documents answer, or None.
+        Only agents with a knowledge base (workflow.knowledge_enabled) ever search; the gate keeps booking, name
+        and confirmation turns out of it."""
+        if self._knowledge is None or not prefetch.enabled() or not self._workflow.knowledge_enabled():
+            return None
+        if not prefetch.wants_knowledge(text):
+            return None
+        return asyncio.get_running_loop().create_task(
+            self._knowledge.retrieve(self._tenant_slug, self._agent_slug, text, RetrievalPolicy()),
+        )
+
+    async def _pre_retrieval_block(self, task: "asyncio.Task", session_id: str) -> str | None:
+        """The reference block for the model, or None when the search was late, failed, found nothing sure, or
+        the turn was cancelled. Never raises and never waits past VOICEAI_PRE_RETRIEVAL_WAIT_MS: a miss only means
+        the model falls back to calling search_knowledge itself, as before."""
+        started = time.monotonic()
+        try:
+            done, _ = await asyncio.wait({task}, timeout=prefetch.wait_s())
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        waited_ms = (time.monotonic() - started) * 1000
+        if task not in done:
+            task.cancel()
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            self._metrics.increment("pre_retrieval_late")
+            log.info("pre_retrieval: outcome=late waited_ms=%.0f session=%s", waited_ms, session_id)
+            return None
+        self._metrics.observe("pre_retrieval_wait_ms", waited_ms)
+        try:
+            context = task.result()
+        except Exception:  # noqa: BLE001
+            self._metrics.increment("pre_retrieval_error")
+            log.warning("pre_retrieval: outcome=error waited_ms=%.0f session=%s", waited_ms, session_id, exc_info=True)
+            return None
+        if context is None or context.status not in ("ok", "partial") or not context.chunks:
+            # trace_id, never the query: the caller's words are not logged.
+            log.info(
+                "pre_retrieval: outcome=skipped status=%s chunks=%d waited_ms=%.0f session=%s",
+                getattr(context, "status", None), len(getattr(context, "chunks", None) or ()), waited_ms, session_id,
+            )
+            return None
+        answer_in = self._session_language(session_id) or normalize_language(self._agent_language)
+        block = prefetch.reference_block(
+            [c.content for c in context.chunks],
+            int(context.retrieval_metadata.get("always_included") or 0),
+            answer_in=language_name(answer_in) if answer_in else None,
+            low_confidence=bool(context.low_confidence) or context.status == "partial",
+        )
+        self._metrics.increment("pre_retrieval_used" if block else "pre_retrieval_empty")
+        log.info(
+            "pre_retrieval: outcome=%s status=%s chunks=%d low_confidence=%s waited_ms=%.0f trace_id=%s session=%s",
+            "used" if block else "empty", context.status, len(context.chunks), context.low_confidence, waited_ms,
+            context.trace_id, session_id,
+        )
+        return block
 
     def _make_knowledge_handler(self, session_id: str):
         async def handler(arguments: dict[str, Any]) -> ToolResult:

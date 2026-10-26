@@ -30,11 +30,11 @@ It holds at most `VOICEAI_PHRASE_CACHE_ENTRIES` phrases per instance (default 64
 ## Fillers
 
 * **First turn:** the model call starts at once. A short filler plays only if the model has produced nothing after
-  `VOICEAI_FILLER_DELAY_MS` (default 400). A model that answers sooner gets no filler. The filler comes from cached audio,
+  `VOICEAI_FILLER_DELAY_MS` (default 1200). A model that answers sooner gets no filler. The filler comes from cached audio,
   so it starts immediately when the delay ends. The filler is never counted as the first audio of the answer in the
   stored latencies.
-* **Tools:** a filler is requested only if the tool is still running after `VOICEAI_TOOL_FILLER_DELAY_MS` (default 400);
-  this applies to remote tools too, which used to ask for one at dispatch. A tool that finishes sooner is still counted as
+* **Tools:** a filler is requested only if the tool is still running after `VOICEAI_FILLER_DELAY_MS` (default 1200),
+  the same delay as the first-turn filler; this applies to remote tools too, which used to ask for one at dispatch. A tool that finishes sooner is still counted as
   a call (the booking guard needs that) but stays silent.
 
 ## Measuring

@@ -213,11 +213,15 @@ struct RouteResolution {
 [[nodiscard]] RouteResolution resolve_route(
     class RedisClient& redis, const std::string& did, DidRouteCache& cache);
 
+// Outbound campaign calls: the route Campaigns wrote for this channel UUID, never the peer's metadata.
+[[nodiscard]] RouteResolution resolve_campaign_route(const LookupResult& lookup);
+[[nodiscard]] RouteResolution resolve_campaign_route(class RedisClient& redis, const std::string& call_uuid);
+
 // DID/ANI/direction/freeswitch_host from mod_audio_fork's first WS text frame.
 // Missing or malformed input degrades gracefully; never throws.
 struct CallMetadata {
     std::string did;              // called number — feeds resolve_route()
-    std::string ani;              // calling number — feeds SessionContext::caller_did
+    std::string ani;              // the other party's number (the callee on an outbound call)
     std::string direction{"inbound"};
     std::string freeswitch_host;  // originating FS node (hostname/IP); routes ESL commands
 
