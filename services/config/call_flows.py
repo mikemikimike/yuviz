@@ -269,6 +269,8 @@ async def create_call_flow(
 ) -> dict[str, Any]:
     """Graph from a clone, a caller scaffold, or the starter; published if valid, else a draft.
 
+    A graph whose Dial destinations the tenant's transfer policy refuses (e.g. a clone after the
+    policy tightened) is also a draft; the response then carries `warnings` with the per-node reasons.
     Cloning goes through tenant_conn, so another tenant's clone_from_id is not-found."""
     if clone_from_id is not None:
         source = await get_call_flow(clone_from_id)
@@ -292,11 +294,9 @@ async def create_call_flow(
         # A clone may name an agent deleted/deactivated since; land it as a draft.
         if publishable and await _agent_reference_errors(conn, graph, tenant_id):
             publishable = False
-        # Unlike a blank step, a refused destination is a 400: publish would refuse the same graph.
-        if publishable:
-            dial_errs = await _dial_destination_errors(conn, graph, tenant_id)
-            if dial_errs:
-                raise CallFlowValidationError(dial_errs)
+        dial_errs = await _dial_destination_errors(conn, graph, tenant_id)
+        if dial_errs:
+            publishable = False
         row = await conn.fetchrow(
             "INSERT INTO call_flows (tenant_id, slug, name, description, direction, graph, graph_draft) "
             "VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb) RETURNING *",
@@ -304,6 +304,8 @@ async def create_call_flow(
             graph_json if publishable else None, graph_json,
         )
         result = _row(row)
+        if dial_errs:
+            result["warnings"] = [e.to_dict() for e in dial_errs]
         if publishable:
             await conn.execute(
                 "INSERT INTO call_flow_versions (call_flow_id, version, graph, published_by, note) "
