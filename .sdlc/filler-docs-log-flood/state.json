@@ -1,0 +1,185 @@
+{
+  "slug": "filler-docs-log-flood",
+  "base": "92aa06aeb2bf16567ef8f09b5c7fd7e4262a37b7",
+  "stage": "ship",
+  "status": "shipped",
+  "started_at": "Sun Oct 25 06:42:07 UTC 2026",
+  "gates": {
+    "prd": "approved",
+    "ship": "approved"
+  },
+  "stages": {
+    "prd": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "sonnet": 6534,
+        "opus": 5680
+      },
+      "agents": [
+        "prd:author",
+        "prd:feedback",
+        "prd:critic:r1"
+      ],
+      "artifact_written": true,
+      "findings_path": ".sdlc/filler-docs-log-flood/01-prd.review.md",
+      "controls_verified": 7
+    },
+    "_state_writes": {
+      "status": "pending",
+      "rounds": 0,
+      "verdict": null,
+      "out_tokens": {
+        "haiku": 32557
+      },
+      "agents": []
+    },
+    "security_design": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "opus": 5232
+      },
+      "agents": [
+        "security_design:critic:r1"
+      ],
+      "artifact_written": true,
+      "started_at": "2026-10-25T07:03:23Z",
+      "findings_path": ".sdlc/filler-docs-log-flood/02-security.md",
+      "controls_verified": 8,
+      "ended_at": "2026-10-25T07:03:23Z"
+    },
+    "design": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "opus": 7756
+      },
+      "agents": [
+        "design:author",
+        "design:critic:r1"
+      ],
+      "started_at": "2026-10-25T07:01:12Z",
+      "artifact_written": true,
+      "findings_path": ".sdlc/filler-docs-log-flood/02-design.review.md",
+      "controls_verified": 9,
+      "ended_at": "2026-10-25T07:02:00Z"
+    },
+    "plan": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "opus": 5223
+      },
+      "agents": [
+        "plan:author",
+        "plan:critic:r1"
+      ],
+      "started_at": "2026-10-25T07:03:56Z",
+      "artifact_written": true,
+      "findings_path": ".sdlc/filler-docs-log-flood/03-tasks.review.md",
+      "controls_verified": 6,
+      "ended_at": "2026-10-25T07:04:48Z"
+    },
+    "build": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "haiku": 445,
+        "sonnet": 11275
+      },
+      "agents": [
+        "build:partition",
+        "build:Phase 1: Docs:g1",
+        "build:Phase 2: Cache the no-published-graph fallback:g1",
+        "build:fanin"
+      ],
+      "started_at": "2026-10-25T07:05:27Z",
+      "ended_at": "2026-10-25T09:36:26Z"
+    },
+    "review": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "opus": 11056
+      },
+      "agents": [
+        "review:backend"
+      ],
+      "started_at": "2026-10-25T09:38:55Z",
+      "ended_at": "2026-10-25T09:38:55Z"
+    },
+    "security_code": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {},
+      "agents": [],
+      "started_at": "2026-10-25T09:38:55Z",
+      "findings_path": ".sdlc/filler-docs-log-flood/05-security.md",
+      "controls_verified": 7,
+      "ended_at": "2026-10-25T09:38:55Z"
+    },
+    "test": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "sonnet": 984
+      },
+      "agents": [
+        "test:r1"
+      ],
+      "started_at": "2026-10-25T09:39:28Z",
+      "result": "24 passed, 0 failed",
+      "command": "venv/bin/python -m pytest -q services/conversation/tests/test_workflow_runner.py",
+      "ended_at": "2026-10-25T09:39:28Z"
+    }
+  },
+  "open": [
+    {
+      "stage": "prd",
+      "severity": "minor",
+      "finding": ".sdlc/filler-docs-log-flood/01-prd.md: Acceptance criteria 3/4 \u2014 Scope says the remaining missing-workflow message must be INFO or lower, but no criterion checks that: AC3 only forbids ERROR and above, so a WARNING-level log would pass every criterion; fix by adding to AC4 that the record's level is at most INFO."
+    },
+    {
+      "stage": "plan",
+      "severity": "minor",
+      "finding": ".sdlc/filler-docs-log-flood/03-tasks.md:9 (T4, Test plan 3) \u2014 If the RuntimeError sub-case reuses the broken-JSON sub-case's RuntimeConfig, it gets the fallback that sub-case cached (services/conversation/workflow/runner.py:274-276, 294-295), never reaches parse_graph and emits no exc_info record; fix by giving it a distinct agent id/slug or clearing _GRAPH_CACHE between the two sub-cases."
+    },
+    {
+      "stage": "review:backend",
+      "severity": "minor",
+      "finding": "docs/design/agent-creation-ux-issues.md:1 \u2014 This branch also carries files the design never mentions: a 148-line admin-ui UX audit, the untracked CLAUDE.md, and bookkeeping edits for the earlier dynamic-first-turn-filler run (08-run-report.md, state.json, 05-review-postmerge.md). A blanket `git add` would ship them in this PR, so commit only runner.py, the test file, docs/voice-latency.md and .sdlc/filler-docs-log-flood/."
+    },
+    {
+      "stage": "test",
+      "severity": "medium",
+      "finding": "uncovered \u2014 AC10 full conversation suite not run by tester"
+    }
+  ],
+  "retro_sources": [],
+  "updated_at": "2026-10-25T09:39:28Z",
+  "build_phase_done": "Phase 2: Cache the no-published-graph fallback",
+  "verify": {
+    "result": "passed",
+    "command": "./venv/bin/python -m pytest -q --timeout=180 services/conversation; ./venv/bin/python -m pytest -q --timeout=180 --ignore=services/conversation (and per-service reruns of config, clinic, knowledge, libs)",
+    "failures": [
+      "services/conversation/tests/test_pipeline.py::test_filler_phrases_are_prepared_after_the_greeting: pre-existing, fails identically on base 92aa06a (confirmed via git stash)",
+      "services/config/tests/test_credential_masking.py::test_every_ref_column_is_wired_or_classified: pre-existing, fails deterministically and the diff touches nothing under services/config, database or libs (not re-run on base)",
+      "services/clinic/tests (26 fixture-setup errors, FileNotFoundError on sock.connect): environment failure, a clinic DB or unix socket is missing here, not test results. Fix: start the local Postgres or set the clinic DSN. Reproduced on re-run.",
+      "Full-suite run showed 3 failures, 26 errors, 3683 passed. On per-service reruns config showed 1 failure and the other 2 were not reproduced, so they are flaky or order-dependent and unrelated to this diff.",
+      "Test environment: 03-tasks.md has no Test environment note. Used venv with --timeout=180 per the guard-end-call-marker note. A bare full run takes about 13 min. admin-ui is untouched, so lint, build and test were skipped."
+    ],
+    "changed_lines": 167,
+    "backend": 9,
+    "admin_ui": 0
+  },
+  "pr": "https://github.com/yuviz-ai/yuviz/pull/212"
+}

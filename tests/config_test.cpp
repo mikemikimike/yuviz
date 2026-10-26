@@ -366,6 +366,30 @@ TEST_F(ConfigTest, CallMetadataIgnoresWrongTypedFields) {
     EXPECT_EQ(md.ani, "5551234567"); // correctly typed field still parses
 }
 
+TEST_F(ConfigTest, CampaignRouteComesOnlyFromTheCampaignsRecord) {
+    using voiceai::LookupResult;
+    using voiceai::LookupStatus;
+    using voiceai::RoutingStatus;
+
+    const auto hit = voiceai::resolve_campaign_route(
+        LookupResult{LookupStatus::Hit, R"({"tenant_slug":"yuviz","agent_slug":"sales"})"});
+    EXPECT_EQ(hit.status, RoutingStatus::Routed);
+    EXPECT_EQ(hit.route.tenant_slug, "yuviz");
+    EXPECT_EQ(hit.route.agent_slug, "sales");
+
+    EXPECT_EQ(voiceai::resolve_campaign_route(LookupResult{LookupStatus::Miss, {}}).status, RoutingStatus::Unknown);
+    EXPECT_EQ(voiceai::resolve_campaign_route(LookupResult{LookupStatus::Error, {}}).status, RoutingStatus::Unavailable);
+    EXPECT_EQ(voiceai::resolve_campaign_route(
+        LookupResult{LookupStatus::Hit, R"({"tenant_slug":"yuviz"})"}).status, RoutingStatus::Unavailable);
+}
+
+TEST_F(ConfigTest, CallMetadataIgnoresPeerSuppliedTenantAndAgent) {
+    const auto md = voiceai::CallMetadata::parse(std::string(
+        R"({"did":"+918065354620","direction":"outbound","tenant_slug":"victim","agent_slug":"sales","ts":1})"));
+    EXPECT_EQ(md.direction, "outbound");
+    EXPECT_EQ(md.did, "+918065354620");
+}
+
 } // namespace
 
 // ── CallFsmTimerConfig transfer timeout ──────────────────────────────────────

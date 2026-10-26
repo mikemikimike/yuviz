@@ -96,16 +96,19 @@ class ToolCallOrchestrator:
         only_tools: list[str] | Callable[[], list[str] | None] | None = None,
         carry_taint: bool = False,
         trailing_message: ChatMessage | None = None,
+        pre_tainted: bool = False,
     ) -> AsyncGenerator[TurnEvent, None]:
         """only_tools subsets DB tools for this turn (never grants). Both tool
         args may be callables so a mid-turn node change re-resolves schemas.
         carry_taint: this turn is not a new caller utterance (e.g. recovery after a failed transfer), so
         retrieved text read earlier is still in context and the held writes are not yet confirmed.
-        trailing_message is sent last on every LLM call of the turn but never stored in history."""
+        trailing_message is sent last on every LLM call of the turn but never stored in history.
+        pre_tainted: retrieved, tenant-uploaded text was put in front of the model before the turn started (no
+        search_knowledge call ran to taint it), so writes are held for the caller's yes exactly as after a lookup."""
         local_calls = 0
         guard = TurnGuard(self._max_tool_calls_per_turn)
         call_key = (tenant_id, call_id)
-        guard.tainted = carry_taint and self._call_taint.get(call_key, False)
+        guard.tainted = (carry_taint and self._call_taint.get(call_key, False)) or pre_tainted
         self._call_taint[call_key] = guard.tainted
         if len(self._call_taint) > _MAX_TRACKED_CALLS:
             self._call_taint.pop(next(iter(self._call_taint)))
