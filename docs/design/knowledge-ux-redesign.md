@@ -103,7 +103,7 @@ Concurrency: searches are read-only and the plan is per agent, so agents sharing
 - Only a superadmin can change them, through the config service tenant route, as with `number_purchase_enabled`.
 - Enforcement is in the upload transaction, under `pg_advisory_xact_lock` keyed on the tenant, so two parallel uploads cannot both pass the last slot. Errors: 409 "file limit reached (N of N)" and 413 "storage full". Per-file size stays `KNOWLEDGE_MAX_UPLOAD_BYTES`.
 - Replace must not count the file twice, and must not drop the document from agents. The upload route takes an optional `replaces` document id: the check leaves that document out, and the new document is linked to the same agents in the upload transaction. The admin UI's replace flow (upload, wait until ready, delete the original) passes it.
-- Documents uploaded before `byte_size` existed count as 0 bytes. A one-off backfill reads their stored size.
+- Documents uploaded before `byte_size` existed count as 0 bytes until the one-off backfill `scripts/backfill_kb_byte_size.py` reads their stored size.
 
 ### 5. Prompt mode
 

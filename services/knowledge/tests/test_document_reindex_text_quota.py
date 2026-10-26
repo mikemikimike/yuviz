@@ -334,6 +334,38 @@ async def test_concurrent_saves_of_an_agents_documents_leave_one_set_not_the_uni
         assert linked in (set(a), set(b))
 
 
+def _backfill_script():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "backfill_kb_byte_size", Path(__file__).resolve().parents[3] / "scripts/backfill_kb_byte_size.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def test_byte_size_backfill_sizes_legacy_documents_from_storage_and_is_rerunnable(pool, test_tenant, tmp_path):
+    kb = await _kb(test_tenant)
+    storage = LocalStorageProvider(str(tmp_path))
+    legacy, missing, sized = [await add_document(pool, test_tenant, kb, t, ["x"]) for t in ("Legacy", "Missing", "Sized")]
+    ref = await storage.save(str(test_tenant["id"]), str(kb["id"]), "legacy.txt", b"0123456789" * 3)
+    await pool.execute("UPDATE kb_documents SET source_ref = $2 WHERE id = $1", legacy["id"], ref)
+    await pool.execute("UPDATE kb_documents SET source_ref = $2 WHERE id = $1", missing["id"], str(tmp_path / "gone"))
+    await pool.execute("UPDATE kb_documents SET byte_size = 7 WHERE id = $1", sized["id"])
+    script = _backfill_script()
+
+    async with pool.acquire() as conn:
+        first = await script.backfill(conn, storage, tenant_id=test_tenant["id"])
+        second = await script.backfill(conn, storage, tenant_id=test_tenant["id"])
+
+    assert first == (1, [str(missing["id"])]) and second == (0, [str(missing["id"])])
+    sizes = {r["id"]: r["byte_size"] for r in await pool.fetch(
+        "SELECT id, byte_size FROM kb_documents WHERE tenant_id = $1", test_tenant["id"])}
+    assert (sizes[legacy["id"]], sizes[missing["id"]], sizes[sized["id"]]) == (30, None, 7)
+    assert (await quotas.tenant_usage(test_tenant["id"]))["storage_bytes"] == 37
+
+
 def test_window_join_stops_once_past_the_limit():
     chunks = [f"w{i}a w{i}b" for i in range(10_000)]
 
