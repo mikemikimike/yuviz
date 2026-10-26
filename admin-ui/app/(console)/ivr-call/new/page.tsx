@@ -128,7 +128,7 @@ export default function NewCallFlowPage() {
 
   const cloneSource = existing.find((f) => f.id === cloneFromId);
   const dir = DIRECTIONS.find((d) => d.value === direction)!;
-  const canCreate = !creating && !!tenantSlug && slugify(name) !== "" && (!cloning || !!cloneSource);
+  const canCreate = !creating && !draftNotice && !!tenantSlug && slugify(name) !== "" && (!cloning || !!cloneSource);
 
   const handleCreate = async () => {
     if (!canCreate) return;
@@ -143,6 +143,7 @@ export default function NewCallFlowPage() {
       });
       if (flow.warnings?.length) {
         setDraftNotice({ id: flow.id, reasons: flow.warnings.map((w) => w.message) });
+        setCreating(false);
         return;
       }
       router.push(`/ivr-call/${flow.id}`);
@@ -281,7 +282,7 @@ export default function NewCallFlowPage() {
         {draftNotice && (
           <div className="error-banner" style={{ marginTop: 12 }}>
             Saved as a draft, it cannot be published yet:
-            <ul>{draftNotice.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
+            <ul>{draftNotice.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
             <button className="btn btn-sm" onClick={() => router.push(`/ivr-call/${draftNotice.id}`)}>Open the draft</button>
           </div>
         )}
