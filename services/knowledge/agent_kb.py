@@ -117,6 +117,11 @@ async def replace_documents(
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         async with conn.transaction():
+            # Serialise saves of one agent: without it two concurrent PUTs each miss the other's uncommitted inserts
+            # in their DELETE and the agent ends up with the union of both sets.
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('agent-docs:' || $1::text, 0))", str(agent_id),
+            )
             found = await conn.fetchval(
                 "SELECT count(*) FROM kb_documents d JOIN agents a ON a.tenant_id = d.tenant_id "
                 "WHERE a.id = $1 AND d.id = ANY($2::uuid[]) AND d.deleted_at IS NULL",

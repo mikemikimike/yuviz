@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -245,16 +246,21 @@ TEXT_MAX_CHARS = 200_000
 _MAX_OVERLAP_WORDS = 400
 
 
-def _join_windows(chunks: list[str]) -> str:
-    """Join fixed-window chunks, dropping the words each one repeats from the end of the one before it."""
+def _join_windows(chunks: list[str], limit: int | None = None) -> str:
+    """Join fixed-window chunks, dropping the words each one repeats from the end of the one before it. Stops once the
+    text passes `limit` characters, so a huge legacy document costs no more than the part the caller returns."""
     words: list[str] = []
+    length = -1  # length of " ".join(words)
     for chunk in chunks:
+        if limit is not None and length > limit:
+            break
         new = chunk.split()
         for k in range(min(len(words), len(new), _MAX_OVERLAP_WORDS), 0, -1):
             if words[-k:] == new[:k]:
                 new = new[k:]
                 break
         words.extend(new)
+        length += sum(len(w) + 1 for w in new)
     return " ".join(words)
 
 
@@ -293,7 +299,9 @@ async def get_document_text(document_id: Any, *, platform_scoped: bool = False) 
         text, source = "\n\n".join(text_parts), "sections"
     else:
         windows = sorted([c for c in chunks if not c["is_parent"]], key=lambda c: c["chunk_index"])
-        text, source = _join_windows([c["content"] for c in windows]), "chunks"
+        # Off the event loop: it is CPU-bound and this worker also serves live-call /retrieve.
+        text = await asyncio.to_thread(_join_windows, [c["content"] for c in windows], TEXT_MAX_CHARS)
+        source = "chunks"
     return {
         "document_id": str(document_id), "text": text[:TEXT_MAX_CHARS], "source": source,
         "truncated": len(text) > TEXT_MAX_CHARS,

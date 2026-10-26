@@ -15,6 +15,14 @@ DEFAULT_MAX_DOCUMENTS = env_int("KNOWLEDGE_DEFAULT_MAX_DOCUMENTS", 10, lo=1, hi=
 DEFAULT_MAX_STORAGE_BYTES = env_int("KNOWLEDGE_DEFAULT_MAX_STORAGE_BYTES", 10 * 1024 * 1024, lo=1, hi=10**12)
 
 
+# Only documents the console lists, and so the tenant can delete: a soft-deleted folder's documents keep
+# deleted_at NULL (knowledge_bases.soft_delete_knowledge_base) but are invisible, so they must not use up the quota.
+_LISTED = (
+    "JOIN knowledge_bases kb ON kb.id = d.kb_id AND kb.deleted_at IS NULL "
+    "WHERE d.tenant_id = t.id AND d.deleted_at IS NULL "
+)
+
+
 class QuotaExceeded(Exception):
     def __init__(self, kind: str, used: int, limit: int) -> None:
         self.kind, self.used, self.limit = kind, used, limit
@@ -25,10 +33,10 @@ async def usage(conn: asyncpg.Connection, tenant_id: Any, *, excluding: Any | No
     """`excluding` leaves one document out, so replacing a file counts the net change."""
     row = await conn.fetchrow(
         "SELECT t.knowledge_max_documents, t.knowledge_max_storage_bytes, "
-        "  (SELECT count(*) FROM kb_documents d "
-        "    WHERE d.tenant_id = t.id AND d.deleted_at IS NULL AND d.id IS DISTINCT FROM $2::uuid) AS documents, "
-        "  (SELECT coalesce(sum(d.byte_size), 0) FROM kb_documents d "
-        "    WHERE d.tenant_id = t.id AND d.deleted_at IS NULL AND d.id IS DISTINCT FROM $2::uuid) AS storage_bytes "
+        "  (SELECT count(*) FROM kb_documents d " + _LISTED +
+        "    AND d.id IS DISTINCT FROM $2::uuid) AS documents, "
+        "  (SELECT coalesce(sum(d.byte_size), 0) FROM kb_documents d " + _LISTED +
+        "    AND d.id IS DISTINCT FROM $2::uuid) AS storage_bytes "
         "FROM tenants t WHERE t.id = $1",
         tenant_id, excluding,
     )
@@ -53,7 +61,13 @@ async def check_upload(conn: asyncpg.Connection, tenant_id: Any, size: int, *, r
     uploads to the end of it, so two parallel uploads cannot both take the last slot."""
     await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('kb-quota:' || $1::text, 0))", str(tenant_id))
     u = await usage(conn, tenant_id, excluding=replaces)
-    if u["documents"] + 1 > u["max_documents"]:
+    # A replacement leaves the count unchanged and is refused only for growing storage past the limit, so a tenant
+    # already over a limit (e.g. from before quotas) can still update its files in place.
+    if replaces is None and u["documents"] + 1 > u["max_documents"]:
         raise QuotaExceeded("documents", u["documents"], u["max_documents"])
     if u["storage_bytes"] + size > u["max_storage_bytes"]:
-        raise QuotaExceeded("storage", u["storage_bytes"], u["max_storage_bytes"])
+        old_size = None if replaces is None else await conn.fetchval(
+            "SELECT coalesce(byte_size, 0) FROM kb_documents WHERE id = $1 AND tenant_id = $2", replaces, tenant_id,
+        )
+        if old_size is None or size > old_size:
+            raise QuotaExceeded("storage", u["storage_bytes"], u["max_storage_bytes"])

@@ -285,3 +285,59 @@ async def test_usage_reports_counts_limits_and_the_upload_cap(client, pool, test
 async def test_usage_of_another_tenant_is_refused(client, test_tenant, other_tenant_admin):
     resp = await client.get(f"/tenants/{test_tenant['id']}/knowledge-usage", headers=_auth(other_tenant_admin))
     assert resp.status_code in (403, 404)
+
+
+async def test_documents_in_a_deleted_folder_do_not_use_up_the_quota(client, pool, test_tenant, test_admin):
+    gone = await _kb(test_tenant, "old-folder")
+    for i in range(3):
+        await add_document(pool, test_tenant, gone, f"Old {i}", ["old"])
+    await pool.execute("UPDATE kb_documents SET byte_size = 100 WHERE kb_id = $1", gone["id"])
+    await kb_service.soft_delete_knowledge_base(gone["id"])
+    kb = await _kb(test_tenant)
+    await _limit(pool, test_tenant, documents=1, storage=150)
+
+    used = await quotas.tenant_usage(test_tenant["id"])
+    resp = await _upload(client, kb, test_admin, "a.txt")
+
+    assert (used["documents"], used["storage_bytes"]) == (0, 0)
+    assert resp.status_code == 201
+
+
+async def test_a_tenant_over_its_limits_can_still_replace_a_file(client, pool, test_tenant, test_admin):
+    kb = await _kb(test_tenant)
+    original = (await _upload(client, kb, test_admin, "a.txt", body=b"0123456789")).json()
+    await _upload(client, kb, test_admin, "b.txt", body=b"0123456789")
+    await _upload(client, kb, test_admin, "c.txt", body=b"0123456789")
+    await _limit(pool, test_tenant, documents=1, storage=15)
+
+    same_size = await _upload(client, kb, test_admin, "a-v2.txt", body=b"abcdefghij", replaces=original["id"])
+    bigger = await _upload(client, kb, test_admin, "a-v3.txt", body=b"abcdefghijk", replaces=same_size.json()["id"])
+
+    assert same_size.status_code == 201
+    assert bigger.status_code == 413  # growing storage past the limit is still refused
+
+
+async def test_concurrent_saves_of_an_agents_documents_leave_one_set_not_the_union(pool, test_tenant):
+    kb = await _kb(test_tenant)
+    docs = [str((await add_document(pool, test_tenant, kb, f"D{i}", [f"d{i}"]))["id"]) for i in range(4)]
+    agent = await pool.fetchrow(
+        "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'sup', 'Support') RETURNING id", test_tenant["id"],
+    )
+    a, b = docs[:2], docs[2:]
+
+    for _ in range(5):
+        await agent_kb_service.replace_documents(agent["id"], [])
+        await asyncio.gather(
+            agent_kb_service.replace_documents(agent["id"], a), agent_kb_service.replace_documents(agent["id"], b),
+        )
+        linked = {str(r["document_id"]) for r in await agent_kb_service.list_for_agent(agent["id"])}
+        assert linked in (set(a), set(b))
+
+
+def test_window_join_stops_once_past_the_limit():
+    chunks = [f"w{i}a w{i}b" for i in range(10_000)]
+
+    text = documents_service._join_windows(chunks, limit=50)
+
+    assert 50 < len(text) < 70
+    assert documents_service._join_windows(chunks[:3]) == "w0a w0b w1a w1b w2a w2b"
