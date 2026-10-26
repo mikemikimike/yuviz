@@ -148,12 +148,22 @@ async def preview_provider_voice(
     body: VoicePreview,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Speak the caller's text in this voice; the resolved key never reaches the admin UI."""
+    """Speak the caller's text in this voice, or in `voice_id` if it is one of the account's own voices; the resolved
+    key never reaches the admin UI."""
     cfg = await _authorize_provider(provider_id, current_user)
     set_target_tenant(cfg["tenant_id"])
+    if body.voice_id is not None and body.voice_id != cfg.get("voice"):
+        if cfg["engine"] != "elevenlabs":
+            raise HTTPException(status_code=400, detail="choosing a preview voice is only supported for ElevenLabs")
+        try:
+            voices = await provider_configs_service.list_provider_voices(provider_id, secret_resolver=_secret_resolver)
+        except (LookupError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if body.voice_id not in {v["voice_id"] for v in voices}:
+            raise HTTPException(status_code=400, detail="that voice is not on this provider's account")
     try:
         wav = await voice_preview.synthesize_preview(
-            cfg, body.text, secret_resolver=_secret_resolver,
+            cfg, body.text, secret_resolver=_secret_resolver, voice_id=body.voice_id,
         )
     except voice_preview.PreviewUnavailable as exc:
         raise HTTPException(status_code=400, detail=exc.detail)

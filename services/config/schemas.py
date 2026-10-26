@@ -264,8 +264,9 @@ class WorkflowPublish(BaseModel):
 
 
 class VoicePreview(BaseModel):
-    """Text to speak in a provider_config's voice."""
+    """Text to speak in a provider_config's voice, or in `voice_id` (one of that account's voices) when given."""
     text: str = Field(min_length=1, max_length=600)
+    voice_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class CallFlowCreate(BaseModel):

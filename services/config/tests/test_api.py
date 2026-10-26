@@ -1142,6 +1142,53 @@ class TestProviderConfigEndpoints:
         assert secret_body not in resp.json()["detail"]
         assert resp.json()["detail"] == "ElevenLabs Voices API returned 401"
 
+    async def _preview_setup(self, client, test_tenant, monkeypatch, key_env):
+        """An ElevenLabs provider saved with voice 'saved', whose account lists 'saved' and 'adam'."""
+        import httpx
+
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "voice": "saved", "api_key_ref": f"env:{key_env}"},
+        )
+        monkeypatch.setenv(key_env, "fake-key-for-test")
+        listed = {"voices": [
+            {"voice_id": v, "name": v, "category": "premade", "labels": {}, "preview_url": None} for v in ("saved", "adam")
+        ]}
+        spoken: list[str] = []
+        real_get, real_post = httpx.AsyncClient.get, httpx.AsyncClient.post
+
+        async def fake_get(self, url, headers=None, **kwargs):
+            if "elevenlabs.io" not in str(url):
+                return await real_get(self, url, headers=headers, **kwargs)
+            return httpx.Response(200, json=listed, request=httpx.Request("GET", url))
+
+        async def fake_post(self, url, *args, **kwargs):
+            if "text-to-speech" not in str(url):
+                return await real_post(self, url, *args, **kwargs)
+            spoken.append(str(url).rsplit("/", 1)[-1])
+            return httpx.Response(200, content=b"\x00\x00" * 10, request=httpx.Request("POST", "https://x" + str(url)))
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+        monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+        return create.json()["id"], spoken
+
+    async def test_preview_speaks_in_the_requested_voice_of_the_account(self, client, test_tenant, monkeypatch):
+        provider_id, spoken = await self._preview_setup(client, test_tenant, monkeypatch, "TEST_EL_KEY5")
+
+        chosen = await client.post(f"/providers/{provider_id}/preview", json={"text": "Adam", "voice_id": "adam"})
+        default = await client.post(f"/providers/{provider_id}/preview", json={"text": "hi"})
+
+        assert chosen.status_code == default.status_code == 200
+        assert spoken == ["adam", "saved"]
+
+    async def test_preview_refuses_a_voice_not_on_the_account(self, client, test_tenant, monkeypatch):
+        provider_id, spoken = await self._preview_setup(client, test_tenant, monkeypatch, "TEST_EL_KEY6")
+
+        resp = await client.post(f"/providers/{provider_id}/preview", json={"text": "x", "voice_id": "someone-else"})
+
+        assert resp.status_code == 400
+        assert spoken == []
+
 
 class TestProviderConfigTenantScoping:
     """By-id /providers routes must reject another tenant's provider_config."""

@@ -171,6 +171,7 @@ function PremiumLanguageVoice({ provider, lang, current, placeholder, onPick }: 
         <VoicePickerWithPreview
           voices={matching!}
           currentVoiceId={current?.voice}
+          currentVoiceLabel={current?.name}
           placeholder={placeholder}
           providerId={provider.id}
           onPick={onPick}

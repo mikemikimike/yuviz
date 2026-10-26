@@ -4,16 +4,20 @@ import { useRef, useState } from "react";
 import { Play, ChevronDown } from "lucide-react";
 import { ApiError, previewVoice } from "@/lib/api";
 import { ElevenLabsVoice } from "@/lib/api";
+import { chosenVoice } from "@/lib/voicePicker";
 
 export function VoicePickerWithPreview({
   voices,
   currentVoiceId,
+  currentVoiceLabel,
   placeholder,
   providerId,
   onPick,
 }: {
   voices: ElevenLabsVoice[];
   currentVoiceId?: string | null;
+  /** Shown for a saved voice that is not in `voices`. */
+  currentVoiceLabel?: string | null;
   placeholder: string;
   providerId: string;
   onPick: (voiceId: string, label: string) => void;
@@ -24,9 +28,9 @@ export function VoicePickerWithPreview({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const urlRef = useRef<string | null>(null);
 
-  const currentVoice = voices.find((v) => v.voice_id === currentVoiceId);
+  const currentVoice = chosenVoice(voices, currentVoiceId, currentVoiceLabel);
 
-  const playPreview = async (e: React.MouseEvent, voice: ElevenLabsVoice) => {
+  const playPreview = async (e: React.MouseEvent, voice: { voice_id: string; name: string }) => {
     e.stopPropagation();
     if (playing === voice.voice_id) {
       audioRef.current?.pause();
@@ -38,7 +42,7 @@ export function VoicePickerWithPreview({
     setPreviewError(null);
     try {
       const text = voice.name;
-      const blob = await previewVoice(providerId, text);
+      const blob = await previewVoice(providerId, text, voice.voice_id);
       if (urlRef.current) URL.revokeObjectURL(urlRef.current);
       urlRef.current = URL.createObjectURL(blob);
       audioRef.current?.pause();
