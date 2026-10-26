@@ -507,15 +507,50 @@ TEST_F(EslEnvConfigTest, RedisUrlWithoutPortOrDbUsesDefaults) {
     EXPECT_EQ(cfg.gateway().redis.port, 6379);
 }
 
+TEST_F(EslEnvConfigTest, RedisUrlCredentialsBecomeTheAclLogin) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    ::setenv("REDIS_URL", "redis://gateway:s3cr.et~x@localhost:6380/0", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.gateway().redis.username, "gateway");
+    EXPECT_EQ(cfg.gateway().redis.password, "s3cr.et~x");
+    EXPECT_EQ(cfg.gateway().redis.host, "localhost");
+    EXPECT_EQ(cfg.gateway().redis.port, 6380);
+}
+
 TEST_F(EslEnvConfigTest, UnsupportedRedisUrlRefusesToStart) {
     ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
     write_yaml("gateway:\n  esl:\n    enabled: true\n");
-    for (const char* bad : {"http://localhost:6379", "redis://:secret@localhost:6379", "redis://localhost:6379/2",
-                            "redis://localhost:99999", "redis://:6379"}) {
+    for (const char* bad : {"http://localhost:6379", "redis://:secret@localhost:6379", "redis://gateway@localhost:6379",
+                            "redis://gateway:@localhost", "redis://localhost:6379/2", "redis://localhost:99999",
+                            "redis://:6379", "redis://gateway:secret@"}) {
         ::setenv("REDIS_URL", bad, 1);
         voiceai::Config cfg;
-        EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error) << bad;
+        try {
+            cfg.load(tmp_yaml_.string());
+            ADD_FAILURE() << "accepted " << bad;
+        } catch (const std::runtime_error& e) {
+            EXPECT_EQ(std::string(e.what()).find("secret"), std::string::npos) << "error echoes the password";
+        }
     }
+}
+
+// Live Redis with the dev ACL; skipped unless REDIS_GATEWAY_PASSWORD is exported.
+TEST_F(ConfigTest, RedisClientLogsInWithItsAclUser) {
+    const char* pw = std::getenv("REDIS_GATEWAY_PASSWORD");
+    if (pw == nullptr || *pw == '\0') GTEST_SKIP() << "REDIS_GATEWAY_PASSWORD not set";
+    voiceai::Logger logger = voiceai::Logger::make_null();
+    voiceai::RedisConfig rc;
+    rc.enabled  = true;
+    rc.username = "gateway";
+    rc.password = pw;
+    voiceai::RedisClient good{rc, logger};
+    EXPECT_NE(good.get_checked("routing:ready").status, LookupStatus::Error);
+
+    rc.password = "wrong-password";
+    voiceai::RedisClient bad{rc, logger};
+    EXPECT_EQ(bad.get_checked("routing:ready").status, LookupStatus::Error);
 }
 
 TEST_F(EslEnvConfigTest, OutOfRangeOrMalformedPortRefusesToStart) {

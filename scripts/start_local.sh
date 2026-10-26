@@ -188,7 +188,7 @@ start_gateway() {
   _require FREESWITCH_ESL_PASSWORD || return 0
   _warn_env_drift SIP_PROXY_HOST
   cd "$REPO"
-  ./build/gateway/voice_ai_gateway config/gateway.yaml
+  REDIS_URL="$(_redis_url_for gateway)" ./build/gateway/voice_ai_gateway config/gateway.yaml
 }
 
 # ── Block 13: FreeSWITCH (registers with Kamailio from Block 2) ──────────────
