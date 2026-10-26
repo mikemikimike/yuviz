@@ -333,6 +333,24 @@ RouteResolution resolve_route(RedisClient& redis, const std::string& did, DidRou
     return resolve_route(did, redis.get_guarded("did:" + did, kDidRoutesReadyKey), cache);
 }
 
+RouteResolution resolve_campaign_route(const LookupResult& lookup) {
+    switch (lookup.status) {
+        case LookupStatus::Miss:
+            return {RoutingStatus::Unknown, {}};
+        case LookupStatus::Hit:
+            if (auto route = PhoneRoute::parse(lookup.value)) return {RoutingStatus::Routed, *route};
+            break;
+        case LookupStatus::Error:
+            break;
+    }
+    return {RoutingStatus::Unavailable, {}};
+}
+
+RouteResolution resolve_campaign_route(RedisClient& redis, const std::string& call_uuid) {
+    if (call_uuid.empty()) return {RoutingStatus::Unavailable, {}};
+    return resolve_campaign_route(redis.get_checked("campaign:route:" + call_uuid));
+}
+
 CallMetadata CallMetadata::parse(const std::optional<std::string>& raw) noexcept {
     CallMetadata md;   // defaults: did="", ani="", direction="inbound", freeswitch_host=""
     if (!raw.has_value()) return md;

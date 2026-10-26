@@ -316,3 +316,20 @@ async def test_workflow_validate_accepts_what_publish_accepts(admin_client, test
     for destination in ("{{ branch_number }}", "+12125550100"):
         resp = await _validate_workflow_route(admin_client, test_tenant, agent, destination)
         assert resp.json()["valid"] is True, resp.text
+
+
+async def test_tenant_patch_sets_number_purchase_but_ignores_transfer_policy(
+    superadmin_client, test_tenant, pool,
+):
+    resp = await superadmin_client.patch(
+        f"/tenants/{test_tenant['id']}",
+        json={"number_purchase_enabled": True, "home_calling_code": "44", "allow_international_transfers": True},
+    )
+    assert resp.status_code == 200, resp.text
+    row = await pool.fetchrow(
+        "SELECT number_purchase_enabled, home_calling_code, allow_international_transfers "
+        "FROM tenants WHERE id = $1", test_tenant["id"],
+    )
+    assert (row["number_purchase_enabled"], row["home_calling_code"], row["allow_international_transfers"]) == (
+        True, "1", False,
+    )
