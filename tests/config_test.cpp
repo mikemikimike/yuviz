@@ -536,7 +536,7 @@ TEST_F(EslEnvConfigTest, UnsupportedRedisUrlRefusesToStart) {
     }
 }
 
-// Live Redis with the dev ACL; skipped unless REDIS_GATEWAY_PASSWORD is exported.
+// Live Redis with the dev ACL (CI creates the user); skipped unless REDIS_GATEWAY_PASSWORD is exported.
 TEST_F(ConfigTest, RedisClientLogsInWithItsAclUser) {
     const char* pw = std::getenv("REDIS_GATEWAY_PASSWORD");
     if (pw == nullptr || *pw == '\0') GTEST_SKIP() << "REDIS_GATEWAY_PASSWORD not set";
