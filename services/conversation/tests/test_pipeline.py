@@ -2897,9 +2897,10 @@ class _FakeToolOrchestrator:
         self, agent_id, tenant_id, call_id, session_id, history,
         caller_number="", called_number="", call_direction="", cancel_event=None, force_tool_name=None,
         phone_number_confirmed=False, local_tools=None, only_tools=None, carry_taint=False,
-        trailing_message=None,
+        trailing_message=None, pre_tainted=False,
     ):
         self.seen_carry_taint = carry_taint
+        self.seen_pre_tainted = pre_tainted
         self.seen_trailing_message = trailing_message
         self.seen_force_tool_name = force_tool_name
         self.seen_phone_number_confirmed = phone_number_confirmed
@@ -3860,3 +3861,17 @@ async def test_short_lead_ins_and_numbers_are_not_split():
 async def test_hindi_first_clause():
     spoken = await _spoken_for_tokens(["घुटनों के दर्द के लिए Orthopaedics सही रहेगा, ", "वहाँ जोड़ों का इलाज होता है।"])
     assert spoken == ["घुटनों के दर्द के लिए Orthopaedics सही रहेगा,", "वहाँ जोड़ों का इलाज होता है।"]
+
+
+@pytest.mark.parametrize("direction, customer, own", [
+    ("outbound", "+919812345678", "+14155550100"),
+    ("inbound", "+14155550100", "+919812345678"),
+])
+def test_the_booking_prompt_and_transfer_caller_id_use_the_customers_number(direction, customer, own):
+    handler = _make_handler(
+        _make_stt(), _make_llm(), _make_tts(), system_prompt="x", has_booking_tool=True,
+        direction=direction, caller_number="+14155550100", called_number="+919812345678",
+    )
+    # The prompt spells the number out digit by digit for the voice.
+    assert " ".join(customer) in handler._prompt_suffix and " ".join(own) not in handler._prompt_suffix
+    assert handler._decision_context("s1").caller_number == customer

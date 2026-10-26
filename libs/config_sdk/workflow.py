@@ -14,6 +14,7 @@ from .dial_targets import (
     is_transfer_destination,
     transfer_policy_prefix_problem,
     transfer_policy_problem,
+    transfer_policy_sip_template_problem,
 )
 
 NODE_TYPES = ("start", "agent", "transfer", "end", "global")
@@ -375,6 +376,8 @@ def literal_destination_errors(graph: WorkflowGraph) -> list[WorkflowError]:
 
 
 def _destination_policy_problem(destination: str, policy: TransferPolicy) -> str | None:
+    if "{{" in destination and destination.lower().startswith(("sip:", "sips:")):
+        return transfer_policy_sip_template_problem(destination, policy)
     if "{{" in destination:
         return transfer_policy_prefix_problem(destination.split("{{", 1)[0].strip(), policy)
     return transfer_policy_problem(destination, policy)

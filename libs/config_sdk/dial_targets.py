@@ -193,8 +193,10 @@ def transfer_policy_problem(value: str, policy: TransferPolicy) -> str | None:
 def transfer_policy_prefix_problem(prefix: str, policy: TransferPolicy) -> str | None:
     """Publish-time check of the literal text before a template in a destination such as
     "+44{{ x }}": only what the prefix already decides. A national prefix, or one too short
-    to place in a country, is left to the check on the rendered number at call time."""
+    to place in a country, is left to the check on the rendered number at call time.
+    Spaces, dashes and dots are read past, as a carrier does."""
     home = policy.home_calling_code
+    prefix = re.sub(r"[\s.-]", "", prefix)
     if not re.fullmatch(r"\+?[0-9]+", prefix) or not (
         prefix.startswith(("+", "00")) or (prefix.startswith("011") and home == "1")
     ):
@@ -212,3 +214,16 @@ def transfer_policy_prefix_problem(prefix: str, policy: TransferPolicy) -> str |
     if in_home:
         return None
     return "international numbers need international transfers enabled for your account"
+
+
+def transfer_policy_sip_template_problem(destination: str, policy: TransferPolicy) -> str | None:
+    """Publish-time check of a sip: destination containing a template. The literal start of the
+    user part is checked like a number prefix. The host decides the rest: unless the tenant has
+    opted in, it must be literal and allowlisted, since a templated host could be anything."""
+    user, _, host = destination.split(":", 1)[1].rpartition("@")
+    problem = transfer_policy_prefix_problem(re.split(r"[:;]", user.split("{{", 1)[0], maxsplit=1)[0], policy)
+    if problem is not None or policy.allow_international:
+        return problem
+    if "{{" in host or not _sip_host_allowed(_sip_uri_host(destination)):
+        return "SIP addresses outside this platform need international transfers enabled for your account"
+    return None

@@ -245,3 +245,78 @@ async def test_frames_behind_a_deferred_speech_ended_are_examined_once_per_turn(
     # Each message is popped a small constant number of times; a per-drain rescan pops
     # roughly n_frames^2 / 2 (about 20,000 here).
     assert pops < 4 * (n_frames + 2), pops
+
+
+def _audio(payload: bytes):
+    return pb.GatewayMessage(audio_chunk=pb.AudioChunk(session_id="s1", payload=payload))
+
+
+def _dtmf():
+    return pb.GatewayMessage(dtmf=pb.DtmfDigit(session_id="s1", digit="5"))
+
+
+async def _utterance_audio_per_turn(burst):
+    """Turn 1 blocks while `burst` arrives; return the audio each turn was handed."""
+    audios: list[bytes] = []
+    release = asyncio.Event()
+
+    async def turn(session_id, audio, duration_ms, energy_db):
+        audios.append(audio)
+        if len(audios) == 1:
+            await release.wait()
+        yield HandlerResponse(stt_text=f"turn{len(audios)}")
+
+    servicer, handler = _servicer(turn)
+    handler.on_audio.return_value = HandlerResponse()
+    n_turns = sum(1 for m in burst if m.WhichOneof("payload") == "speech_ended") + 1
+
+    async def stream():
+        yield _open()
+        yield _speech_ended()
+        await asyncio.sleep(0.05)
+        for msg in burst:
+            yield msg
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.Event().wait()
+
+    done = asyncio.Event()
+
+    async def consume():
+        async for _ in servicer.Converse(stream(), AsyncMock()):
+            if len(audios) == n_turns:
+                done.set()
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(done.wait(), 3)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    return audios
+
+
+async def test_each_utterance_queued_during_a_reply_keeps_its_own_audio():
+    """Five utterances during one reply, no cancel: every deferred utterance reaches the pipeline
+    with the audio sent before its speech_ended, not discarded as 'trailing frames' of a turn
+    that ran ahead of it."""
+    audios = await _utterance_audio_per_turn([
+        _speech_ended(),
+        _audio(b"\x03\x03"), _speech_ended(),
+        _audio(b"\x04\x04"), _speech_ended(),
+        _dtmf(),
+        _audio(b"\x05\x05"), _speech_ended(),
+    ])
+
+    assert audios == [b"", b"", b"\x03\x03", b"\x04\x04", b"\x05\x05"]
+
+
+async def test_audio_behind_a_dtmf_flood_survives_the_deferral():
+    audios = await _utterance_audio_per_turn(
+        [_speech_ended()] + [_dtmf() for _ in range(500)] + [_audio(b"\x03\x03"), _speech_ended()],
+    )
+
+    assert audios == [b"", b"", b"\x03\x03"]

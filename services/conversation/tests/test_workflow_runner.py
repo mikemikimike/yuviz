@@ -344,3 +344,128 @@ def test_graph_for_fallback_preserves_tools_from_broken_published_json():
     assert graph.start.tools == ["book_appointment", "send_sms"]
     assert graph.start.knowledge_base_ids == ["kb-1"]
 
+
+
+def _runtime_config(
+    *, tenant_id="t1", tenant_slug="t", agent_id="a1", agent_slug="agent",
+    workflow=None, workflow_draft=None, version=1,
+):
+    from datetime import datetime, timezone
+
+    from libs.config_sdk import (
+        Agent, ConversationInfo, MediaInfo, Policies, ProviderConfig, ProviderConfigs,
+        RuntimeConfig, Tenant,
+    )
+
+    now = datetime.now(timezone.utc)
+    placeholder = ProviderConfig(
+        id="p1", role="stt", engine="fake", model=None, voice=None, language=None, api_key_ref=None,
+    )
+    return RuntimeConfig(
+        tenant=Tenant(
+            id=tenant_id, slug=tenant_slug, name="T", region="us",
+            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
+            no_speech_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None,
+            transfer_timeout_ms=None,
+            default_stt_config_id=None, default_llm_config_id=None, default_tts_config_id=None,
+            config_version=1, updated_at=now,
+        ),
+        agent=Agent(
+            id=agent_id, slug=agent_slug, tenant_id=tenant_id, name="Agent",
+            greeting="Hi from column.", system_prompt="Be the column prompt.",
+            goodbye_grace_ms=0, stt_config_id=None, llm_config_id=None, tts_config_id=None,
+            status="active", config_version=1, updated_at=now,
+        ),
+        providers=ProviderConfigs(stt=placeholder, llm=placeholder, tts=placeholder),
+        conversation=ConversationInfo(
+            greeting="Hi from column.", system_prompt="Be the column prompt.",
+            workflow=workflow, workflow_draft=workflow_draft,
+        ),
+        media=MediaInfo(voice=None, language=None),
+        policies=Policies(
+            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
+            silence_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None, goodbye_grace_ms=0,
+        ),
+        tools=[], version=version, resolved_at=now,
+    )
+
+
+def _no_graph_records(caplog):
+    return [r for r in caplog.records if "no published graph" in r.getMessage()]
+
+
+def test_no_published_graph_logs_once_at_info_not_error(caplog):
+    from services.conversation.workflow.runner import graph_for
+
+    rc = _runtime_config()
+    with caplog.at_level("DEBUG", logger="services.conversation.workflow.runner"):
+        graphs = [graph_for(rc) for _ in range(3)]
+    assert not [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL")]
+    assert len(_no_graph_records(caplog)) == 1
+    assert "Hi from column." in (graphs[0].start.greeting or "")
+
+
+def test_cached_starter_equals_a_fresh_build():
+    from services.conversation.workflow.runner import _fallback_graph, graph_for
+
+    rc = _runtime_config()
+    graph_for(rc)
+    assert graph_for(rc) == _fallback_graph(rc, raw=None)
+
+
+def test_no_published_graph_log_is_scoped_by_tenant_and_agent(caplog):
+    from services.conversation.workflow.runner import graph_for
+
+    with caplog.at_level("DEBUG", logger="services.conversation.workflow.runner"):
+        graph_for(_runtime_config(tenant_id="t1"))
+        graph_for(_runtime_config(tenant_id="t2"))
+        graph_for(_runtime_config(tenant_id="t1", agent_id="a2", agent_slug="other"))
+    assert len(_no_graph_records(caplog)) == 3
+
+
+def test_draft_without_any_workflow_is_silent_and_uncached(caplog):
+    from services.conversation.workflow.runner import _GRAPH_CACHE, graph_for
+
+    with caplog.at_level("DEBUG", logger="services.conversation.workflow.runner"):
+        graph_for(_runtime_config(), draft=True)
+    assert not [r for r in caplog.records if r.levelno >= 30]
+    assert not _GRAPH_CACHE
+
+
+def test_published_graph_replaces_cached_starter_on_version_bump():
+    from services.conversation.workflow.runner import graph_for
+
+    starter = graph_for(_runtime_config(version=1))
+    published = graph_for(_runtime_config(workflow=GRAPH, version=2))
+    assert published == parse_graph(GRAPH)
+    assert published != starter
+
+
+def test_unparseable_published_graph_still_logs_error_naming_the_agent(caplog):
+    from services.conversation.workflow.runner import graph_for
+
+    rc = _runtime_config(agent_slug="broken-agent", workflow={"version": 1, "nodes": []})
+    with caplog.at_level("DEBUG", logger="services.conversation.workflow.runner"):
+        graph = graph_for(rc)
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "broken-agent" in errors[0].getMessage()
+    assert "Hi from column." in (graph.start.greeting or "")
+
+
+def test_unexpected_parse_failure_logs_exception_and_falls_back(monkeypatch, caplog):
+    from services.conversation.workflow import runner
+
+    real_parse = runner.parse_graph
+
+    def boom(raw):
+        if raw is GRAPH:
+            raise RuntimeError("boom")
+        return real_parse(raw)  # the starter fallback also goes through parse_graph
+
+    monkeypatch.setattr(runner, "parse_graph", boom)
+    rc = _runtime_config(workflow=GRAPH)
+    with caplog.at_level("DEBUG", logger="services.conversation.workflow.runner"):
+        graph = runner.graph_for(rc)
+    assert [r for r in caplog.records if r.exc_info]
+    assert "Hi from column." in (graph.start.greeting or "")
