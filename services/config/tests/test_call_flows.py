@@ -522,14 +522,18 @@ async def _post_flow(client, tenant, **body):
     )
 
 
-async def test_call_flow_create_refuses_a_dial_outside_the_policy_and_stores_nothing(
+async def test_call_flow_create_lands_a_refused_dial_as_a_draft_with_the_reasons(
     test_tenant, test_admin, pool,
 ):
     async with _client_as(test_admin["user"]) as client:
         resp = await _post_flow(client, test_tenant, graph=_dial_graph("+447911123456"))
-    assert resp.status_code == 400, resp.text
-    assert [(e["id"], e["field"]) for e in resp.json()["errors"]] == [("n2", "destination")]
-    assert await pool.fetchval("SELECT count(*) FROM call_flows WHERE tenant_id = $1", test_tenant["id"]) == 0
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["graph"] is None and body["graph_draft"] is not None
+    assert [(w["id"], w["field"]) for w in body["warnings"]] == [("n2", "destination")]
+    assert await pool.fetchval(
+        "SELECT count(*) FROM call_flow_versions WHERE call_flow_id = $1", body["id"],
+    ) == 0
 
 
 async def test_call_flow_create_allows_the_dial_after_opt_in(test_tenant, test_admin):
@@ -540,20 +544,35 @@ async def test_call_flow_create_allows_the_dial_after_opt_in(test_tenant, test_a
     assert resp.json()["config_version"] == 1
 
 
-async def test_call_flow_create_for_a_home_91_tenant_allows_91_and_refuses_premium(test_tenant, test_admin):
+async def test_call_flow_create_for_a_home_91_tenant_publishes_91_and_drafts_premium(test_tenant, test_admin):
     await tenants.update_tenant(test_tenant["id"], home_calling_code="91", allow_international_transfers=True)
     async with _client_as(test_admin["user"]) as client:
-        assert (await _post_flow(client, test_tenant, graph=_dial_graph("+919876543210"))).status_code == 201
-        assert (await _post_flow(client, test_tenant, graph=_dial_graph("+8821234567890"))).status_code == 400
+        domestic = (await _post_flow(client, test_tenant, graph=_dial_graph("+919876543210"))).json()
+        premium = (await _post_flow(client, test_tenant, graph=_dial_graph("+8821234567890"))).json()
+    assert domestic["graph"] is not None and "warnings" not in domestic
+    assert premium["graph"] is None and premium["warnings"]
 
 
-async def test_call_flow_clone_refuses_a_dial_the_policy_no_longer_allows(test_tenant, test_admin):
+async def test_call_flow_clone_of_a_refused_dial_is_a_draft_with_the_reasons(test_tenant, test_admin):
     await tenants.update_tenant(test_tenant["id"], allow_international_transfers=True)
     async with _client_as(test_admin["user"]) as client:
         source = (await _post_flow(client, test_tenant, graph=_dial_graph("+447911123456"))).json()
+        assert source["graph"] is not None
         await tenants.update_tenant(test_tenant["id"], allow_international_transfers=False)
         resp = await _post_flow(client, test_tenant, clone_from_id=source["id"])
-    assert resp.status_code == 400, resp.text
+    assert resp.status_code == 201, resp.text
+    copy = resp.json()
+    assert copy["graph"] is None and copy["graph_draft"]["nodes"][1]["data"]["destination"] == "+447911123456"
+    assert [(w["id"], w["field"]) for w in copy["warnings"]] == [("n2", "destination")]
+
+
+async def test_call_flow_clone_for_an_opted_in_tenant_publishes_as_before(test_tenant, test_admin):
+    await tenants.update_tenant(test_tenant["id"], allow_international_transfers=True)
+    async with _client_as(test_admin["user"]) as client:
+        source = (await _post_flow(client, test_tenant, graph=_dial_graph("+447911123456"))).json()
+        resp = await _post_flow(client, test_tenant, clone_from_id=source["id"])
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["graph"] is not None and "warnings" not in resp.json()
 
 
 async def test_call_flow_validate_reports_what_publish_refuses(test_tenant, test_admin):
