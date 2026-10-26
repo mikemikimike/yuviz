@@ -474,10 +474,8 @@ async def serve(port: int, args: argparse.Namespace) -> None:
     server = grpc.aio.server(options=[("grpc.so_reuseport", 0)])
 
     # Conversation service
-    pb_grpc.add_ConversationServiceServicer_to_server(
-        ConversationServicer(handler_factory),
-        server,
-    )
+    conversation_servicer = ConversationServicer(handler_factory)
+    pb_grpc.add_ConversationServiceServicer_to_server(conversation_servicer, server)
 
     # Health check — stays NOT_SERVING until the Whisper model finishes loading.
     health_servicer = health.HealthServicer()
@@ -534,6 +532,8 @@ async def serve(port: int, args: argparse.Namespace) -> None:
         log.info("Shutting down…")
         health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING)
         await server.stop(grace=5)
+        # server.stop() cancels streams without waiting for their teardown, which queues the end_call write.
+        await conversation_servicer.wait_closed(timeout=10)
     finally:
         await close_not_ready_providers()
         if llm is not None:

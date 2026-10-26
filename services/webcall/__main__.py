@@ -112,6 +112,9 @@ async def _browser_to_grpc(
         else:
             log.warning("webcall: unknown control type=%r", kind)
 
+    # Browser closed normally: half-close so Conversation ends the session and the reply stream finishes.
+    await call.done_writing()
+
 
 class ResponseWatchdog:
     """Tell the browser when no reply arrives after speech_ended (empty STT turns get no response)."""
