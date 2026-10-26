@@ -41,6 +41,7 @@ from .language import LanguageTracker, fixed_language_instruction, reply_languag
 from .metrics import IMetrics, NullMetrics
 from .pipeline_config import env_ms
 from .provider_bundle import ProviderBundle
+from .providers.llm.retry import LlmResponseTimeout, response_budget
 from .tool_latency import ToolLatencyStore
 from .providers.interfaces import ChatMessage, SttResult, with_directive
 from libs.config_sdk.languages import language_name, normalize_language
@@ -71,6 +72,9 @@ from .workflow import (
 )
 
 log = logging.getLogger(__name__)
+_DEFAULT_LLM_TIMEOUT_MS = 20_000
+_LLM_RESPONSE_RESERVE_RATIO = 0.1
+_STREAM_CLEANUP_TIMEOUT_S = 0.1
 
 
 @dataclass
@@ -310,12 +314,48 @@ def _filler_delay_s() -> float:
     return env_ms("VOICEAI_FILLER_DELAY_MS", _FILLER_DELAY_MS_DEFAULT) / 1000
 
 
+def _consume_async_task(task: asyncio.Task[Any]) -> None:
+    """Retrieve a detached cleanup task's exception without re-raising it."""
+    if not task.cancelled():
+        try:
+            task.exception()
+        except BaseException:
+            log.debug("Detached async stream cleanup failed", exc_info=True)
+
+
+def _defer_stream_close(stream: Any, pending_read: asyncio.Task[Any]) -> None:
+    """Close a stream after its cancellation-resistant read settles, with a bounded wait."""
+    def close_after_read(task: asyncio.Task[Any]) -> None:
+        _consume_async_task(task)
+
+        async def close_bounded() -> None:
+            close_task = asyncio.create_task(stream.aclose())
+            done, _ = await asyncio.wait({close_task}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
+            if not done:
+                close_task.cancel()
+                close_task.add_done_callback(_consume_async_task)
+            else:
+                _consume_async_task(close_task)
+
+        close_task = asyncio.create_task(close_bounded())
+        close_task.add_done_callback(_consume_async_task)
+
+    pending_read.add_done_callback(close_after_read)
+
+
 class _FillerText(str):
     """The (empty) text paired with filler audio: '' in transcripts and history, but
     recognisable, so a filler never counts as the agent having replied."""
 
 
 _FILLER = _FillerText("")
+
+
+class _TimeoutMarker(str):
+    """Clear queued partial tokens before the timeout apology is recorded."""
+
+
+_LLM_TIMEOUT_MARKER = _TimeoutMarker("")
 
 
 class _FillerDue:
@@ -493,6 +533,12 @@ class PipelineConversationHandler:
         self._stt          = provider_bundle.stt
         self._llm          = provider_bundle.llm
         self._tts          = provider_bundle.tts
+        llm_timeout_ms = runtime_config.policies.llm_timeout_ms
+        if llm_timeout_ms is None:
+            llm_timeout_ms = _DEFAULT_LLM_TIMEOUT_MS
+        self._llm_response_timeout_s = max(
+            0.0, llm_timeout_ms * (1.0 - _LLM_RESPONSE_RESERVE_RATIO) / 1000.0,
+        )
         self._tts_by_language: dict[str, Any] = dict(getattr(provider_bundle, "tts_by_language", None) or {})
         # The bundle owns the override-or-base rule; bundles predating it have no overrides.
         self._tts_for = getattr(provider_bundle, "tts_for", None) or (lambda _language: self._tts)
@@ -992,11 +1038,16 @@ class PipelineConversationHandler:
             self._session(session_id).first_turn_filler_spoken = True
 
         # Knowledge retrieval is the `search_knowledge` local tool, called only when needed.
-        messages_for_llm = history
+        producer_history = list(history)
+        producer_history_start = len(producer_history)
+        messages_for_llm = producer_history
 
         directives: list[Directive] = []
+        producer_directives: list[Directive] = []
         full_response: list[str] = []
         tool_calls_made: list[str] = []
+        producer_tool_calls: list[str] = []
+        output_started = asyncio.Event()
         any_audio = False
         llm_t0 = time.monotonic()
         first_token_at: float | None = None
@@ -1007,28 +1058,87 @@ class PipelineConversationHandler:
         items: asyncio.Queue = asyncio.Queue(maxsize=_TURN_QUEUE_MAX)
 
         async def _produce() -> None:
+            """Stream model and voice output until completion or the first-output deadline."""
+            stream = self._llm_to_tts(
+                messages_for_llm, cancel_event, session_id, producer_directives, producer_tool_calls,
+                store=producer_history, caller_text=stt_result.text, first_turn_filler=first_turn_filler,
+            )
+            iterator = stream.__aiter__()
+            pending_read: asyncio.Task[Any] | None = None
+            defer_close = False
+            completed = False
+            deadline = asyncio.get_running_loop().time() + self._llm_response_timeout_s
             try:
-                async for item in self._llm_to_tts(
-                    messages_for_llm, cancel_event, session_id, directives, tool_calls_made,
-                    store=history, caller_text=stt_result.text, first_turn_filler=first_turn_filler,
-                ):
-                    await items.put(item)
+                with response_budget(self._llm_response_timeout_s, output_started):
+                    while True:
+                        pending_read = asyncio.create_task(iterator.__anext__())
+                        if output_started.is_set():
+                            try:
+                                item = await asyncio.shield(pending_read)
+                            except asyncio.CancelledError:
+                                pending_read.cancel()
+                                _defer_stream_close(stream, pending_read)
+                                defer_close = True
+                                raise
+                        else:
+                            remaining = deadline - asyncio.get_running_loop().time()
+                            if remaining <= 0:
+                                pending_read.cancel()
+                                _defer_stream_close(stream, pending_read)
+                                defer_close = True
+                                raise LlmResponseTimeout("LLM response deadline expired")
+                            done, _ = await asyncio.wait({pending_read}, timeout=remaining)
+                            if not done:
+                                pending_read.cancel()
+                                _defer_stream_close(stream, pending_read)
+                                defer_close = True
+                                raise LlmResponseTimeout("LLM response deadline expired")
+                            item = pending_read.result()
+                        if item[1]:
+                            output_started.set()
+                        await items.put(item)
+            except StopAsyncIteration:
+                completed = True
                 await items.put(_STREAM_END)
+            except LlmResponseTimeout as exc:
+                await items.put(exc)
             except asyncio.CancelledError:
+                if pending_read is not None and not pending_read.done() and not defer_close:
+                    pending_read.cancel()
+                    _defer_stream_close(stream, pending_read)
+                    defer_close = True
                 raise
             except Exception as exc:
                 await items.put(exc)
+            finally:
+                if not completed and not defer_close:
+                    close_task = asyncio.create_task(stream.aclose())
+                    done, _ = await asyncio.wait({close_task}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
+                    if not done:
+                        close_task.cancel()
+                        close_task.add_done_callback(_consume_async_task)
+                    else:
+                        _consume_async_task(close_task)
 
         producer = asyncio.create_task(_produce())
+        stream_completed = False
+        stream_timed_out = False
         try:
             while True:
                 item = await items.get()
                 if item is _STREAM_END:
+                    stream_completed = True
                     break
                 if isinstance(item, Exception):
-                    log.error("LLM/TTS pipeline failed session=%s", session_id, exc_info=item)
+                    if isinstance(item, LlmResponseTimeout):
+                        stream_timed_out = True
+                    else:
+                        log.error("LLM/TTS pipeline failed session=%s", session_id, exc_info=item)
                     break
                 chunk, tts_audio, _marker_seen = item
+                if chunk is _LLM_TIMEOUT_MARKER:
+                    full_response.clear()
+                    continue
                 now = time.monotonic()
                 if first_token_at is None:
                     first_token_at = now
@@ -1036,16 +1146,32 @@ class PipelineConversationHandler:
                 if tts_audio:
                     if first_audio_at is None:
                         first_audio_at = now   # a filler is the first thing the caller hears, so it counts here
+                        output_started.set()
                     if not isinstance(chunk, _FillerText):
                         any_audio = True
                     yield HandlerResponse(tts_payloads=[tts_audio])
                 if cancel_event.is_set():
                     break
         finally:
-            # Stop the model/voice task without awaiting it: awaiting here could swallow a cancellation aimed
-            # at this turn itself. The callback reads its outcome so nothing is logged as never retrieved.
-            producer.cancel()
+            if not producer.done():
+                producer.cancel()
             producer.add_done_callback(lambda task: task.cancelled() or task.exception())
+            await asyncio.wait({producer}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
+        history.extend(producer_history[producer_history_start:])
+        if stream_completed:
+            directives.extend(producer_directives)
+            tool_calls_made.extend(producer_tool_calls)
+        elif stream_timed_out:
+            full_response.clear()
+            directives.clear()
+            tool_calls_made.clear()
+            fallback_text = t("fallback_llm_error", self._spoken_language(session_id))
+            full_response.append(fallback_text)
+            async for chunk in self._synthesize_sentence_stream(fallback_text, session_id):
+                if first_audio_at is None:
+                    first_audio_at = time.monotonic()
+                    any_audio = True
+                yield HandlerResponse(tts_payloads=[chunk])
         # Read after the stream: the guard may have removed a marker yielded mid-stream.
         end_call = any(isinstance(d, EndCallDirective) for d in directives)
 
@@ -1620,8 +1746,19 @@ class PipelineConversationHandler:
                             async for chunk in self._synthesize_sentence_stream(clause, session_id):
                                 yield "", chunk, end_call
                             break
-        except Exception:
-            log.exception("LLM streaming failed session=%s", session_id)
+        except Exception as exc:
+            if isinstance(exc, LlmResponseTimeout):
+                log.warning("LLM response deadline expired before first output session=%s", session_id)
+                text_buffer = ""
+                reply_text = ""
+                transition_text = ""
+                stream_buf = StreamBuffer()
+                directives.clear()
+                spoke = False
+                first_piece_sent = False
+                yield _LLM_TIMEOUT_MARKER, b"", False
+            else:
+                log.exception("LLM streaming failed session=%s", session_id)
             if not cancel_event.is_set():
                 spoke = True
                 fallback_text = t("fallback_llm_error", self._spoken_language(session_id))

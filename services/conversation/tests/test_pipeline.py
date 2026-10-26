@@ -45,6 +45,7 @@ _TOOL_CALL_FILLERS = {t for t, _ in _TOOL_FILLERS}
 _FIRST_TURN_PHRASES = {t for t, _ in _FIRST_TURN_FILLERS}
 from ..provider_bundle import ProviderBundle
 from ..tool_latency import _MIN_SAMPLES, ToolLatencyStore
+from ..providers.llm.retry import RetryOnceLLM
 from ..providers.interfaces import ChatMessage, SttResult
 from ..session import CallFsmState, ConversationSession, HandlerResponse, SessionContext
 from ..event_bus import (
@@ -141,6 +142,7 @@ def _make_handler(
     tool_orchestrator=None, max_call_duration_s: int | None = None,
     sentiment_analysis_enabled: bool = False,
     has_booking_tool: bool = False,
+    llm_timeout_ms: int | None = None,
     workflow: dict | None = None, node_tools: list[str] | None = None,
     node_knowledge: list[str] | None = None, transcripts=None,
     agent_language: str | None = None, language_mode: str | None = None, stt_language: str | None = None,
@@ -191,7 +193,7 @@ def _make_handler(
         ),
         policies=Policies(
             vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
-            silence_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None,
+            silence_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=llm_timeout_ms,
             goodbye_grace_ms=goodbye_grace_ms,
             transfer_type=transfer_type, transfer_destination=transfer_destination,
             escalation_threshold=escalation_threshold,
@@ -3691,3 +3693,104 @@ def test_the_booking_prompt_and_transfer_caller_id_use_the_customers_number(dire
     # The prompt spells the number out digit by digit for the voice.
     assert " ".join(customer) in handler._prompt_suffix and " ".join(own) not in handler._prompt_suffix
     assert handler._decision_context("s1").caller_number == customer
+
+@pytest.mark.asyncio
+async def test_retry_then_hang_times_out_before_first_output_and_records_only_fallback():
+    """A failed first attempt and stalled retry produce only the fallback."""
+    cancelled = asyncio.Event()
+
+    class _RetryThenHang:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, _messages):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(0.01)
+                raise TimeoutError("simulated provider read timeout")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            yield "late answer"
+
+    provider = _RetryThenHang()
+    handler = _make_handler(
+        _make_stt("hello"), RetryOnceLLM(provider, name="test"), _make_tts(b"\x00" * 640),
+        llm_timeout_ms=160,
+    )
+    handler._session("s1").first_turn_filler_spoken = True
+    started = asyncio.get_running_loop().time()
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    elapsed = asyncio.get_running_loop().time() - started
+    fallback = t("fallback_llm_error", "en")
+    assert provider.calls == 2
+    assert cancelled.is_set()
+    assert elapsed < 0.5
+    assert [r.response_text for r in responses if r.response_text] == [fallback]
+    assert handler._get_history("s1")[-1].content == fallback
+
+
+@pytest.mark.asyncio
+async def test_partial_tokens_are_discarded_and_cancellation_resistant_stream_does_not_delay_fallback():
+    """Discard pre-output tokens without awaiting cancellation-resistant teardown."""
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    class _PartialThenResistsCancellation:
+        async def generate(self, _messages):
+            yield "This is a partial answer"
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+            yield " that must not be recorded."
+
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(
+        _make_stt("hello"), RetryOnceLLM(_PartialThenResistsCancellation(), name="test"), tts,
+        llm_timeout_ms=160,
+    )
+    handler._session("s1").first_turn_filler_spoken = True
+    started = asyncio.get_running_loop().time()
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    elapsed = asyncio.get_running_loop().time() - started
+    fallback = t("fallback_llm_error", "en")
+    assert elapsed < 0.5
+    assert [r.response_text for r in responses if r.response_text] == [fallback]
+    assert handler._get_history("s1")[-1].content == fallback
+    assert _spoken(tts) == [fallback]
+    await asyncio.wait_for(cancelled.wait(), timeout=0.1)
+    release.set()
+    await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_slow_tool_turn_continues_after_first_filler_output(monkeypatch):
+    """Once a filler reaches the caller, the deadline no longer cuts off a tool."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "1")
+    orchestrator = _PacedToolOrchestrator([
+        ToolCallStartedEvent(tool_name="lookup"), 0.15, ToolTokenEvent(text="The lookup is complete."),
+    ])
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(
+        _make_stt("look that up"), _make_llm(["unused"]), tts,
+        tool_orchestrator=orchestrator, llm_timeout_ms=80,
+    )
+    handler._session("s1").first_turn_filler_spoken = True
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert any(r.tts_payloads for r in responses)
+    assert responses[-1].response_text == "The lookup is complete."
+    assert handler._get_history("s1")[-1].content == "The lookup is complete."
+    assert "The lookup is complete." in _spoken(tts)
