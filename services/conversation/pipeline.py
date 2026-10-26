@@ -1201,6 +1201,10 @@ class PipelineConversationHandler:
             end_call = True
         elif end_call:
             self._workflow.ended_off_graph = True
+        if ended_on_end_node and cancel_event.is_set():
+            # The caller barged in on the goodbye: carry on from the step before the end node,
+            # or the next reply would be followed by a hangup.
+            self._workflow.abandon_end()
 
         # At most one transfer per turn: directive, then workflow, then pending escalation.
         # Computed before end_call, since yielding end_call first would tear the session down.
@@ -1235,6 +1239,9 @@ class PipelineConversationHandler:
                 state = self._session(session_id)
                 transfer_request = state.pending_transfer
                 state.pending_transfer = None
+        elif self._workflow.pending_transfer is not None:
+            # Barge-in on the announcement: the caller interrupted, so the node must not transfer after the next reply.
+            self._workflow.abandon_transfer()
 
         # Not on barge-in (stale decision), a pending transfer, or a fabricated claim
         # (keep the line open for the correction turn).
