@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from services.conversation import rejection
+from services.conversation.agent_resolver import resolve_handler_deps
 
 from services.conversation.generated.voiceai.v1 import conversation_pb2 as pb
 from services.conversation.rejection import REJECTION_MESSAGES, RejectionHandler
@@ -188,3 +189,17 @@ async def test_routed_call_rejected_by_the_factory_still_hangs_up_after_the_mess
     kinds = [m.WhichOneof("payload") for m in out]
     assert kinds[-1] == "end_call"
     assert out[-1].end_call.reason == "routing_unavailable"
+
+
+async def test_unavailable_rejection_carries_no_resolver_error_text():
+    # The agent resolver swallows the failure and returns None; the caller hears only the fixed message.
+    config = AsyncMock()
+    config.get_runtime_config.side_effect = RuntimeError("connect failed host=10.0.0.5 port=5432")
+    assert await resolve_handler_deps("t1", "a1", AsyncMock(), config) is None
+
+    tts = FakeTTS()
+    handler = RejectionHandler(RoutingStatus.UNAVAILABLE, tts, 8000)
+    await handler.greeting("s1")
+
+    assert tts.spoken == [REJECTION_MESSAGES[RoutingStatus.UNAVAILABLE]]
+    assert not any(leak in text for text in tts.spoken for leak in ("10.0.0.5", "5432", "host="))

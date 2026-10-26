@@ -4,6 +4,9 @@ import asyncio
 import os
 import uuid
 
+import asyncpg
+import pytest
+
 os.environ.setdefault("POSTGRES_DSN", "postgresql://satish@localhost:5432/voiceai")
 
 from ..transcript_builder import TranscriptBuilder  # noqa: E402
@@ -167,6 +170,13 @@ async def test_heartbeat_is_noop_without_node_id():
     builder = await TranscriptBuilder.connect(os.environ["POSTGRES_DSN"])  # node_id=None
     await builder.heartbeat()  # must not raise
     await builder.close()
+
+
+async def test_heartbeat_raises_when_pool_is_closed():
+    builder = await TranscriptBuilder.connect(os.environ["POSTGRES_DSN"], node_id=f"test-host:{uuid.uuid4().hex[:8]}")
+    await builder.close()
+    with pytest.raises(asyncpg.InterfaceError):
+        await builder.heartbeat()
 
 
 async def test_reconcile_dead_nodes_closes_calls_for_silent_node():
