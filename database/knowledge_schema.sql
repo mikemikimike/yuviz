@@ -61,6 +61,9 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- Uploaded file size; NULL for documents uploaded before it was recorded.
 ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS byte_size BIGINT;
 
+-- The live document this upload replaces; the quota allows one pending replacement per tenant over its limits.
+ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS replaces_id UUID REFERENCES kb_documents(id) ON DELETE SET NULL;
+
 CREATE INDEX IF NOT EXISTS idx_kb_documents_kb ON kb_documents(kb_id);
 CREATE INDEX IF NOT EXISTS idx_kb_documents_tenant ON kb_documents(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_kb_documents_status ON kb_documents(status);

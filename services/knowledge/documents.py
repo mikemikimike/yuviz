@@ -78,9 +78,9 @@ async def upload_document(
             raise LookupError(f"kb_document {replaces} not found")
         await quotas.check_upload(conn, tenant_id, len(content), replaces=replaces)
         row = await conn.fetchrow(
-            "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type, language, tags, byte_size) "
-            "VALUES ($1, $2, $3, '', $4, $5, $6::jsonb, $7) RETURNING *",
-            kb_id, tenant_id, title, content_type, language, json.dumps(tags or {}), len(content),
+            "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type, language, tags, byte_size, "
+            "replaces_id) VALUES ($1, $2, $3, '', $4, $5, $6::jsonb, $7, $8) RETURNING *",
+            kb_id, tenant_id, title, content_type, language, json.dumps(tags or {}), len(content), replaces,
         )
         document = dict(row)
 

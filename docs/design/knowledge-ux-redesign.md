@@ -102,7 +102,7 @@ Concurrency: searches are read-only and the plan is per agent, so agents sharing
 - New nullable tenant columns `knowledge_max_documents INT` and `knowledge_max_storage_bytes BIGINT`, with CHECK constraints for positive values. NULL means the platform default from `KNOWLEDGE_DEFAULT_MAX_DOCUMENTS` and `KNOWLEDGE_DEFAULT_MAX_STORAGE_BYTES`.
 - Only a superadmin can change them, through the config service tenant route, as with `number_purchase_enabled`.
 - Enforcement is in the upload transaction, under `pg_advisory_xact_lock` keyed on the tenant, so two parallel uploads cannot both pass the last slot. Errors: 409 "file limit reached (N of N)" and 413 "storage full". Per-file size stays `KNOWLEDGE_MAX_UPLOAD_BYTES`.
-- Replace must not count the file twice, and must not drop the document from agents. The upload route takes an optional `replaces` document id: the check leaves that document out, and the new document is linked to the same agents in the upload transaction. The admin UI's replace flow (upload, wait until ready, delete the original) passes it.
+- Replace must not count the file twice, and must not drop the document from agents. The upload route takes an optional `replaces` document id, stored on the new row as `replaces_id`: a replacement may exceed the limits (the new file no larger than the original) as long as no other replacement is pending, i.e. no live document whose `replaces_id` original is still live, so the overage is at most one document. The new document is linked to the same agents in the upload transaction. The admin UI's replace flow (upload, wait until ready, delete the original) passes it.
 - Documents uploaded before `byte_size` existed count as 0 bytes until the one-off backfill `scripts/backfill_kb_byte_size.py` reads their stored size.
 
 ### 5. Prompt mode
@@ -143,7 +143,7 @@ The UI keeps its input bounds (`top_k` 1 to 50, `max_tokens` at least 100). The 
 - Retrieval scope: an agent finds only linked documents; two agents sharing a folder see different results; the lexical cache does not leak across scopes; a narrow scope in a large folder still returns `top_k` matches.
 - Plan invalidation: removing a link stops answers from that document within the same process at once and within the TTL elsewhere.
 - Reindex: a ready document re-queues, a running job returns 409, readers keep answering during the swap.
-- Quotas: parallel uploads at the last slot admit one; replace counts the net change; a superadmin can change limits and an admin cannot.
+- Quotas: parallel uploads at the last slot admit one; a replacement may exceed the limits only while no other is pending; a superadmin can change limits and an admin cannot.
 - Text view: ordering, parent and child fallback, truncation.
 - UI: page-level Save with partial-failure message, chip add and remove, row actions, detail panel.
 

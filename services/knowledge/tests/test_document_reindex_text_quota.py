@@ -311,10 +311,40 @@ async def test_a_tenant_over_its_limits_can_still_replace_a_file(client, pool, t
     await _limit(pool, test_tenant, documents=1, storage=15)
 
     same_size = await _upload(client, kb, test_admin, "a-v2.txt", body=b"abcdefghij", replaces=original["id"])
+    pending = await _live_documents(pool, test_tenant)
+    # The console deletes the original once the replacement is ready.
+    await client.delete(f"/documents/{original['id']}", headers=_auth(test_admin))
     bigger = await _upload(client, kb, test_admin, "a-v3.txt", body=b"abcdefghijk", replaces=same_size.json()["id"])
 
-    assert same_size.status_code == 201
+    assert same_size.status_code == 201 and pending == 4
     assert bigger.status_code == 413  # growing storage past the limit is still refused
+    assert await _live_documents(pool, test_tenant) == 3
+
+
+async def _live_documents(pool, tenant) -> int:
+    return await pool.fetchval(
+        "SELECT count(*) FROM kb_documents WHERE tenant_id = $1 AND deleted_at IS NULL", tenant["id"],
+    )
+
+
+async def test_only_one_replacement_may_be_pending_while_over_the_limit(client, pool, test_tenant, test_admin):
+    kb = await _kb(test_tenant)
+    a = (await _upload(client, kb, test_admin, "a.txt")).json()
+    b = (await _upload(client, kb, test_admin, "b.txt")).json()
+    await _limit(pool, test_tenant, documents=1)
+
+    first = await _upload(client, kb, test_admin, "a-v2.txt", replaces=a["id"])
+    same_again = await _upload(client, kb, test_admin, "a-v3.txt", replaces=a["id"])
+    other = await _upload(client, kb, test_admin, "b-v2.txt", replaces=b["id"])
+    chained = await _upload(client, kb, test_admin, "a-v2-v2.txt", replaces=first.json()["id"])
+    live_while_pending = await _live_documents(pool, test_tenant)
+    await client.delete(f"/documents/{a['id']}", headers=_auth(test_admin))  # the first replacement completes
+    after = await _upload(client, kb, test_admin, "b-v2.txt", replaces=b["id"])
+
+    assert first.status_code == 201
+    assert same_again.status_code == other.status_code == chained.status_code == 409
+    assert live_while_pending == 3
+    assert after.status_code == 201
 
 
 async def test_concurrent_saves_of_an_agents_documents_leave_one_set_not_the_union(pool, test_tenant):
