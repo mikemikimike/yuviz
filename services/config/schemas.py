@@ -59,6 +59,8 @@ class TenantUpdate(BaseModel):
     # None means unset; this route can't clear the cap to NULL.
     max_concurrent_calls:  int | None = Field(default=None, ge=1, le=10_000)
     number_purchase_enabled: bool | None = None
+    knowledge_max_documents:     int | None = Field(default=None, ge=1, le=100_000)
+    knowledge_max_storage_bytes: int | None = Field(default=None, ge=1, le=10**12)
 
 
 class TenantConcurrencyUpdate(BaseModel):
@@ -262,8 +264,9 @@ class WorkflowPublish(BaseModel):
 
 
 class VoicePreview(BaseModel):
-    """Text to speak in a provider_config's voice."""
+    """Text to speak in a provider_config's voice, or in `voice_id` (one of that account's voices) when given."""
     text: str = Field(min_length=1, max_length=600)
+    voice_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class CallFlowCreate(BaseModel):

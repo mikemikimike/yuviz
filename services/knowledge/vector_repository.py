@@ -5,6 +5,7 @@ Parents (is_parent), prompt-mode, deleted and not-ready documents never appear; 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -54,6 +55,8 @@ class IVectorRepository(Protocol):
         minimum_score: float,
         model: str | None = None,
         notes: list[str] | None = None,
+        *,
+        document_ids: list[str] | None = None,
     ) -> list[VectorMatch]: ...
 
     async def lexical_search(
@@ -65,6 +68,8 @@ class IVectorRepository(Protocol):
         minimum_score: float,
         approx_chunks: int | None = None,
         notes: list[str] | None = None,
+        *,
+        document_ids: list[str] | None = None,
     ) -> list[VectorMatch]: ...
 
 
@@ -118,6 +123,7 @@ _DF_SQL = """
     SELECT t AS term, (SELECT count(*) FROM (
         SELECT 1 FROM kb_chunks c
         WHERE c.kb_id = ANY($2::uuid[]) AND NOT c.is_parent AND c.tsv @@ to_tsquery('simple', quote_literal(t))
+          AND ($4::uuid[] IS NULL OR c.document_id = ANY($4::uuid[]))
         LIMIT $3) capped) AS df
     FROM unnest($1::text[]) AS t
 """
@@ -141,6 +147,7 @@ _DENSE_SQL = f"""
     SELECT {_SELECT_COLUMNS}, 1 - (c.embedding <=> $1::vector) AS score
     FROM kb_chunks c {_DOC_JOINS}
     WHERE c.kb_id = ANY($2::uuid[]) AND c.embedding IS NOT NULL AND NOT c.is_parent
+      AND ($7::uuid[] IS NULL OR c.document_id = ANY($7::uuid[]))
       AND (c.embedding <=> $1::vector) <= 1 - $5::float8  -- distance form: a zero vector gives NaN, which must not pass
       -- Only vectors made by the model the query was embedded with (legacy rows with no model still count): a plan
       -- that outlived a re-embed swap must not compare an old-model query with new-model vectors.
@@ -155,6 +162,7 @@ _LEXICAL_SQL = f"""
         SELECT c.id, ts_rank_cd(c.tsv, q.tsq, 32) AS score
         FROM kb_chunks c, q
         WHERE c.kb_id = ANY($2::uuid[]) AND NOT c.is_parent AND c.tsv @@ q.tsq
+          AND ($6::uuid[] IS NULL OR c.document_id = ANY($6::uuid[]))
     )
     SELECT {_SELECT_COLUMNS}, h.score
     FROM hits h
@@ -177,6 +185,7 @@ _LEXICAL_CAPPED_SQL = f"""
                             AND dd.status = ANY($4::text[]),
              q
         WHERE c.kb_id = ANY($2::uuid[]) AND NOT c.is_parent AND c.tsv @@ q.tsq
+          AND ($7::uuid[] IS NULL OR c.document_id = ANY($7::uuid[]))
         LIMIT $6
     )
     SELECT {_SELECT_COLUMNS}, h.score
@@ -250,10 +259,12 @@ class PgVectorRepository:
             await conn.execute("SELECT set_config('hnsw.ef_search', $1, true)", str(_HNSW_FALLBACK_EF_SEARCH))
 
     async def _discriminating_terms(
-        self, conn: asyncpg.Connection, kb_ids: list[str], terms: list[str],
+        self, conn: asyncpg.Connection, kb_ids: list[str], terms: list[str], document_ids: list[str] | None = None,
     ) -> tuple[list[str], bool, int]:
         """(terms to search, True if they must be ANDed over a capped candidate set, how many were dropped)."""
         scope = ",".join(sorted(kb_ids))  # KB UUIDs: the key is tenant-scoped
+        if document_ids is not None:  # two agents on the same KBs but different documents must not share counts
+            scope += ":" + hashlib.sha256(",".join(sorted(document_ids)).encode()).hexdigest()[:32]
         known: dict[str, int] = {}
         unknown: list[str] = []
         for term in terms:
@@ -266,7 +277,7 @@ class PgVectorRepository:
             else:
                 known[term] = df
         if unknown:  # one statement for all unseen terms; later queries hit the caches
-            rows = await conn.fetch(_DF_SQL, unknown, kb_ids, _MAX_TERM_DF)
+            rows = await conn.fetch(_DF_SQL, unknown, kb_ids, _MAX_TERM_DF, document_ids)
             for row in rows:
                 known[row["term"]] = row["df"]
                 (self._df if row["df"] > 0 else self._df_absent).set(f"df:{scope}:{row['term']}", row["df"])
@@ -295,13 +306,16 @@ class PgVectorRepository:
         minimum_score: float,
         model: str | None = None,
         notes: list[str] | None = None,
+        *,
+        document_ids: list[str] | None = None,
     ) -> list[VectorMatch]:
-        if not kb_ids:
+        """document_ids None searches every document of kb_ids; a list limits the search to those documents."""
+        if not kb_ids or document_ids == []:
             return []
         await self._prepare_hnsw(conn)
         vector_literal = "[" + ",".join(repr(float(x)) for x in embedding) + "]"
         rows = await conn.fetch(
-            _DENSE_SQL, vector_literal, kb_ids, top_k, SEARCHABLE_STATUSES, minimum_score, model,
+            _DENSE_SQL, vector_literal, kb_ids, top_k, SEARCHABLE_STATUSES, minimum_score, model, document_ids,
         )
         if not rows and model is not None and notes is not None:
             # Nothing came back: either nothing matched, or every chunk was excluded because the KB moved to
@@ -325,12 +339,16 @@ class PgVectorRepository:
         minimum_score: float,
         approx_chunks: int | None = None,
         notes: list[str] | None = None,
+        *,
+        document_ids: list[str] | None = None,
     ) -> list[VectorMatch]:
+        if document_ids == []:
+            return []
         terms = query_terms(query)
         capped_and = False
         dropped = 0
         if kb_ids and terms and (approx_chunks is None or approx_chunks > _SMALL_KB_CHUNKS):
-            terms, capped_and, dropped = await self._discriminating_terms(conn, kb_ids, terms)
+            terms, capped_and, dropped = await self._discriminating_terms(conn, kb_ids, terms, document_ids)
         if (dropped or capped_and) and notes is not None:  # the fallback itself is a degradation, even with 1-2 terms
             notes.append("lexical_terms_dropped")
         tsquery = tsquery_from_terms(terms, " & " if capped_and else " | ")
@@ -338,7 +356,8 @@ class PgVectorRepository:
             return []
         if capped_and:
             rows = await conn.fetch(_LEXICAL_CAPPED_SQL, tsquery, kb_ids, limit, SEARCHABLE_STATUSES, minimum_score,
-                                    _FALLBACK_CANDIDATES)
+                                    _FALLBACK_CANDIDATES, document_ids)
         else:
-            rows = await conn.fetch(_LEXICAL_SQL, tsquery, kb_ids, limit, SEARCHABLE_STATUSES, minimum_score)
+            rows = await conn.fetch(_LEXICAL_SQL, tsquery, kb_ids, limit, SEARCHABLE_STATUSES, minimum_score,
+                                    document_ids)
         return [_to_match(row, "lexical") for row in rows]

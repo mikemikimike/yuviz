@@ -26,7 +26,7 @@ import "@xyflow/react/dist/style.css";
 
 import { TestAgentPanel } from "@/components/TestAgentPanel";
 import { ApiError, listAgentToolPolicies } from "@/lib/api";
-import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
+import { listAgentDocuments } from "@/lib/knowledgeApi";
 import {
   getWorkflow,
   publishErrors,
@@ -142,7 +142,7 @@ function Panel({
   const [versionKey, setVersionKey] = useState(0);
   const [showHistory, setShowHistory] = useState(false);
   const [agentTools, setAgentTools] = useState<string[]>([]);
-  const [knowledgeBases, setKnowledgeBases] = useState<{ id: string; name: string }[]>([]);
+  const [documentCount, setDocumentCount] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
   // Server rejects a second global; UI mirrors that.
   const hasGlobal = nodes.some((n) => n.type === "global");
@@ -179,12 +179,12 @@ function Panel({
     Promise.all([
       getWorkflow(tenantSlug, agentId),
       listAgentToolPolicies(agentId).catch(() => []),
-      listAgentKnowledgeBases(agentId).catch(() => []),
+      listAgentDocuments(agentId).catch(() => []),
     ])
-      .then(([state, policies, kbs]) => {
+      .then(([state, policies, docs]) => {
         applyWorkflowState(state);
         setAgentTools(policies.filter((p) => p.enabled).map((p) => p.tool_name));
-        setKnowledgeBases(kbs.map((kb) => ({ id: kb.kb_id, name: kb.kb_name })));
+        setDocumentCount(docs.length);
         setShowHelp(!state.workflow && !state.workflow_draft);
         loaded.current = true;
       })
@@ -716,7 +716,7 @@ function Panel({
               <Inspector
                 selection={selection}
                 agentTools={agentTools}
-                knowledgeBases={knowledgeBases}
+                documentCount={documentCount}
                 errors={errors}
                 warnings={warnings}
                 availableVariables={availableVariables}

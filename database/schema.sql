@@ -1370,6 +1370,14 @@ ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_max_concurrent_calls_check
 ALTER TABLE tenants ADD  CONSTRAINT tenants_max_concurrent_calls_check
     CHECK (max_concurrent_calls IS NULL OR max_concurrent_calls >= 1);
 
+-- Knowledge quotas; NULL = KNOWLEDGE_DEFAULT_MAX_DOCUMENTS / KNOWLEDGE_DEFAULT_MAX_STORAGE_BYTES.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS knowledge_max_documents INT;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS knowledge_max_storage_bytes BIGINT;
+ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_knowledge_limits_check;
+ALTER TABLE tenants ADD  CONSTRAINT tenants_knowledge_limits_check
+    CHECK ((knowledge_max_documents IS NULL OR knowledge_max_documents >= 1)
+       AND (knowledge_max_storage_bytes IS NULL OR knowledge_max_storage_bytes >= 1));
+
 -- Mid-call stage. NULL = never transferred; readers COALESCE to 'ai'.
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS live_stage TEXT;
 ALTER TABLE calls DROP CONSTRAINT IF EXISTS calls_live_stage_check;

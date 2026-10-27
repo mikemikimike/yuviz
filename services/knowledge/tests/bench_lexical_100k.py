@@ -55,7 +55,7 @@ async def main() -> None:
         for _ in range(7):
             async with pool.acquire() as c, c.transaction():
                 t = time.perf_counter()
-                await c.fetch(vr._LEXICAL_SQL, vr.build_tsquery(q), [KB], 15, vr.SEARCHABLE_STATUSES, 0.05)
+                await c.fetch(vr._LEXICAL_SQL, vr.build_tsquery(q), [KB], 15, vr.SEARCHABLE_STATUSES, 0.05, None)
                 before.append((time.perf_counter() - t) * 1000)
         repo = vr.PgVectorRepository()
         after = []

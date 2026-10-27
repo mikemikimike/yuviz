@@ -35,6 +35,7 @@ def small_bomb_limit(monkeypatch):
 async def test_every_corpus_file_ends_in_a_defined_state(tenant_agent, pool, small_bomb_limit, monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path))  # no OCR engine: scanned pages must degrade, not hang
     tenant, _ = tenant_agent
+    await pool.execute("UPDATE tenants SET knowledge_max_documents = 1000 WHERE id = $1", tenant["id"])  # past the default
     kb = await _make_kb(tenant, "chaos-kb")
     results = {}
     for name, f in CORPUS.items():
@@ -68,6 +69,23 @@ async def test_parser_metadata_is_stored_and_prompt_injection_is_just_content(te
     assert row["status"] == "ready"  # content is data: indexed verbatim, never acted on at ingestion
     chunks = await pool.fetch("SELECT content FROM kb_chunks WHERE document_id = $1", row["id"])
     assert any("Ignore previous instructions" in c["content"] for c in chunks)
+    await _purge_tenant(pool, tenant["id"])
+
+
+async def test_the_text_view_shows_the_extracted_text_with_its_line_breaks(tenant_agent, pool):
+    from libs.tenancy import set_caller_tenant
+    tenant, _ = tenant_agent
+    kb = await _make_kb(tenant, "text-kb")
+    body = "# Hours\n\nOpen 9 to 5.\nClosed Sundays.\n\n# Refunds\n\nWithin thirty days." * 40
+    doc = await _upload(tenant, kb, "hours", content=body.encode(), content_type="text/markdown")
+    job = dict(await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
+    await process_one_job(pool, LocalStorageProvider(), _manager(_FakeProvider()), job)
+    set_caller_tenant(str(tenant["id"]))
+
+    text = await documents_service.get_document_text(doc["id"])
+
+    assert text["source"] == "extracted" and text["truncated"] is False
+    assert "Open 9 to 5.\nClosed Sundays." in text["text"]
     await _purge_tenant(pool, tenant["id"])
 
 

@@ -1,26 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Check, FolderOpen, Upload } from "lucide-react";
+import { Check, X } from "lucide-react";
 import { ApiError } from "@/lib/api";
 import {
-  AgentKnowledgeBase,
-  assignKnowledgeBase,
-  createKnowledgeBase,
-  deleteKnowledgeBase,
   getRetrievalPolicy,
   KbDocument,
-  KnowledgeBase,
-  listAgentKnowledgeBases,
+  listAgentDocuments,
   listDocuments,
   listKnowledgeBases,
-  setKnowledgeBaseEnabled,
+  replaceAgentDocuments,
   setRetrievalPolicy,
-  uploadDocument,
 } from "@/lib/knowledgeApi";
 import { FILE_STATUS } from "@/lib/knowledgePresentation";
-import { ACCEPTED_DOC_ACCEPT, rejectionReasonFor } from "@/components/AddSourceModal";
 
 interface PolicyForm {
   top_k: number;
@@ -29,293 +22,289 @@ interface PolicyForm {
   include_citations: boolean;
 }
 
-const DEFAULT_POLICY: PolicyForm = { top_k: 5, minimum_score: 0, max_tokens: 1000, include_citations: true };
-const POLL_MS = 4000;
+// The server's system defaults (services/knowledge/retrieval_plan.py), shown when the agent has no row of its own.
+const DEFAULT_POLICY: PolicyForm = { top_k: 5, minimum_score: 0.3, max_tokens: 1000, include_citations: true };
 
-function slugFor(fileName: string): string {
-  const base = fileName.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return `${base || "doc"}-${Math.random().toString(36).slice(2, 7)}`;
-}
+const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((id) => b.includes(id));
+const samePolicy = (a: PolicyForm, b: PolicyForm) =>
+  a.top_k === b.top_k && a.minimum_score === b.minimum_score && a.max_tokens === b.max_tokens
+  && a.include_citations === b.include_citations;
 
-// Agent-scoped picker: folders in the account with an on/off switch for this agent.
+// The agent's knowledge: which of the account's documents it answers from, and how it searches them.
 export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; agentId: string }) {
-  const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
-  const [assignments, setAssignments] = useState<AgentKnowledgeBase[]>([]);
-  const [docsByKb, setDocsByKb] = useState<Record<string, KbDocument[]>>({});
-  const [error, setError] = useState<string | null>(null);
+  const [documents, setDocuments] = useState<KbDocument[]>([]);
+  const [savedIds, setSavedIds] = useState<string[]>([]);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [savedPolicy, setSavedPolicy] = useState<PolicyForm>(DEFAULT_POLICY);
+  const [policy, setPolicy] = useState<PolicyForm>(DEFAULT_POLICY);
   const [loading, setLoading] = useState(true);
-  const [busyKb, setBusyKb] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const fileInput = useRef<HTMLInputElement>(null);
-
-  const [policyForm, setPolicyForm] = useState<PolicyForm>(DEFAULT_POLICY);
-  const [policySaving, setPolicySaving] = useState(false);
-  const [policySaved, setPolicySaved] = useState(false);
-
-  const refresh = async () => {
-    const [kbRes, assignRes] = await Promise.allSettled([listKnowledgeBases(tenantId), listAgentKnowledgeBases(agentId)]);
-    const nextKbs = kbRes.status === "fulfilled" ? kbRes.value : [];
-    const nextAssigns = assignRes.status === "fulfilled" ? assignRes.value : [];
-    const failed = [kbRes, assignRes].find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
-    setError(failed ? (failed.reason instanceof ApiError ? failed.reason.detail : String(failed.reason)) : null);
-
-    const ids = [...new Set([...nextKbs.map((kb) => kb.id), ...nextAssigns.map((a) => a.kb_id)])];
-    const docResults = await Promise.allSettled(ids.map((id) => listDocuments(id)));
-    setKbs(nextKbs);
-    setAssignments(nextAssigns);
-    setDocsByKb(Object.fromEntries(ids.map((id, i) => [id, docResults[i].status === "fulfilled" ? (docResults[i] as PromiseFulfilledResult<KbDocument[]>).value : []])));
-    setLoading(false);
-  };
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const pickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    refresh();
-    getRetrievalPolicy(agentId)
-      .then((p) =>
-        setPolicyForm({
-          top_k: p.top_k ?? DEFAULT_POLICY.top_k,
-          minimum_score: p.minimum_score ?? DEFAULT_POLICY.minimum_score,
-          max_tokens: p.max_tokens ?? DEFAULT_POLICY.max_tokens,
-          include_citations: p.include_citations ?? DEFAULT_POLICY.include_citations,
-        }),
-      )
-      .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const [kbs, linked, current] = await Promise.all([
+          listKnowledgeBases(tenantId),
+          listAgentDocuments(agentId),
+          getRetrievalPolicy(agentId).catch(() => null),
+        ]);
+        const perKb = await Promise.all(kbs.map((kb) => listDocuments(kb.id)));
+        if (cancelled) return;
+        const ids = linked.map((d) => d.document_id);
+        const loadedPolicy: PolicyForm = {
+          top_k: current?.top_k ?? DEFAULT_POLICY.top_k,
+          minimum_score: current?.minimum_score ?? DEFAULT_POLICY.minimum_score,
+          max_tokens: current?.max_tokens ?? DEFAULT_POLICY.max_tokens,
+          include_citations: current?.include_citations ?? DEFAULT_POLICY.include_citations,
+        };
+        setDocuments(perKb.flat().sort((a, b) => a.title.localeCompare(b.title)));
+        setSavedIds(ids);
+        setSelectedIds(ids);
+        setSavedPolicy(loadedPolicy);
+        setPolicy(loadedPolicy);
+        setError(null);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof ApiError ? e.detail : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [tenantId, agentId]);
 
-  // One request per KB adds up fast (upload makes a KB per file), so the poll only re-reads unfinished ones.
-  const processingKbIds = Object.entries(docsByKb)
-    .filter(([, docs]) => docs.some((d) => d.status === "pending" || d.status === "processing"))
-    .map(([id]) => id);
   useEffect(() => {
-    if (processingKbIds.length === 0) return;
-    const t = setTimeout(async () => {
-      const results = await Promise.allSettled(processingKbIds.map((id) => listDocuments(id)));
-      setDocsByKb((prev) => {
-        const next = { ...prev };
-        results.forEach((r, i) => {
-          if (r.status === "fulfilled") next[processingKbIds[i]] = r.value;
-        });
-        return next;
-      });
-    }, POLL_MS);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docsByKb]);
+    if (!pickerOpen) return;
+    const close = (e: MouseEvent) => {
+      if (!pickerRef.current?.contains(e.target as Node)) setPickerOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [pickerOpen]);
 
-  const assignmentByKb = new Map(assignments.map((a) => [a.kb_id, a]));
+  const byId = useMemo(() => new Map(documents.map((d) => [d.id, d])), [documents]);
+  const selected = selectedIds.map((id) => byId.get(id)).filter((d): d is KbDocument => !!d);
+  const choices = documents.filter(
+    (d) => !selectedIds.includes(d.id) && d.title.toLowerCase().includes(query.trim().toLowerCase()),
+  );
+  const dirty = !sameSet(selectedIds, savedIds) || !samePolicy(policy, savedPolicy);
 
-  const handleToggle = async (kbId: string, on: boolean) => {
-    setBusyKb(kbId);
-    try {
-      if (assignmentByKb.has(kbId)) await setKnowledgeBaseEnabled(agentId, kbId, on);
-      else if (on) await assignKnowledgeBase(agentId, kbId);
-      await refresh();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
-    } finally {
-      setBusyKb(null);
-    }
+  const add = (id: string) => {
+    setSelectedIds((ids) => [...ids, id]);
+    setQuery("");
   };
+  const remove = (id: string) => setSelectedIds((ids) => ids.filter((x) => x !== id));
 
-  const handleUpload = async (file: File | null) => {
-    if (!file) return;
-    const reason = rejectionReasonFor(file);
-    if (reason) {
-      setError(reason);
-      return;
-    }
-    setUploading(true);
+  const cancel = () => {
+    setSelectedIds(savedIds);
+    setPolicy(savedPolicy);
     setError(null);
-    // The new knowledge base is rolled back if the upload fails, so no empty one is left behind.
-    let createdKbId: string | null = null;
-    try {
-      const kb = await createKnowledgeBase(tenantId, { slug: slugFor(file.name), name: file.name.replace(/\.[^.]+$/, "") });
-      createdKbId = kb.id;
-      await uploadDocument(kb.id, file, file.name);
-      createdKbId = null;
-      await assignKnowledgeBase(agentId, kb.id);
-      await refresh();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
-      if (createdKbId) await deleteKnowledgeBase(createdKbId).catch(() => {});
-    } finally {
-      setUploading(false);
-      if (fileInput.current) fileInput.current.value = "";
-    }
   };
 
-  const handleSavePolicy = async () => {
-    setPolicySaving(true);
-    setPolicySaved(false);
+  // Two writes: the document set, then the search settings. A failure says which one did not save.
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    let wroteDocuments = false;
     try {
-      await setRetrievalPolicy(agentId, policyForm);
-      setPolicySaved(true);
-      setTimeout(() => setPolicySaved(false), 2000);
+      if (!sameSet(selectedIds, savedIds)) {
+        const linked = await replaceAgentDocuments(agentId, selectedIds);
+        const ids = linked.map((d) => d.document_id);
+        setSavedIds(ids);
+        setSelectedIds(ids);
+        wroteDocuments = true;
+      }
+      if (!samePolicy(policy, savedPolicy)) {
+        await setRetrievalPolicy(agentId, policy);
+        setSavedPolicy(policy);
+      }
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
     } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
+      const detail = e instanceof ApiError ? e.detail : String(e);
+      setError(wroteDocuments
+        ? `Documents saved, but the search settings were not: ${detail}`
+        : `Not saved: ${detail}`);
     } finally {
-      setPolicySaving(false);
+      setSaving(false);
     }
   };
 
   if (loading) return <div className="empty-state">Loading…</div>;
 
-  const kbNames = new Map<string, string>([
-    ...kbs.map((kb) => [kb.id, kb.name] as [string, string]),
-    ...assignments.map((a) => [a.kb_id, a.kb_name] as [string, string]),
-  ]);
-  // Empty, unused knowledge bases are leftovers from failed uploads; nothing to pick there.
-  const rows = [...kbNames.entries()]
-    .map(([id, name]) => ({ id, name, docs: docsByKb[id] || [], on: !!assignmentByKb.get(id)?.enabled }))
-    .filter((r) => r.docs.length > 0 || assignmentByKb.has(r.id))
-    .sort((a, b) => Number(b.on) - Number(a.on) || a.name.localeCompare(b.name));
-  const usedCount = rows.filter((r) => r.on).length;
-
   return (
-    <div className="card knowledge-agent-panel">
-      <div className="card-hdr">
-        <div>
-          <div className="card-title">Folders this agent can use</div>
-          <div className="card-sub" style={{ marginLeft: 0 }}>
-            {rows.length === 0
-              ? "Add a file or turn on a folder for this agent."
-              : `Turn on the folders the agent should answer from. Using ${usedCount} of ${rows.length}.`}
+    <div className="knowledge-agent-panel">
+      {error && <div className="error-banner" role="alert">{error}</div>}
+
+      <section className="card">
+        <div className="card-hdr">
+          <div>
+            <div className="card-title">Documents</div>
+            <div className="card-sub" style={{ marginLeft: 0 }}>
+              Tick the files this agent answers from. Uploads and reindexing happen on the Knowledge page.
+            </div>
           </div>
         </div>
-        <button
-          className="btn btn-primary btn-sm"
-          style={{ marginLeft: "auto" }}
-          disabled={uploading}
-          onClick={() => fileInput.current?.click()}
-        >
-          <Upload size={13} /> {uploading ? "Uploading…" : "Add file"}
-        </button>
-        <input
-          ref={fileInput}
-          type="file"
-          accept={ACCEPTED_DOC_ACCEPT}
-          hidden
-          onChange={(e) => handleUpload(e.target.files?.[0] || null)}
-        />
-      </div>
-
-      {error && <div className="error-banner">{error}</div>}
-
-      {rows.length === 0 ? (
-        <div className="empty-state">
-          No files yet. Upload a price list, FAQ or policy as a text, Markdown, HTML or CSV file (PDF and Office files too, if your administrator has enabled them).
+        <div className="card-body">
+          {documents.length === 0 ? (
+            <div className="empty-state">
+              No files yet. <Link href="/knowledge-bases">Upload one on the Knowledge page</Link>, then pick it here.
+            </div>
+          ) : (
+            <div className="kb-picker" ref={pickerRef}>
+              <div className="kb-chips" onClick={() => setPickerOpen(true)}>
+                {selected.map((d) => (
+                  <span key={d.id} className="kb-chip">
+                    <span className="kb-chip-title">{d.title}</span>
+                    {d.status !== "ready" && (
+                      <span className={`badge ${FILE_STATUS[d.status].color}`}>{FILE_STATUS[d.status].label}</span>
+                    )}
+                    <button
+                      type="button"
+                      className="kb-chip-remove"
+                      aria-label={`Remove ${d.title}`}
+                      onClick={(e) => { e.stopPropagation(); remove(d.id); }}
+                    >
+                      <X size={13} />
+                    </button>
+                  </span>
+                ))}
+                <input
+                  className="kb-chips-input"
+                  placeholder={selected.length ? "" : "Add a document…"}
+                  role="combobox"
+                  aria-label="Add a document"
+                  aria-expanded={pickerOpen}
+                  aria-controls="kb-picker-menu"
+                  value={query}
+                  onFocus={() => setPickerOpen(true)}
+                  onChange={(e) => { setQuery(e.target.value); setPickerOpen(true); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setPickerOpen(false);
+                    if (e.key === "Backspace" && !query && selected.length) remove(selected[selected.length - 1].id);
+                  }}
+                />
+              </div>
+              {pickerOpen && (
+                <div id="kb-picker-menu" className="kb-picker-menu" role="listbox" aria-label="Documents to add">
+                  {choices.length === 0 ? (
+                    <div className="kb-picker-empty">{query ? "No files match." : "Every file is selected."}</div>
+                  ) : (
+                    choices.map((d) => (
+                      <button
+                        key={d.id}
+                        type="button"
+                        role="option"
+                        aria-selected={false}
+                        className="kb-picker-option"
+                        onClick={() => add(d.id)}
+                      >
+                        <span>{d.title}</span>
+                        <span className={`badge ${FILE_STATUS[d.status].color}`}>{FILE_STATUS[d.status].label}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+              <div className="kb-picker-hint">Click a document to add it. Uploads and reindexing happen on the Knowledge page.</div>
+            </div>
+          )}
         </div>
-      ) : (
-        rows.map((row) => {
-          const single = row.docs.length === 1 ? row.docs[0] : null;
-          const statusDoc = row.docs.find((d) => d.status === "failed")
-            ?? row.docs.find((d) => d.status === "pending" || d.status === "processing")
-            ?? row.docs.find((d) => d.status === "ready_degraded")
-            ?? row.docs[0];
-          const status = statusDoc ? FILE_STATUS[statusDoc.status] : null;
-          return (
-            <div key={row.id} className="kb-row">
-              <FolderOpen size={16} style={{ color: "var(--text-3)", flexShrink: 0 }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 500, overflowWrap: "anywhere" }}>{row.name}</div>
-                <div style={{ fontSize: ".7rem", color: "var(--text-3)", display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-                  {status && <span className={`badge ${status.color}`}>{status.label}</span>}
-                  {single?.usage_mode === "prompt" && <span>Read on every call</span>}
-                  {`${row.docs.length} ${row.docs.length === 1 ? "file" : "files"}: ${row.docs.map((d) => d.title).join(", ") || "none yet"}`}
-                </div>
-              </div>
-              <span className={`badge ${row.on ? "green" : "gray"}`}>{row.on ? "On" : "Off"}</span>
-              <label className="toggle-switch" title={row.on ? "The agent uses this" : "The agent ignores this"}>
-                <input
-                  type="checkbox"
-                  aria-label={`Use folder ${row.name}`}
-                  checked={row.on}
-                  disabled={busyKb === row.id}
-                  onChange={(e) => handleToggle(row.id, e.target.checked)}
-                />
-                <span className="toggle-slider" />
-              </label>
-            </div>
-          );
-        })
-      )}
-
-      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {usedCount > 0 && (
-          <details>
-            <summary style={{ cursor: "pointer", fontSize: ".78rem", color: "var(--text-2)" }}>Search settings</summary>
-            <div style={{ marginTop: 12 }}>
-              <div className="form-group">
-                <label className="form-label">
-                  Snippets to read <span className="hint">matching passages checked per question</span>
-                </label>
-                <input
-                  className="form-input"
-                  type="number"
-                  min={1}
-                  max={50}
-                  value={policyForm.top_k}
-                  onChange={(e) => setPolicyForm({ ...policyForm, top_k: Number(e.target.value) })}
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">
-                  Max text to read <span className="hint">per question</span>
-                </label>
-                <input
-                  className="form-input"
-                  type="number"
-                  min={100}
-                  step={100}
-                  value={policyForm.max_tokens}
-                  onChange={(e) => setPolicyForm({ ...policyForm, max_tokens: Number(e.target.value) })}
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">
-                  How close a match must be <span className="hint">stricter means fewer but more relevant snippets</span>
-                </label>
-                <input
-                  className="form-range"
-                  style={{ width: "100%" }}
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={policyForm.minimum_score}
-                  onChange={(e) => setPolicyForm({ ...policyForm, minimum_score: Number(e.target.value) })}
-                />
-                <div className="form-range-row" style={{ justifyContent: "space-between" }}>
-                  <span className="form-range-label">Looser</span>
-                  <span className="form-range-label">Stricter</span>
-                </div>
-              </div>
-              <div className="form-group" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <label className="toggle-switch">
-                  <input
-                    type="checkbox"
-                    checked={policyForm.include_citations}
-                    onChange={(e) => setPolicyForm({ ...policyForm, include_citations: e.target.checked })}
-                  />
-                  <span className="toggle-slider" />
-                </label>
-                <span className="form-label" style={{ margin: 0 }}>
-                  Mention where answers come from
-                </span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                {policySaved && <span className="saved-note">Saved <Check size={13} /></span>}
-                <button className="btn btn-ghost btn-sm" onClick={handleSavePolicy} disabled={policySaving}>
-                  {policySaving ? "Saving…" : "Save"}
-                </button>
-              </div>
-            </div>
-          </details>
+        {documents.length > 0 && (
+          <div className="kb-picker-count">
+            <strong>{selected.length}</strong> of {documents.length} selected
+          </div>
         )}
-        <Link href="/knowledge-bases" style={{ fontSize: ".76rem", color: "var(--cyan)" }}>
-          Manage all files →
-        </Link>
+      </section>
+
+      <section className="card">
+        <div className="card-hdr">
+          <div>
+            <div className="card-title">Search settings</div>
+            <div className="card-sub" style={{ marginLeft: 0 }}>
+              How the agent looks up answers in the documents above. The defaults work for most agents.
+            </div>
+          </div>
+        </div>
+        <div className="card-body knowledge-search-settings">
+          <div className="form-group">
+            <label className="form-label" htmlFor="kb-top-k">
+              Snippets to read <span className="hint">passages checked per question</span>
+            </label>
+            <input
+              id="kb-top-k"
+              className="form-input"
+              type="number"
+              min={1}
+              max={50}
+              value={policy.top_k}
+              onChange={(e) => setPolicy({ ...policy, top_k: Number(e.target.value) })}
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label" htmlFor="kb-max-tokens">
+              Max text to read <span className="hint">per question</span>
+            </label>
+            <input
+              id="kb-max-tokens"
+              className="form-input"
+              type="number"
+              min={100}
+              step={100}
+              value={policy.max_tokens}
+              onChange={(e) => setPolicy({ ...policy, max_tokens: Number(e.target.value) })}
+            />
+          </div>
+          <div className="form-group knowledge-search-wide">
+            <label className="form-label" htmlFor="kb-min-score">
+              How close a match must be <span className="hint">stricter gives fewer, more relevant passages</span>
+            </label>
+            <input
+              id="kb-min-score"
+              className="form-range"
+              style={{ width: "100%" }}
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={policy.minimum_score}
+              onChange={(e) => setPolicy({ ...policy, minimum_score: Number(e.target.value) })}
+            />
+            <div className="form-range-row" style={{ justifyContent: "space-between" }}>
+              <span className="form-range-label">Looser</span>
+              <span className="form-range-label">Stricter</span>
+            </div>
+          </div>
+          <div className="form-group knowledge-search-wide" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                aria-label="Mention where answers come from"
+                checked={policy.include_citations}
+                onChange={(e) => setPolicy({ ...policy, include_citations: e.target.checked })}
+              />
+              <span className="toggle-slider" />
+            </label>
+            <div>
+              <div className="form-label" style={{ margin: 0 }}>Mention where answers come from</div>
+              <div className="hint">The agent can name the source document it used.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div className="knowledge-agent-footer">
+        {saved && <span className="saved-note">Saved <Check size={13} /></span>}
+        <button className="btn btn-ghost btn-sm" disabled={!dirty || saving} onClick={cancel}>Cancel</button>
+        <button className="btn btn-primary btn-sm" disabled={!dirty || saving} onClick={save}>
+          {saving ? "Saving…" : "Save changes"}
+        </button>
       </div>
     </div>
   );

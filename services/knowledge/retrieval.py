@@ -257,7 +257,8 @@ async def _dense_branch(
                 for cid, vector in usable:
                     matches.extend(await vector_repo.search(
                         conn, plan.groups[cid], vector, limit, minimum_score,
-                        model=effective_model(plan.embedding_configs[cid]), notes=dense_notes))
+                        model=effective_model(plan.embedding_configs[cid]), notes=dense_notes,
+                        document_ids=plan.document_ids))
                 if dense_notes:
                     branch.notes = list(dict.fromkeys([*(branch.notes or []), *dense_notes]))
         matches.sort(key=lambda m: m.score, reverse=True)
@@ -287,7 +288,7 @@ async def _lexical_branch(
                 notes: list[str] = []
                 branch.matches = await vector_repo.lexical_search(
                     conn, plan.kb_ids, query, limit, cfg.lexical_min_score, approx_chunks=plan.chunk_count,
-                    notes=notes)
+                    notes=notes, document_ids=plan.document_ids)
                 branch.notes = notes or None
         timings["lexical"] = (time.monotonic() - t0) * 1000
     except (asyncio.CancelledError, TenantScopeConflict):

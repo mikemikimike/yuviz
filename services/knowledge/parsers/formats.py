@@ -1165,11 +1165,13 @@ def _open_pdf(raw: bytes, limits: Limits):
 
 
 def _pdf_pages_to_doc(page_texts: list[str], degraded: bool = False, warnings: list[str] | None = None,
-                      hidden: dict[str, int] | None = None) -> ParsedDocument:
+                      hidden: dict[str, int] | None = None, blank: set[int] | None = None) -> ParsedDocument:
+    """`blank` holds the indexes of pages with nothing on them, left out of the quality gate's page count."""
     blocks = _Blocks()
     for n, text in enumerate(page_texts, start=1):
         blocks.extend(blocks_from_text(text, page=n, guess_headings=True))
-    return ParsedDocument(blocks, detect.PDF, pages=len(page_texts), page_texts=page_texts,
+    gated = [t for i, t in enumerate(page_texts) if i not in (blank or set())]
+    return ParsedDocument(blocks, detect.PDF, pages=len(page_texts), page_texts=gated,
                           degraded=degraded, warnings=warnings or [], hidden_removed=hidden or {})
 
 
@@ -1307,6 +1309,26 @@ def _pdf_page_text(page, hidden: Counter) -> str:
     return full
 
 
+def _pdf_page_blank(page) -> bool:
+    """Nothing to read: no image or form XObject, no inline image, and text operators that show only whitespace
+    (Word writes a lone space on the empty page it can append)."""
+    try:
+        contents = page.get_contents()
+        data = contents.get_data() if contents is not None else b""
+        if len(data) > _LIMITS.pdf_page_bytes:
+            return False
+        for op, args in _scan_pdf_ops(data):
+            if op in (b"Do", b"BI"):
+                return False
+            if op in (b"Tj", b"TJ", b"'", b'"') and any(
+                isinstance(a, bytes) and not a.startswith(b"/") and a.strip() for a in args
+            ):
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _pdf_pypdf(reader, state: dict) -> ParsedDocument:
     if reader is None:
         raise TierSkip
@@ -1316,9 +1338,12 @@ def _pdf_pypdf(reader, state: dict) -> ParsedDocument:
     stopped_at: int | None = None
     pages = list(reader.pages)
     _PDF_STATE["t0"] = time.monotonic()
+    blank: set[int] = set()
     for i, page in enumerate(pages):
         try:
             texts.append(_pdf_page_text(page, hidden))
+            if not texts[-1].strip() and _pdf_page_blank(page):
+                blank.add(i)
         except _PageSkipped as exc:
             texts.append("")
             skipped[exc.reason] += 1
@@ -1335,7 +1360,7 @@ def _pdf_pypdf(reader, state: dict) -> ParsedDocument:
         warnings.append(f"text extraction stopped at its time budget after {stopped_at} of {len(pages)} pages")
     if warnings and not state["pypdf_had_text"]:
         raise LimitExceeded("no PDF page could be read: " + "; ".join(warnings))
-    return _pdf_pages_to_doc(texts, degraded=bool(warnings), warnings=warnings, hidden=dict(hidden))
+    return _pdf_pages_to_doc(texts, degraded=bool(warnings), warnings=warnings, hidden=dict(hidden), blank=blank)
 
 
 _ESCAPES = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f", b"(": b"(", b")": b")", b"\\": b"\\"}

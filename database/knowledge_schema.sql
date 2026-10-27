@@ -61,6 +61,9 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- Uploaded file size; NULL for documents uploaded before it was recorded.
 ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS byte_size BIGINT;
 
+-- The live document this upload replaces; the quota allows one pending replacement per tenant over its limits.
+ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS replaces_id UUID REFERENCES kb_documents(id) ON DELETE SET NULL;
+
 CREATE INDEX IF NOT EXISTS idx_kb_documents_kb ON kb_documents(kb_id);
 CREATE INDEX IF NOT EXISTS idx_kb_documents_tenant ON kb_documents(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_kb_documents_status ON kb_documents(status);
@@ -141,6 +144,67 @@ BEGIN
             bad.agent_id, bad.kb_id;
     END LOOP;
 END $kb_cross_tenant_report$;
+
+-- ── kb_document_texts — the extracted text of a document's indexed version, for the console's text view ──
+CREATE TABLE IF NOT EXISTS kb_document_texts (
+    document_id UUID PRIMARY KEY REFERENCES kb_documents(id) ON DELETE CASCADE,
+    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    text        TEXT NOT NULL,
+    truncated   BOOLEAN NOT NULL DEFAULT false,
+    version     INT NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ── agent_documents — which documents an agent retrieves from ──────────────
+-- The only source of an agent's knowledge scope; agent_knowledge_bases is read once below, then retired.
+CREATE TABLE IF NOT EXISTS agent_documents (
+    agent_id     UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    document_id  UUID NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (agent_id, document_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_documents_document ON agent_documents(document_id);
+
+-- Same tenant rule as agent_knowledge_bases_same_tenant(); fails closed when RLS hides the document.
+CREATE OR REPLACE FUNCTION agent_documents_same_tenant() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM agents a JOIN kb_documents d ON d.tenant_id = a.tenant_id
+         WHERE a.id = NEW.agent_id AND d.id = NEW.document_id
+    ) THEN
+        RAISE EXCEPTION 'document % does not belong to the tenant of agent %', NEW.document_id, NEW.agent_id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS agent_documents_same_tenant ON agent_documents;
+CREATE TRIGGER agent_documents_same_tenant
+    BEFORE INSERT OR UPDATE OF agent_id, document_id ON agent_documents
+    FOR EACH ROW EXECUTE FUNCTION agent_documents_same_tenant();
+
+-- One-time data moves; a name here means the move already ran and must not run again on re-apply.
+CREATE TABLE IF NOT EXISTS schema_data_migrations (
+    name        TEXT PRIMARY KEY,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Each enabled folder link becomes links to that folder's live documents, so agents answer as before.
+DO $agent_documents_from_kb$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_data_migrations WHERE name = 'agent_documents_from_kb') THEN
+        INSERT INTO agent_documents (agent_id, document_id)
+        SELECT akb.agent_id, d.id
+        FROM agent_knowledge_bases akb
+        JOIN agents a ON a.id = akb.agent_id
+        JOIN kb_documents d ON d.kb_id = akb.kb_id AND d.tenant_id = a.tenant_id AND d.deleted_at IS NULL
+        WHERE akb.enabled
+        ON CONFLICT DO NOTHING;
+        INSERT INTO schema_data_migrations (name) VALUES ('agent_documents_from_kb');
+    END IF;
+END $agent_documents_from_kb$;
 
 -- ── agent_retrieval_policies — per-agent RetrievalPolicy, never hardcoded ──
 -- Precedence: per-call override > this row > system default. No row = system default.

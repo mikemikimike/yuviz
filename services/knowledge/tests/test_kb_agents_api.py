@@ -9,6 +9,7 @@ from libs.tenancy import set_caller_tenant
 from services.knowledge import agent_kb as agent_kb_service
 from services.knowledge import knowledge_bases as kb_service
 from services.knowledge.app import app
+from services.knowledge.tests.rag_fakes import add_document
 
 
 @pytest.fixture
@@ -28,7 +29,8 @@ async def test_own_tenant_admin_gets_200_with_agents(client, pool, test_tenant, 
     agent = dict(await pool.fetchrow(
         "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'sup', 'Support') RETURNING *", test_tenant["id"],
     ))
-    await agent_kb_service.assign(agent["id"], kb["id"])
+    doc = await add_document(pool, test_tenant, kb, "Refunds", ["Refunds take 30 days."])
+    await agent_kb_service.replace_documents(agent["id"], [str(doc["id"])])
 
     resp = await client.get(
         f"/knowledge-bases/{kb['id']}/agents",

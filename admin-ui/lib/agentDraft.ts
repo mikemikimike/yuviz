@@ -62,7 +62,8 @@ export interface AgentDraft {
   transferAnnouncement: string;
   complianceInstructions: string;
   fallbackResponse: string;
-  selectedKbIds: string[];
+  // Older drafts held folder ids under selectedKbIds; they no longer mean anything and are ignored.
+  selectedDocumentIds?: string[];
   selectedApiIds: string[];
   greeting: string;
   systemPrompt: string;

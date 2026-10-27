@@ -13,7 +13,7 @@ import { useMenuKeys } from "@/lib/useMenuKeys";
 import { AgentTestPopup } from "@/components/AgentTestPopup";
 import { CallStatsGrid, NO_CALLS } from "@/components/CallStatsGrid";
 import { useActiveTenant } from "@/lib/useActiveTenant";
-import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
+import { listAgentDocuments } from "@/lib/knowledgeApi";
 import { listAgentCustomApis } from "@/lib/toolexecApi";
 import { AGENT_TEMPLATES, agentIcon, agentTemplate } from "@/lib/agentTemplates";
 import { LANGUAGES } from "@/lib/engineCatalog";
@@ -127,7 +127,7 @@ export default function AgentsPage() {
       const entries = await Promise.all(
         list.map(async (a) => {
           const [kbs, apis] = await Promise.all([
-            listAgentKnowledgeBases(a.id).then((r) => r.length).catch(() => null),
+            listAgentDocuments(a.id).then((r) => r.length).catch(() => null),
             listAgentCustomApis(a.id).then((r) => r.length).catch(() => null),
           ]);
           const nums = tenantNumbers.get(a.tenant_id);
@@ -255,7 +255,7 @@ export default function AgentsPage() {
                   {language && <span>{language}</span>}
                   {att?.sources != null && (
                     <span className={att.sources === 0 ? "muted" : ""}>
-                      {att.sources === 0 ? "No knowledge added" : `${att.sources} knowledge source${att.sources === 1 ? "" : "s"}`}
+                      {att.sources === 0 ? "No knowledge added" : `${att.sources} document${att.sources === 1 ? "" : "s"}`}
                     </span>
                   )}
                   {!!att?.tools && <span>{att.tools} connection{att.tools === 1 ? "" : "s"}</span>}
