@@ -39,7 +39,15 @@ struct MediaConfig {
     uint32_t playback_max_frames{3000}; // 60s at 20ms/frame — matches playback_timeout
     std::string vad_engine{"silero"};   // "silero" | "energy"
     std::string vad_model_path{"models/silero_vad.onnx"};
+    // Silence that ends the caller's turn, in ms. Every turn pays it before anything else starts, so it is the
+    // largest single piece of the wait; too short cuts a caller who pauses mid-sentence. A tenant's own
+    // vad_hold_ms (Redis tenant:<slug>) overrides it for that tenant.
+    uint32_t vad_hold_ms{600};
 };
+
+// Bounds for the end-of-speech hold, whichever way it is set.
+inline constexpr uint32_t kVadHoldMinMs = 200;
+inline constexpr uint32_t kVadHoldMaxMs = 3000;
 
 struct WorkerConfig {
     uint32_t audio_worker_threads{4};  // AudioWorkerPool thread count

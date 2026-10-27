@@ -22,6 +22,10 @@ gateway:
     channels: 1
     frame_ms: 20
     ring_buffer_ms: 500
+    # Silence that ends the caller's turn (200-3000, default 600). Every turn pays it, so it is the biggest single
+    # piece of the wait after the caller stops talking. GATEWAY_VAD_HOLD_MS in .env overrides it; a tenant's own
+    # vad_hold_ms (tenant settings) overrides both for that tenant.
+    vad_hold_ms: 600
 
   metrics:
     enabled: true
