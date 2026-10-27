@@ -524,6 +524,13 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 transfer_policy=TransferPolicy(
                     runtime_config.tenant.home_calling_code, runtime_config.tenant.allow_international_transfers,
                 ),
+                transcripts=transcripts,
+                call_row=dict(
+                    direction=ctx.direction or "inbound",
+                    caller_number=ctx.caller_did, called_number=ctx.called_did,
+                    agent_id=runtime_config.agent.id,
+                    agent_config_version=runtime_config.version or None,
+                ),
             )
 
     # Disable SO_REUSEPORT so a duplicate process fails to bind instead of silently sharing the port.

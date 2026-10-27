@@ -303,6 +303,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
 
         msg_fut: asyncio.Future | None = None
         out_fut: asyncio.Future | None = None
+        turn = None
 
         # Messages taken off msg_q while a turn runs, ahead of anything still queued.
         backlog: collections.deque[pb.GatewayMessage | None] = collections.deque()
@@ -420,15 +421,17 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     # Stream SttResult/TTS chunks as the pipeline produces them —
                     # buffering the whole turn would trip the gateway's SttTimeout.
                     tts_started_sent      = False
+                    audio_sent            = False
                     cancelled             = False
                     stt_sent              = False
                     end_call_requested    = False
                     end_call_grace_period = 0
                     turn_transfer         = None
 
-                    turn_stream = _turn_responses(
-                        session.speech_ended(se.duration_ms, se.energy_db).__aiter__()
-                    )
+                    # Keep the inner turn: teardown must aclose() it (not only the wrapper) so the
+                    # pipeline's GeneratorExit handler records the interrupted turn.
+                    turn = session.speech_ended(se.duration_ms, se.energy_db)
+                    turn_stream = _turn_responses(turn.__aiter__())
                     # Behind a deferred message only a cancel or end of stream still stops this turn.
                     async for response in turn_stream:
                         # Drain BEFORE sending so a cancel_generation that arrived
@@ -540,6 +543,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             # advances C++ FSM Thinking→Synthesizing→Speaking so
                             # barge-in detection works during playback.
                             if response.tts_payloads:
+                                # A filler replays from cache even while TTS is down, so it is not the goodbye.
+                                audio_sent = audio_sent or not response.filler
                                 if not tts_started_sent:
                                     yield pb.ServiceMessage(
                                         tts_started=pb.TtsStarted(session_id=sid)
@@ -574,6 +579,12 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             )
                         )
 
+                    # TTS produced no audio for a transcribed turn (provider failure): still
+                    # close the turn, or the gateway waits in silence until the caller speaks again.
+                    if stt_sent and not tts_started_sent and not cancelled and turn_transfer is None:
+                        yield pb.ServiceMessage(tts_started=pb.TtsStarted(session_id=sid))
+                        tts_started_sent = True
+
                     # End-of-response marker: empty is_final chunk; the gateway
                     # holds playback_finished until the final frame drains.
                     if tts_started_sent and not cancelled:
@@ -590,8 +601,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         )
 
                     # Sent after the final TtsChunk so the gateway waits for the goodbye to drain.
-                    # Requires TTS this turn, else the flag leaks into a later turn's playback.
-                    if end_call_requested and not cancelled and tts_started_sent:
+                    # Requires reply or goodbye audio this turn (not a filler or the synthetic TtsStarted),
+                    # else the flag leaks into a later turn's playback.
+                    if end_call_requested and not cancelled and audio_sent:
                         log.info(
                             "Converse: sending EndCall grace_period_ms=%d session=%s",
                             end_call_grace_period, sid,
@@ -603,7 +615,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 grace_period_ms=end_call_grace_period,
                             )
                         )
-                    elif end_call_requested and not cancelled and not tts_started_sent:
+                    elif end_call_requested and not cancelled:
                         log.warning(
                             "Converse: end-call marker detected but turn produced no "
                             "TTS audio — not sending EndCall (would leak into a later "
@@ -767,6 +779,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             except asyncio.CancelledError:
                 pass
 
+            # A hangup abandons the turn at a yield; close it so the pipeline persists the turn before close().
+            if turn is not None:
+                await turn.aclose()
             await session.close("stream_ended")
             # Drain the bus before stopping so SessionEnded and other close-path
             # events are delivered to subscribers.

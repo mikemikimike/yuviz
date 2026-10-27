@@ -120,24 +120,32 @@ class CallFlowRunner:
         self._vars.update({k: v for k, v in values.items() if v is not None})
 
     def open(self) -> list[Action]:
-        return [SetVoice(self._tts_config_id), *self._enter(self._graph.start)]
+        return self._budgeted([SetVoice(self._tts_config_id), *self._enter(self._graph.start)])
 
     def on_digit(self, digit: str) -> list[Action]:
         if self._node.type == "menu":
-            return self._menu_digit(digit)
+            return self._budgeted(self._menu_digit(digit))
         if self._node.type == "collect":
-            return self._collect_digit(digit)
+            return self._budgeted(self._collect_digit(digit))
         log.info("callflow: non-DTMF input ignored node=%s", self._node.id)
         return []
 
     def on_timeout(self) -> list[Action]:
         if self._node.type == "menu":
-            return self._menu_fallback(MENU_TIMEOUT)
+            return self._budgeted(self._menu_fallback(MENU_TIMEOUT))
         if self._node.type == "collect":
-            return self._collect_timeout()
+            return self._budgeted(self._collect_timeout())
         return []
 
     # ── Internal ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _budgeted(actions: list[Action]) -> list[Action]:
+        """A flow over budget hangs up at once: the prompts it queued while looping would
+        take minutes to synthesize and hold back the EndCall."""
+        if actions and actions[-1] == Hangup("flow_budget"):
+            return [actions[-1]]
+        return actions
 
     def _render(self, text: str) -> str:
         # Sensitive values may render inside the flow but never leave it.
