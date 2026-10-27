@@ -381,6 +381,17 @@ def _defer_stream_close(stream: Any, pending_read: asyncio.Task[Any]) -> None:
     pending_read.add_done_callback(close_after_read)
 
 
+async def _close_stream_bounded(stream: Any) -> None:
+    """Close a response stream without delaying timeout fallback delivery."""
+    close_task = asyncio.create_task(stream.aclose())
+    done, _ = await asyncio.wait({close_task}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
+    if not done:
+        close_task.cancel()
+        close_task.add_done_callback(_consume_async_task)
+    else:
+        _consume_async_task(close_task)
+
+
 class _FillerText(str):
     """The (empty) text paired with filler audio: '' in transcripts and history, but
     recognisable, so a filler never counts as the agent having replied."""
@@ -1110,7 +1121,6 @@ class PipelineConversationHandler:
         # a knowledge question searches up front instead (prefetch.py), so the model answers in one pass. The
         # passages ride on every LLM call and are never stored in history.
         producer_history = list(history)
-        producer_history_start = len(producer_history)
         messages_for_llm = producer_history
         turn_context: ChatMessage | None = None
         if pre_retrieval is not None:
@@ -1137,7 +1147,7 @@ class PipelineConversationHandler:
             """Stream model and voice output until completion or the first-output deadline."""
             stream = self._llm_to_tts(
                 messages_for_llm, cancel_event, session_id, producer_directives, producer_tool_calls,
-                store=producer_history, caller_text=stt_result.text, first_turn_filler=first_turn_filler,
+                store=history, caller_text=stt_result.text, first_turn_filler=first_turn_filler,
                 turn_context=turn_context,
             )
             iterator = stream.__aiter__()
@@ -1189,13 +1199,7 @@ class PipelineConversationHandler:
                 await items.put(exc)
             finally:
                 if not completed and not defer_close:
-                    close_task = asyncio.create_task(stream.aclose())
-                    done, _ = await asyncio.wait({close_task}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
-                    if not done:
-                        close_task.cancel()
-                        close_task.add_done_callback(_consume_async_task)
-                    else:
-                        _consume_async_task(close_task)
+                    await _close_stream_bounded(stream)
 
         producer = asyncio.create_task(_produce())
         stream_completed = False
@@ -1235,7 +1239,6 @@ class PipelineConversationHandler:
                 producer.cancel()
             producer.add_done_callback(lambda task: task.cancelled() or task.exception())
             await asyncio.wait({producer}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
-        history.extend(producer_history[producer_history_start:])
         if stream_completed:
             directives.extend(producer_directives)
             tool_calls_made.extend(producer_tool_calls)

@@ -433,7 +433,7 @@ class ToolCallOrchestrator:
             )
             return ToolResult(status=ToolStatus.FAILED, error="cancelled")
         except asyncio.CancelledError:
-            if cancel_event is None or not cancel_event.is_set():
+            if not cancel_event.is_set():
                 await _cancel_task_briefly(execute_task)
             raise
         finally:
@@ -454,10 +454,7 @@ def _consume_background_task(task: "asyncio.Task[Any]") -> None:
     """Retrieve exceptions from work that outlived its caller."""
     if task.cancelled():
         return
-    try:
-        task.exception()
-    except BaseException:
-        log.debug("Cancelled tool task completed with an exception", exc_info=True)
+    task.exception()
 
 
 def _result_if_finished(task: "asyncio.Task[Any]") -> ToolResult | None:
@@ -466,7 +463,7 @@ def _result_if_finished(task: "asyncio.Task[Any]") -> ToolResult | None:
         return None
     try:
         result = task.result()
-    except BaseException:
+    except Exception:
         return None
     return result if isinstance(result, ToolResult) else None
 
