@@ -98,7 +98,8 @@ export const createCallFlow = (
     graph?: CallFlowGraph;
   },
 ) =>
-  request<CallFlow>(`/tenants/${tenantSlug}/call-flows`, {
+  /** `warnings` is set when the copy landed as a draft because a Dial destination is refused. */
+  request<CallFlow & { warnings?: CallFlowProblem[] }>(`/tenants/${tenantSlug}/call-flows`, {
     method: "POST",
     body: JSON.stringify(body),
   });

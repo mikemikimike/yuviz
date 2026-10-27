@@ -12,6 +12,7 @@ import json
 import uuid
 from typing import Any
 
+from libs.config_sdk.dial_targets import transfer_policy_problem
 from libs.config_sdk.callflow import (
     CallFlowError,
     CallFlowValidationError as GraphInvalid,
@@ -115,6 +116,31 @@ async def _agent_reference_errors(
                     "Pick another.",
                 ))
     return errs
+
+
+async def _dial_destination_errors(conn: Any, graph: dict[str, Any], tenant_id: Any) -> list[CallFlowError]:
+    """Editor errors for `dial` nodes whose destination is malformed or outside the tenant's transfer policy."""
+    dials = [
+        (str(n.get("id") or ""), str((n.get("data") or {}).get("destination") or ""))
+        for n in (graph.get("nodes") or [])
+        if isinstance(n, dict) and n.get("type") == "dial"
+    ]
+    dials = [(node_id, dest) for node_id, dest in dials if dest.strip()]  # _node_errors reports an unset one
+    if not dials:
+        return []
+    policy = await tenants_service.transfer_policy_on(conn, tenant_id)
+    errs: list[CallFlowError] = []
+    for node_id, dest in dials:
+        problem = transfer_policy_problem(dest, policy)
+        if problem:
+            errs.append(CallFlowError("node", node_id, "destination", problem[0].upper() + problem[1:] + "."))
+    return errs
+
+
+async def dial_policy_errors(tenant_id: Any, graph: dict[str, Any]) -> list[CallFlowError]:
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        return await _dial_destination_errors(conn, graph, tenant_id)
 
 
 async def list_call_flows(tenant_id: Any) -> list[dict[str, Any]]:
@@ -243,6 +269,8 @@ async def create_call_flow(
 ) -> dict[str, Any]:
     """Graph from a clone, a caller scaffold, or the starter; published if valid, else a draft.
 
+    A graph whose Dial destinations the tenant's transfer policy refuses (e.g. a clone after the
+    policy tightened) is also a draft; the response then carries `warnings` with the per-node reasons.
     Cloning goes through tenant_conn, so another tenant's clone_from_id is not-found."""
     if clone_from_id is not None:
         source = await get_call_flow(clone_from_id)
@@ -266,6 +294,9 @@ async def create_call_flow(
         # A clone may name an agent deleted/deactivated since; land it as a draft.
         if publishable and await _agent_reference_errors(conn, graph, tenant_id):
             publishable = False
+        dial_errs = await _dial_destination_errors(conn, graph, tenant_id)
+        if dial_errs:
+            publishable = False
         row = await conn.fetchrow(
             "INSERT INTO call_flows (tenant_id, slug, name, description, direction, graph, graph_draft) "
             "VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb) RETURNING *",
@@ -273,6 +304,8 @@ async def create_call_flow(
             graph_json if publishable else None, graph_json,
         )
         result = _row(row)
+        if dial_errs:
+            result["warnings"] = [e.to_dict() for e in dial_errs]
         if publishable:
             await conn.execute(
                 "INSERT INTO call_flow_versions (call_flow_id, version, graph, published_by, note) "
@@ -385,6 +418,9 @@ async def publish(
         agent_errs = await _agent_reference_errors(conn, graph, current["tenant_id"])
         if agent_errs:
             raise CallFlowValidationError(agent_errs)
+        dial_errs = await _dial_destination_errors(conn, graph, current["tenant_id"])
+        if dial_errs:
+            raise CallFlowValidationError(dial_errs)
         next_version = current["config_version"] + 1
         row = await conn.fetchrow(
             "UPDATE call_flows SET graph = $2::jsonb, graph_draft = $2::jsonb, "
