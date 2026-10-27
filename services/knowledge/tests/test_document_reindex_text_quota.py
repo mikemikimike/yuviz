@@ -356,6 +356,28 @@ async def test_only_one_same_size_replacement_may_be_pending_while_over_the_stor
     assert (await quotas.tenant_usage(test_tenant["id"]))["storage_bytes"] == 20
 
 
+async def test_the_original_and_its_folder_stay_until_the_replacement_commits(client, pool, test_tenant, test_admin):
+    """Deleting a document or a folder waits for the tenant quota lock an upload holds. Without it, an original deleted
+    between the replacement's lookup and its pending check let the upload through as a free +1 (seen in CI as two
+    201s in one burst)."""
+    from libs.tenancy import tenant_conn
+
+    kb, other = await _kb(test_tenant), await _kb(test_tenant, "other")
+    x1 = (await _upload(client, kb, test_admin, "x1.txt")).json()
+    x2 = (await _upload(client, other, test_admin, "x2.txt")).json()
+
+    for original, delete in (
+        (x1, lambda: documents_service.soft_delete_document(x1["id"])),
+        (x2, lambda: kb_service.soft_delete_knowledge_base(other["id"])),
+    ):
+        async with tenant_conn(pool) as conn:
+            await quotas.check_upload(conn, test_tenant["id"], 5, replaces=original["id"])
+            task = asyncio.create_task(delete())
+            done, _ = await asyncio.wait({task}, timeout=0.5)
+            assert not done, "the delete went through while the replacement was still being checked"
+        await task  # and completes once the upload's transaction has ended
+
+
 async def _counted(tenant) -> int:
     return (await quotas.tenant_usage(tenant["id"]))["documents"]
 
@@ -423,7 +445,7 @@ async def test_concurrent_replacements_and_a_delete_of_the_original_stay_within_
     async def delete():
         return (await client.delete(f"/documents/{x['id']}", headers=_auth(test_admin))).status_code
 
-    for _ in range(3):
+    for _ in range(10):
         codes = await asyncio.gather(replace(1), replace(2), delete(), replace(3), replace(4))
         assert codes[2] == 204
         assert sum(c == 201 for c in codes) <= 1
@@ -513,3 +535,39 @@ def test_window_join_stops_once_past_the_limit():
 
     assert 50 < len(text) < 70
     assert documents_service._join_windows(chunks[:3]) == "w0a w0b w1a w1b w2a w2b"
+
+
+async def test_an_upload_into_a_folder_deleted_meanwhile_is_refused_and_stores_nothing(
+    client, pool, test_tenant, test_admin,
+):
+    """The route sees the folder live, then the delete commits while the upload waits for the quota lock. A document
+    inserted there would hold storage that usage() never counts."""
+    kb = await _kb(test_tenant)
+    await kb_service.soft_delete_knowledge_base(kb["id"])
+
+    with pytest.raises(quotas.FolderGone):
+        await documents_service.upload_document(
+            tenant_id=test_tenant["id"], kb_id=kb["id"], title="late.txt", filename="late.txt",
+            content_type="text/plain", content=b"late", storage=documents_router._storage,
+        )
+    assert await pool.fetchval("SELECT count(*) FROM kb_documents WHERE kb_id = $1", kb["id"]) == 0
+
+
+async def test_uploads_racing_a_folder_delete_never_leave_uncounted_documents(client, pool, test_tenant, test_admin):
+    """An upload holding the quota lock finishes before the delete; one still waiting for it is refused. So nothing is
+    added to the folder after the delete has returned."""
+    for i in range(10):
+        kb = await _kb(test_tenant, f"race-{i}")
+        count = "SELECT count(*) FROM kb_documents WHERE kb_id = $1"
+
+        async def upload(n):
+            return (await _upload(client, kb, test_admin, f"f{n}.txt")).status_code
+
+        async def delete():
+            status = (await client.delete(f"/knowledge-bases/{kb['id']}", headers=_auth(test_admin))).status_code
+            return status, await pool.fetchval(count, kb["id"])
+
+        u1, u2, (status, at_delete), u3 = await asyncio.gather(upload(1), upload(2), delete(), upload(3))
+        assert status == 204
+        assert {u1, u2, u3} <= {201, 404}
+        assert await pool.fetchval(count, kb["id"]) == at_delete

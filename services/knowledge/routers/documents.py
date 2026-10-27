@@ -123,6 +123,8 @@ async def upload_document(
             user_email=current_user.email,
             replaces=replaces,
         )
+    except quotas.FolderGone:
+        raise HTTPException(status_code=404, detail=f"knowledge_base {kb_id!r} not found")
     except (LookupError, asyncpg.DataError):
         if replaces is None:
             raise

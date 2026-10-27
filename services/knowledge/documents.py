@@ -72,8 +72,9 @@ async def upload_document(
     document is linked to the same agents. Raises LookupError for an unknown one, quotas.QuotaExceeded over a limit."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
-        # Also checks, under the quota lock, that `replaces` is a counted document of this tenant (LookupError if not).
-        await quotas.check_upload(conn, tenant_id, len(content), replaces=replaces)
+        # Also checks, under the quota lock, that the folder is still live (FolderGone) and that `replaces` is a counted
+        # document of this tenant (LookupError).
+        await quotas.check_upload(conn, tenant_id, len(content), kb_id=kb_id, replaces=replaces)
         row = await conn.fetchrow(
             "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type, language, tags, byte_size, "
             "replaces_id) VALUES ($1, $2, $3, '', $4, $5, $6::jsonb, $7, $8) RETURNING *",
@@ -320,6 +321,11 @@ async def soft_delete_document(
     )
     agent_ids: list[Any] = []
     async with conn_cm as conn:
+        # The quota lock first, like an upload: a delete must not change what counts while an upload is being checked.
+        tenant_id = await conn.fetchval("SELECT tenant_id FROM kb_documents WHERE id = $1", document_id)
+        if tenant_id is None:
+            raise LookupError(f"kb_document {document_id} not found")
+        await quotas.lock_tenant(conn, tenant_id)
         old_row = await conn.fetchrow("SELECT * FROM kb_documents WHERE id = $1 FOR UPDATE", document_id)
         if old_row is None:
             raise LookupError(f"kb_document {document_id} not found")
