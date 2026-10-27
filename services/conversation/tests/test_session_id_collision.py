@@ -118,14 +118,19 @@ async def test_session_id_is_reusable_once_the_first_stream_has_closed():
 
 
 async def test_session_id_is_released_when_the_handler_factory_fails():
+    # The factory error is caught by _serve's broad except handler, converted to an
+    # INTERNAL gRPC error, and does not propagate out of the task. The important
+    # invariant is that the session id is released so the next stream can claim it.
     async def broken(ctx):
         raise RuntimeError("boom")
 
     servicer = ConversationServicer(broken)
     first = _Stream(servicer, "fail-1", TENANT_A)
-    with pytest.raises(RuntimeError):
-        await asyncio.wait_for(first.task, 2)
+    await asyncio.wait_for(first.task, 2)
 
+    errors = [m.error for m in first.messages if m.HasField("error")]
+    assert errors, "expected an INTERNAL error message"
+    assert errors[0].code == "INTERNAL"
     assert "fail-1" not in servicer._live_sessions
 
 
