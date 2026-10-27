@@ -60,6 +60,22 @@ bool RedisClient::ensure_connected(Connection& conn) {
     };
     ::redisSetTimeout(ctx, command_tv);
 
+    if (!cfg_.username.empty()) {
+        auto* auth = static_cast<redisReply*>(::redisCommand(
+            ctx, "AUTH %s %s", cfg_.username.c_str(), cfg_.password.c_str()));
+        const bool ok = auth != nullptr && auth->type == REDIS_REPLY_STATUS;
+        if (!ok) {
+            logger_.warn("RedisClient: AUTH failed host={} port={} user={} err={}", cfg_.host, cfg_.port,
+                         cfg_.username,
+                         auth == nullptr ? ctx->errstr : (auth->type == REDIS_REPLY_ERROR ? auth->str : "unexpected reply"));
+        }
+        if (auth != nullptr) ::freeReplyObject(auth);
+        if (!ok) {
+            ::redisFree(ctx);
+            return false;
+        }
+    }
+
     conn.ctx = ctx;
     logger_.info("RedisClient: connected host={} port={}", cfg_.host, cfg_.port);
     return true;

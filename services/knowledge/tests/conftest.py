@@ -62,6 +62,12 @@ async def test_tenant(pool):
         "DELETE FROM agent_knowledge_bases WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)",
         tenant["id"],
     )
+    await pool.execute("DELETE FROM kb_chunks WHERE tenant_id = $1", tenant["id"])
+    await pool.execute(
+        "DELETE FROM kb_ingestion_jobs WHERE document_id IN (SELECT id FROM kb_documents WHERE tenant_id = $1)",
+        tenant["id"],
+    )
+    await pool.execute("DELETE FROM kb_documents WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM knowledge_bases WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM agents WHERE tenant_id = $1", tenant["id"])
     await pool.execute("UPDATE users SET tenant_id = NULL WHERE tenant_id = $1", tenant["id"])

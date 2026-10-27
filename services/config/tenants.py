@@ -21,6 +21,7 @@ _UPDATABLE_FIELDS = {
     "default_stt_config_id", "default_llm_config_id", "default_tts_config_id",
     "max_concurrent_calls", "number_purchase_enabled",
     "home_calling_code", "allow_international_transfers",
+    "knowledge_max_documents", "knowledge_max_storage_bytes",
 }
 
 

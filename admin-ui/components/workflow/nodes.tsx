@@ -45,7 +45,7 @@ function Badges({ data, type }: { data: WorkflowNodeData; type: WorkflowNodeType
           {tools} tool{tools === 1 ? "" : "s"}
         </span>
       )}
-      {kbs > 0 && <span className="wf-badge" title="Looks things up in a knowledge base">knowledge</span>}
+      {kbs > 0 && <span className="wf-badge" title="Searches the agent's documents">knowledge</span>}
       {extracts > 0 && (
         <span className="wf-badge" title="Captures details from what the caller says">
           captures {extracts}

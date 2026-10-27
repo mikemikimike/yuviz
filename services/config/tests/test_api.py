@@ -76,6 +76,18 @@ class TestTenantEndpoints:
         assert resp.json()["vad_hold_ms"] == 700
         assert resp.json()["config_version"] == test_tenant["config_version"] + 1
 
+    async def test_superadmin_sets_knowledge_limits_and_an_admin_cannot(self, client, admin_client, test_tenant):
+        limits = {"knowledge_max_documents": 25, "knowledge_max_storage_bytes": 5_000_000}
+        refused = await admin_client.patch(f"/tenants/{test_tenant['id']}", json=limits)
+        resp = await client.patch(f"/tenants/{test_tenant['id']}", json=limits)
+        assert refused.status_code == 403
+        assert resp.status_code == 200
+        assert {k: resp.json()[k] for k in limits} == limits
+
+    async def test_a_knowledge_limit_below_one_is_422(self, client, test_tenant):
+        resp = await client.patch(f"/tenants/{test_tenant['id']}", json={"knowledge_max_documents": 0})
+        assert resp.status_code == 422
+
     async def test_update_tenant_with_empty_body_is_400(self, client, test_tenant):
         resp = await client.patch(f"/tenants/{test_tenant['id']}", json={})
         assert resp.status_code == 400
@@ -1129,6 +1141,53 @@ class TestProviderConfigEndpoints:
         assert resp.status_code == 400
         assert secret_body not in resp.json()["detail"]
         assert resp.json()["detail"] == "ElevenLabs Voices API returned 401"
+
+    async def _preview_setup(self, client, test_tenant, monkeypatch, key_env):
+        """An ElevenLabs provider saved with voice 'saved', whose account lists 'saved' and 'adam'."""
+        import httpx
+
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "voice": "saved", "api_key_ref": f"env:{key_env}"},
+        )
+        monkeypatch.setenv(key_env, "fake-key-for-test")
+        listed = {"voices": [
+            {"voice_id": v, "name": v, "category": "premade", "labels": {}, "preview_url": None} for v in ("saved", "adam")
+        ]}
+        spoken: list[str] = []
+        real_get, real_post = httpx.AsyncClient.get, httpx.AsyncClient.post
+
+        async def fake_get(self, url, headers=None, **kwargs):
+            if "elevenlabs.io" not in str(url):
+                return await real_get(self, url, headers=headers, **kwargs)
+            return httpx.Response(200, json=listed, request=httpx.Request("GET", url))
+
+        async def fake_post(self, url, *args, **kwargs):
+            if "text-to-speech" not in str(url):
+                return await real_post(self, url, *args, **kwargs)
+            spoken.append(str(url).rsplit("/", 1)[-1])
+            return httpx.Response(200, content=b"\x00\x00" * 10, request=httpx.Request("POST", "https://x" + str(url)))
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+        monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+        return create.json()["id"], spoken
+
+    async def test_preview_speaks_in_the_requested_voice_of_the_account(self, client, test_tenant, monkeypatch):
+        provider_id, spoken = await self._preview_setup(client, test_tenant, monkeypatch, "TEST_EL_KEY5")
+
+        chosen = await client.post(f"/providers/{provider_id}/preview", json={"text": "Adam", "voice_id": "adam"})
+        default = await client.post(f"/providers/{provider_id}/preview", json={"text": "hi"})
+
+        assert chosen.status_code == default.status_code == 200
+        assert spoken == ["adam", "saved"]
+
+    async def test_preview_refuses_a_voice_not_on_the_account(self, client, test_tenant, monkeypatch):
+        provider_id, spoken = await self._preview_setup(client, test_tenant, monkeypatch, "TEST_EL_KEY6")
+
+        resp = await client.post(f"/providers/{provider_id}/preview", json={"text": "x", "voice_id": "someone-else"})
+
+        assert resp.status_code == 400
+        assert spoken == []
 
 
 class TestProviderConfigTenantScoping:

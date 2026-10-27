@@ -65,6 +65,17 @@ async def test_page_limit_is_enforced():
     assert "more than 3 pages" in await _reason(pdf, limits=Limits(max_pages=3))
 
 
+async def test_a_blank_trailing_page_does_not_mark_a_pdf_for_a_check():
+    blank_with_a_space = {"text": None, "ops": "BT /F1 10 Tf 72 720 Td [( )] TJ ET\n"}
+    doc = await parse_document(B.make_pdf([*B.TEXT_PDF_PAGES, blank_with_a_space, {"text": None}]))
+    assert doc.degraded is False and doc.pages == 4
+
+
+async def test_a_page_with_only_an_image_still_marks_a_pdf_for_a_check():
+    doc = await parse_document(B.half_scanned_pdf())
+    assert doc.degraded is True and any("no readable text" in w or "OCR" in w for w in doc.warnings)
+
+
 async def test_encrypted_pdf_is_password_protected():
     assert await _reason(B.encrypted_pdf()) == "document is password-protected"
 

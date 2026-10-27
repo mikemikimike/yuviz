@@ -293,6 +293,17 @@ END $$;
 
 DO $$
 BEGIN
+    DROP POLICY IF EXISTS kb_document_texts_tenant_isolation ON kb_document_texts;
+    CREATE POLICY kb_document_texts_tenant_isolation ON kb_document_texts
+        FOR ALL TO yuviz_app
+        USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+        WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+    ALTER TABLE kb_document_texts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE kb_document_texts FORCE  ROW LEVEL SECURITY;
+END $$;
+
+DO $$
+BEGIN
     DROP POLICY IF EXISTS telephony_configs_tenant_isolation ON telephony_configs;
     CREATE POLICY telephony_configs_tenant_isolation ON telephony_configs
         FOR ALL TO yuviz_app
@@ -438,6 +449,17 @@ BEGIN
         WITH CHECK (EXISTS (SELECT 1 FROM agents p WHERE p.id = agent_knowledge_bases.agent_id));
     ALTER TABLE agent_knowledge_bases ENABLE ROW LEVEL SECURITY;
     ALTER TABLE agent_knowledge_bases FORCE  ROW LEVEL SECURITY;
+END $$;
+
+DO $$
+BEGIN
+    DROP POLICY IF EXISTS agent_documents_tenant_isolation ON agent_documents;
+    CREATE POLICY agent_documents_tenant_isolation ON agent_documents
+        FOR ALL TO yuviz_app
+        USING      (EXISTS (SELECT 1 FROM agents p WHERE p.id = agent_documents.agent_id))
+        WITH CHECK (EXISTS (SELECT 1 FROM agents p WHERE p.id = agent_documents.agent_id));
+    ALTER TABLE agent_documents ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE agent_documents FORCE  ROW LEVEL SECURITY;
 END $$;
 
 DO $$

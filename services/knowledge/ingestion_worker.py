@@ -30,6 +30,7 @@ from libs.tenancy import platform_conn, tenant_conn
 from . import db
 from .chunker import ChunkConfig, chunk_document, chunker_version
 from .chunking import Chunk, count_tokens
+from .documents import TEXT_MAX_CHARS
 from .embedding_manager import (
     EMBEDDING_DIMS, EmbeddingProviderConfig, EmbeddingProviderManager, effective_model, embed_in_batches,
     provider_error,
@@ -362,6 +363,12 @@ async def process_one_job(
                 "ready_degraded" if parsed.degraded else "ready",
                 "; ".join(parsed.warnings)[:1000] if parsed.degraded else None,
                 parsed.parser_used, parsed.quality_score, chunker_version(strategy) if strategy != "inline" else "inline",
+            )
+            await conn.execute(
+                "INSERT INTO kb_document_texts (document_id, tenant_id, text, truncated, version) "
+                "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (document_id) DO UPDATE SET text = EXCLUDED.text, "
+                "truncated = EXCLUDED.truncated, version = EXCLUDED.version, updated_at = now()",
+                document_id, doc_row["tenant_id"], text[:TEXT_MAX_CHARS], len(text) > TEXT_MAX_CHARS, version,
             )
             stages.ok(chunks=len(new_chunks))
             await _write_events(conn, job, doc_row["tenant_id"], stages.events)

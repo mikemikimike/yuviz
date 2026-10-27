@@ -92,6 +92,9 @@ struct RedisConfig {
     bool        enabled{false};
     std::string host{"127.0.0.1"};
     uint16_t    port{6379};
+    // ACL login from REDIS_URL's user:password; empty username means no AUTH.
+    std::string username;
+    std::string password;
     uint32_t    connect_timeout_ms{200};
     uint32_t    command_timeout_ms{100};
     uint32_t    pool_size{4};

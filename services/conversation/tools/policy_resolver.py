@@ -4,6 +4,7 @@ Note: RuntimeConfig.tools / get_tools() in libs/config_sdk is an unused stub for
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -12,14 +13,21 @@ from typing import Any
 
 import asyncpg
 
-from libs.tenancy import tenant_conn
+from libs.tenancy import TenantUnresolved, tenant_conn
 
+from ..bounded import POOL_COMMAND_TIMEOUT_S, POOL_RELEASE_TIMEOUT_S, run_bounded
 from .registry import ToolRegistry
 from .types import ToolDefinition
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_CACHE_TTL_S = 30.0
+# Bound on the whole DB lookup (both acquires and both fetches); a slow Postgres must not stall a turn.
+_LOOKUP_TIMEOUT_S = 2.0
+# After a failed lookup, serve the fallback without touching the DB for this long.
+_FALLBACK_BACKOFF_S = 30.0
+# Past this age a cached list is no longer trusted during an outage.
+_STALE_MAX_AGE_S = 900.0
 
 
 @dataclass(frozen=True)
@@ -52,12 +60,17 @@ class ToolPolicyResolver:
         self._cache_ttl_s = cache_ttl_s
         # Keyed by tenant too, so a cross-tenant agent_id collision can't leak cached policy.
         self._cache: dict[tuple[str, str], tuple[float, list[ResolvedToolPolicy]]] = {}
+        # Monotonic time before which a key that just fell back is not looked up again.
+        self._backoff_until: dict[tuple[str, str], float] = {}
+        self._inflight: dict[tuple[str, str], asyncio.Task] = {}
 
     @classmethod
     async def connect(cls, database_url: str | None, registry: ToolRegistry) -> "ToolPolicyResolver":
         if not database_url:
             return cls(None, registry)
-        pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
+        pool = await asyncpg.create_pool(
+            database_url, min_size=1, max_size=5, command_timeout=POOL_COMMAND_TIMEOUT_S,
+        )
         return cls(pool, registry)
 
     async def close(self) -> None:
@@ -74,11 +87,56 @@ class ToolPolicyResolver:
 
         cache_key = (agent_id, tenant_slug)
         cached = self._cache.get(cache_key)
-        if cached is not None and time.monotonic() - cached[0] < self._cache_ttl_s:
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < self._cache_ttl_s:
             return _narrow(cached[1], only)
 
+        if now < self._backoff_until.get(cache_key, 0.0):
+            return _narrow(self._stale(cache_key), only)
+
+        # One lookup per key: concurrent callers share it instead of each hitting the DB and logging.
+        lookup = self._inflight.get(cache_key)
+        if lookup is None:
+            lookup = asyncio.create_task(self._refresh(cache_key))
+            self._inflight[cache_key] = lookup
+            lookup.add_done_callback(lambda _: self._inflight.pop(cache_key, None))
+        resolved = await asyncio.shield(lookup)
+        return _narrow(self._stale(cache_key) if resolved is None else resolved, only)
+
+    def _stale(self, cache_key: tuple[str, str]) -> list[ResolvedToolPolicy]:
+        """The last cached list while it is young enough to trust, else no tools (fail closed)."""
+        cached = self._cache.get(cache_key)
+        if cached is None or time.monotonic() - cached[0] > _STALE_MAX_AGE_S:
+            return []
+        return cached[1]
+
+    async def _refresh(self, cache_key: tuple[str, str]) -> list[ResolvedToolPolicy] | None:
+        """Read and cache the full list; None when Postgres is slow or down (backoff armed)."""
+        agent_id, tenant_slug = cache_key
+        try:
+            resolved = await run_bounded(self._fetch(agent_id, tenant_slug), _LOOKUP_TIMEOUT_S)
+        except TenantUnresolved:
+            raise
+        except Exception as exc:
+            # Never log str(exc) or exc_info: a driver error carries the DSN/host.
+            self._backoff_until[cache_key] = time.monotonic() + _FALLBACK_BACKOFF_S
+            log.warning(
+                "ToolPolicyResolver: policy lookup fell back agent_id=%s tenant=%s reason=%s using=%s",
+                agent_id, tenant_slug, "timeout" if isinstance(exc, TimeoutError) else type(exc).__name__,
+                "stale-cache" if self._stale(cache_key) else "no-tools",
+            )
+            return None
+
+        # Cache unnarrowed; `only` is applied on read (varies per node).
+        self._cache[cache_key] = (time.monotonic(), resolved)
+        self._backoff_until.pop(cache_key, None)
+        return resolved
+
+    async def _fetch(self, agent_id: str, tenant_slug: str) -> list[ResolvedToolPolicy]:
+        """The full, unnarrowed policy list for the agent, read from Postgres."""
         async with tenant_conn(
             self._pool, explicit_tenant=tenant_slug, reason="conversation-tool-policy",
+            acquire_timeout=POOL_RELEASE_TIMEOUT_S,
         ) as conn:
             rows = await conn.fetch(
                 """
@@ -117,10 +175,7 @@ class ToolPolicyResolver:
             ))
 
         await self._specialize_execute_api_if_present(resolved, agent_id, tenant_slug)
-
-        # Cache unnarrowed; `only` is applied on read (varies per node).
-        self._cache[cache_key] = (time.monotonic(), resolved)
-        return _narrow(resolved, only)
+        return resolved
 
     async def _specialize_execute_api_if_present(
         self, resolved: list[ResolvedToolPolicy], agent_id: str, tenant_slug: str,

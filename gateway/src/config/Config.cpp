@@ -42,15 +42,24 @@ void apply_esl_env(EslConfig& esl) {
     }
 }
 
-// redis://host[:port][/0]. The Gateway uses db 0 and no auth, so anything else is refused.
+// redis://[user:password@]host[:port][/0]. The Gateway uses db 0, so any other db is refused.
 void apply_redis_url(RedisConfig& redis, const std::string& url) {
     const std::string scheme = "redis://";
     if (url.rfind(scheme, 0) != 0) {
-        throw std::runtime_error("REDIS_URL must start with redis://, got '" + url + "'");
+        throw std::runtime_error("REDIS_URL must start with redis://");
     }
     std::string rest = url.substr(scheme.size());
-    if (rest.find('@') != std::string::npos) {
-        throw std::runtime_error("REDIS_URL: the Gateway does not support Redis auth");
+    redis.username.clear();
+    redis.password.clear();
+    if (const auto at = rest.rfind('@'); at != std::string::npos) {
+        const std::string userinfo = rest.substr(0, at);
+        rest = rest.substr(at + 1);
+        const auto sep = userinfo.find(':');
+        if (sep == std::string::npos || sep == 0 || sep + 1 == userinfo.size()) {
+            throw std::runtime_error("REDIS_URL credentials must be user:password");
+        }
+        redis.username = userinfo.substr(0, sep);
+        redis.password = userinfo.substr(sep + 1);
     }
     std::string db;
     if (const auto slash = rest.find('/'); slash != std::string::npos) {
@@ -62,7 +71,7 @@ void apply_redis_url(RedisConfig& redis, const std::string& url) {
     }
     const auto colon = rest.rfind(':');
     const std::string host = colon == std::string::npos ? rest : rest.substr(0, colon);
-    if (host.empty()) throw std::runtime_error("REDIS_URL has no host: '" + url + "'");
+    if (host.empty()) throw std::runtime_error("REDIS_URL has no host");
     redis.host = host;
     redis.port = colon == std::string::npos ? 6379 : parse_port("REDIS_URL port", rest.substr(colon + 1).c_str());
 }
