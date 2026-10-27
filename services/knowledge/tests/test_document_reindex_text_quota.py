@@ -327,10 +327,8 @@ async def _live_documents(pool, tenant) -> int:
     )
 
 
-async def test_a_replacement_whose_original_was_deleted_meanwhile_gets_the_normal_checks(
-    client, pool, test_tenant, test_admin,
-):
-    """An upload checks `replaces` is live before it queues on the quota lock; a DELETE can commit in between."""
+async def test_a_replacement_whose_original_was_deleted_meanwhile_is_refused(client, pool, test_tenant, test_admin):
+    """`replaces` is checked under the quota lock; a DELETE can commit while the upload waits for it."""
     from libs.tenancy import tenant_conn
 
     kb = await _kb(test_tenant)
@@ -339,9 +337,104 @@ async def test_a_replacement_whose_original_was_deleted_meanwhile_gets_the_norma
     await _limit(pool, test_tenant, documents=1)
     await client.delete(f"/documents/{x['id']}", headers=_auth(test_admin))
 
-    with pytest.raises(quotas.QuotaExceeded):
+    with pytest.raises(LookupError):
         async with tenant_conn(pool) as conn:
             await quotas.check_upload(conn, test_tenant["id"], 5, replaces=x["id"])
+
+
+async def test_only_one_same_size_replacement_may_be_pending_while_over_the_storage_limit(
+    client, pool, test_tenant, test_admin,
+):
+    kb = await _kb(test_tenant)
+    x = (await _upload(client, kb, test_admin, "x.txt", body=b"0123456789")).json()
+    await _limit(pool, test_tenant, storage=5)
+
+    first = await _upload(client, kb, test_admin, "x-v2.txt", body=b"abcdefghij", replaces=x["id"])
+    second = await _upload(client, kb, test_admin, "x-v3.txt", body=b"abcdefghij", replaces=x["id"])
+
+    assert (first.status_code, second.status_code) == (201, 413)
+    assert (await quotas.tenant_usage(test_tenant["id"]))["storage_bytes"] == 20
+
+
+async def _counted(tenant) -> int:
+    return (await quotas.tenant_usage(tenant["id"]))["documents"]
+
+
+async def test_a_document_in_a_deleted_folder_cannot_be_replaced(client, pool, test_tenant, test_admin):
+    """It isn't counted, so replacing it would add a document past the limit; the console can't show it anyway."""
+    hidden_kb = await _kb(test_tenant, "old-folder")
+    hidden = [(await _upload(client, hidden_kb, test_admin, f"h{i}.txt")).json() for i in range(3)]
+    await kb_service.soft_delete_knowledge_base(hidden_kb["id"])
+    kb = await _kb(test_tenant)
+    await _upload(client, kb, test_admin, "a.txt")
+    await _limit(pool, test_tenant, documents=1)
+
+    results = [await _upload(client, kb, test_admin, f"r{i}.txt", replaces=h["id"]) for i, h in enumerate(hidden)]
+    for h in hidden:  # deleting a hidden original must not open a slot either
+        await client.delete(f"/documents/{h['id']}", headers=_auth(test_admin))
+    again = await _upload(client, kb, test_admin, "b.txt")
+
+    assert [r.status_code for r in results] == [404, 404, 404]
+    assert again.status_code == 409
+    assert await _counted(test_tenant) == 1
+
+
+async def test_deleting_folders_during_a_replacement_never_lets_usage_pass_one_over(
+    client, pool, test_tenant, test_admin,
+):
+    f1, f2, f3 = await _kb(test_tenant, "f1"), await _kb(test_tenant, "f2"), await _kb(test_tenant, "f3")
+    a = (await _upload(client, f1, test_admin, "a.txt")).json()
+    b = (await _upload(client, f2, test_admin, "b.txt")).json()
+    await _limit(pool, test_tenant, documents=2)
+    seen = []
+
+    # The replacement lands in another folder, and that folder is deleted: the replacement is hidden, so nothing is
+    # pending and usage is back to the two originals.
+    r1 = await _upload(client, f3, test_admin, "a-v2.txt", replaces=a["id"])
+    seen.append(await _counted(test_tenant))
+    await kb_service.soft_delete_knowledge_base(f3["id"])
+    seen.append(await _counted(test_tenant))
+    # The original's folder is deleted while its replacement is pending: the original is no longer counted.
+    r2 = await _upload(client, f2, test_admin, "a-v3.txt", replaces=a["id"])
+    seen.append(await _counted(test_tenant))
+    await kb_service.soft_delete_knowledge_base(f1["id"])
+    seen.append(await _counted(test_tenant))
+    r3 = await _upload(client, f2, test_admin, "b-v2.txt", replaces=b["id"])
+    seen.append(await _counted(test_tenant))
+    extra = await _upload(client, f2, test_admin, "c.txt")
+    seen.append(await _counted(test_tenant))
+
+    assert [r.status_code for r in (r1, r2, r3)] == [201, 201, 201]
+    assert extra.status_code == 409
+    assert seen == [3, 2, 3, 2, 3, 3]
+    assert max(seen) <= 2 + 1
+
+
+async def test_concurrent_replacements_and_a_delete_of_the_original_stay_within_one_over(
+    client, pool, test_tenant, test_admin,
+):
+    kb = await _kb(test_tenant)
+    x = (await _upload(client, kb, test_admin, "x.txt")).json()
+    await _limit(pool, test_tenant, documents=1)
+
+    async def replace(i):
+        return (await _upload(client, kb, test_admin, f"x-v{i}.txt", replaces=x["id"])).status_code
+
+    async def delete():
+        return (await client.delete(f"/documents/{x['id']}", headers=_auth(test_admin))).status_code
+
+    for _ in range(3):
+        codes = await asyncio.gather(replace(1), replace(2), delete(), replace(3), replace(4))
+        assert codes[2] == 204
+        assert sum(c == 201 for c in codes) <= 1
+        assert await _counted(test_tenant) <= 1  # the original is gone, so at most its one replacement is left
+        live = await pool.fetchval(
+            "SELECT id FROM kb_documents WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1", test_tenant["id"],
+        )
+        if live is None:
+            x = (await _upload(client, kb, test_admin, "x.txt")).json()
+        else:
+            x = {"id": str(live)}
 
 
 async def test_only_one_replacement_may_be_pending_while_over_the_limit(client, pool, test_tenant, test_admin):

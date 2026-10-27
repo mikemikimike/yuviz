@@ -72,10 +72,7 @@ async def upload_document(
     document is linked to the same agents. Raises LookupError for an unknown one, quotas.QuotaExceeded over a limit."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
-        if replaces is not None and await conn.fetchval(
-            "SELECT 1 FROM kb_documents WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL", replaces, tenant_id,
-        ) is None:
-            raise LookupError(f"kb_document {replaces} not found")
+        # Also checks, under the quota lock, that `replaces` is a counted document of this tenant (LookupError if not).
         await quotas.check_upload(conn, tenant_id, len(content), replaces=replaces)
         row = await conn.fetchrow(
             "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type, language, tags, byte_size, "
