@@ -327,6 +327,23 @@ async def _live_documents(pool, tenant) -> int:
     )
 
 
+async def test_a_replacement_whose_original_was_deleted_meanwhile_gets_the_normal_checks(
+    client, pool, test_tenant, test_admin,
+):
+    """An upload checks `replaces` is live before it queues on the quota lock; a DELETE can commit in between."""
+    from libs.tenancy import tenant_conn
+
+    kb = await _kb(test_tenant)
+    x = (await _upload(client, kb, test_admin, "x.txt")).json()
+    await _upload(client, kb, test_admin, "y.txt")
+    await _limit(pool, test_tenant, documents=1)
+    await client.delete(f"/documents/{x['id']}", headers=_auth(test_admin))
+
+    with pytest.raises(quotas.QuotaExceeded):
+        async with tenant_conn(pool) as conn:
+            await quotas.check_upload(conn, test_tenant["id"], 5, replaces=x["id"])
+
+
 async def test_only_one_replacement_may_be_pending_while_over_the_limit(client, pool, test_tenant, test_admin):
     kb = await _kb(test_tenant)
     a = (await _upload(client, kb, test_admin, "a.txt")).json()

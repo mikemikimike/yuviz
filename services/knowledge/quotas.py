@@ -71,8 +71,11 @@ async def check_upload(conn: asyncpg.Connection, tenant_id: Any, size: int, *, r
     # one document, never as many as the tenant cares to upload with the same `replaces`.
     old_size = None
     if replaces is not None and not await conn.fetchval(_PENDING_REPLACEMENT_SQL, tenant_id):
+        # Re-checked under the lock: an original deleted since the caller's check is no longer a replacement, so the
+        # upload falls through to the normal checks.
         old_size = await conn.fetchval(
-            "SELECT coalesce(byte_size, 0) FROM kb_documents WHERE id = $1 AND tenant_id = $2", replaces, tenant_id,
+            "SELECT coalesce(byte_size, 0) FROM kb_documents WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+            replaces, tenant_id,
         )
     if old_size is None and u["documents"] + 1 > u["max_documents"]:
         raise QuotaExceeded("documents", u["documents"], u["max_documents"])
