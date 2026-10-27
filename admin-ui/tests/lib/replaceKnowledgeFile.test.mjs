@@ -22,7 +22,7 @@ test("replacement waits for Ready, preserves metadata and reading preference, th
   const { api, events } = setup(["pending", "processing", "ready"]);
   await replaceKnowledgeFile(original, file, api, { wait });
   assert.deepEqual(events.map(([event]) => event), ["upload", "poll", "poll", "update", "delete"]);
-  assert.deepEqual(events[0].slice(1), ["folder", file, "prices.pdf", { language: "en", tags: original.tags }]);
+  assert.deepEqual(events[0].slice(1), ["folder", file, "prices.pdf", { language: "en", tags: original.tags, replaces: "old" }]);
   assert.deepEqual(events.at(-2), ["update", "new", { usage_mode: "prompt" }]);
   assert.deepEqual(events.at(-1), ["delete", "old"]);
 });

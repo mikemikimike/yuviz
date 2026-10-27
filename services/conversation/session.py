@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import AsyncGenerator, Protocol
@@ -40,6 +41,9 @@ from .session_finalizer import FinalizationResult
 
 _SPEECH_ENDED_STATES = frozenset({CallFsmState.LISTENING, CallFsmState.RECOGNIZING})
 
+# Per-utterance cap on buffered inbound audio: 60 s of 16 kHz S16LE mono.
+MAX_UTTERANCE_BYTES = 60 * 16_000 * 2
+
 log = logging.getLogger(__name__)
 
 
@@ -52,6 +56,8 @@ class HandlerResponse:
     """One result from an IConversationHandler turn.
 
     end_call_grace_period_ms: 0 = gateway default. response_text accompanies, never replaces, tts_payloads.
+    filler: the tts_payloads are a "one moment" filler, not the reply, so they never count as the caller
+    having heard an answer or a goodbye.
     """
     stt_text:       str         = ""
     stt_confidence: float       = 0.0
@@ -60,6 +66,7 @@ class HandlerResponse:
     end_call_grace_period_ms: int = 0
     transfer_request: TransferRequest | None = None
     response_text:  str         = ""
+    filler:         bool        = False
 
 
 class IConversationHandler(Protocol):
@@ -226,7 +233,13 @@ class ConversationSession:
         if not self._fsm.can_accept_audio:
             return HandlerResponse()
 
-        self._audio_buffer.extend(payload)
+        room = MAX_UTTERANCE_BYTES - len(self._audio_buffer)
+        if 0 < room < len(payload):  # logged once, by the chunk that crosses the cap
+            log.warning(
+                "Utterance audio over cap, dropping excess: buffered=%d cap=%d session=%s",
+                len(self._audio_buffer), MAX_UTTERANCE_BYTES, self._ctx.session_id,
+            )
+        self._audio_buffer.extend(payload[:max(room, 0)])
         response = await self._handler.on_audio(self._ctx.session_id, payload)
 
         if response.tts_payloads:
@@ -253,21 +266,23 @@ class ConversationSession:
         self._fsm.on_speech_ended(duration_ms, energy_db)
 
         first_tts = True
-        async for response in self._handler.on_speech_ended(
+        # aclosing: a hangup closes this generator, and the handler's turn must see it to persist.
+        async with aclosing(self._handler.on_speech_ended(
             self._ctx.session_id, audio, duration_ms, energy_db
-        ):
-            if response.tts_payloads:
-                self._tts_seq += len(response.tts_payloads)
+        )) as turn:
+            async for response in turn:
+                if response.tts_payloads:
+                    self._tts_seq += len(response.tts_payloads)
 
-            if response.stt_text:
-                self._fsm.on_stt_final(response.stt_text, response.stt_confidence)
+                if response.stt_text:
+                    self._fsm.on_stt_final(response.stt_text, response.stt_confidence)
 
-            if response.tts_payloads and first_tts:
-                self._fsm.on_text_ready()
-                self._fsm.on_first_audio_chunk()
-                first_tts = False
+                if response.tts_payloads and first_tts:
+                    self._fsm.on_text_ready()
+                    self._fsm.on_first_audio_chunk()
+                    first_tts = False
 
-            yield response
+                yield response
 
         # Turn didn't complete: return to LISTENING. SPEAKING too, since unsent
         # TTS means no playback_finished will ever arrive.

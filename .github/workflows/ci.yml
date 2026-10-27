@@ -76,6 +76,7 @@ jobs:
           psql voiceai -v ON_ERROR_STOP=1 -f database/knowledge_schema.sql
           psql voiceai -v ON_ERROR_STOP=1 -f database/telephony_schema.sql
           psql voiceai -v ON_ERROR_STOP=1 -f database/clinic_schema.sql
+          psql voiceai -v ON_ERROR_STOP=1 -f database/realestate_schema.sql
           psql voiceai -v ON_ERROR_STOP=1 -v yuviz_app_password=testpw -f database/rls.sql
 
       # libs/vad_sdk resolves models/silero_vad.onnx from the repo root; the test suite
@@ -196,8 +197,19 @@ jobs:
           python3 -c "import glob, zipfile; open('build/models/silero_vad.onnx', 'wb').write(zipfile.ZipFile(glob.glob('/tmp/fw/faster_whisper-*.whl')[0]).read('faster_whisper/assets/silero_vad_v6.onnx'))"
           test -s build/models/silero_vad.onnx
 
+      # tests/config_test.cpp's ACL login test skips without this user; same grants as deployment/docker/redis/users.acl.tpl.
+      - name: Create the gateway Redis ACL user
+        env:
+          REDIS_CONTAINER: ${{ job.services.redis.id }}
+        run: |
+          docker exec "$REDIS_CONTAINER" redis-cli ACL SETUSER gateway on '>ci-only-gateway-password' \
+            resetkeys resetchannels -@all +auth +hello +ping +get +mget \
+            '~campaign:route:*' '~did:*' '~routing:ready' '~tenant:*'
+
       - name: Configure, build, and test
         shell: bash -eo pipefail {0}
+        env:
+          REDIS_GATEWAY_PASSWORD: ci-only-gateway-password
         run: |
           # Distro gRPC/protobuf cmake configs live under multiarch paths on Ubuntu.
           export CMAKE_PREFIX_PATH="/usr/lib/x86_64-linux-gnu/cmake:${CMAKE_PREFIX_PATH:-}"

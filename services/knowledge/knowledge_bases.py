@@ -7,7 +7,7 @@ from typing import Any
 
 from libs.tenancy import platform_conn, tenant_conn
 
-from . import audit, db
+from . import audit, db, quotas
 from . import retrieval_plan as plans
 
 _UPDATABLE_FIELDS = {"name", "description", "embedding_config_id", "status"}
@@ -124,6 +124,12 @@ async def soft_delete_knowledge_base(
         if platform_scoped else tenant_conn(pool)
     )
     async with conn_cm as conn:
+        # The quota lock first, like an upload: hiding a folder's documents must not change what counts while an
+        # upload is being checked.
+        tenant_id = await conn.fetchval("SELECT tenant_id FROM knowledge_bases WHERE id = $1", kb_id)
+        if tenant_id is None:
+            raise LookupError(f"knowledge_base {kb_id} not found")
+        await quotas.lock_tenant(conn, tenant_id)
         old_row = await conn.fetchrow("SELECT * FROM knowledge_bases WHERE id = $1 FOR UPDATE", kb_id)
         if old_row is None:
             raise LookupError(f"knowledge_base {kb_id} not found")

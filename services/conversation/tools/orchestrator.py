@@ -27,7 +27,7 @@ from .envelope import build_envelope
 from .guard import (
     DEFAULT_MAX_TOOL_CALLS_PER_TURN, LastGoodCache, TurnGuard, call_signature, scrub_scope_args, validate_json,
 )
-from .middleware import BreakerBoard, _redact, build_default_chain
+from .middleware import BreakerBoard, build_default_chain, describe_arguments
 from .policy_resolver import ToolPolicyResolver
 from .provider_manager import ToolProviderManager
 from .types import ToolDefinition, ToolExecutionContext, ToolExecutionRequest, ToolResult, ToolStatus
@@ -97,16 +97,19 @@ class ToolCallOrchestrator:
         only_tools: list[str] | Callable[[], list[str] | None] | None = None,
         carry_taint: bool = False,
         trailing_message: ChatMessage | None = None,
+        pre_tainted: bool = False,
     ) -> AsyncGenerator[TurnEvent, None]:
         """only_tools subsets DB tools for this turn (never grants). Both tool
         args may be callables so a mid-turn node change re-resolves schemas.
         carry_taint: this turn is not a new caller utterance (e.g. recovery after a failed transfer), so
         retrieved text read earlier is still in context and the held writes are not yet confirmed.
-        trailing_message is sent last on every LLM call of the turn but never stored in history."""
+        trailing_message is sent last on every LLM call of the turn but never stored in history.
+        pre_tainted: retrieved, tenant-uploaded text was put in front of the model before the turn started (no
+        search_knowledge call ran to taint it), so writes are held for the caller's yes exactly as after a lookup."""
         local_calls = 0
         guard = TurnGuard(self._max_tool_calls_per_turn)
         call_key = (tenant_id, call_id)
-        guard.tainted = carry_taint and self._call_taint.get(call_key, False)
+        guard.tainted = (carry_taint and self._call_taint.get(call_key, False)) or pre_tainted
         self._call_taint[call_key] = guard.tainted
         if len(self._call_taint) > _MAX_TRACKED_CALLS:
             self._call_taint.pop(next(iter(self._call_taint)))
@@ -293,17 +296,11 @@ class ToolCallOrchestrator:
                         raise
                 latency_ms = (time.monotonic() - call_t0) * 1000
                 read_only = definition.read_only if definition is not None else False
-                # Local tools have no policy row to say which values are sensitive, and their arguments are the
-                # caller's own words (a search query), so only the key names are logged.
-                logged_args = (
-                    _redact(event.arguments, policy.sensitive_arg_keys) if policy is not None
-                    else sorted(event.arguments) if isinstance(event.arguments, dict) else "<not an object>"
-                )
                 log.info(
                     "tool_call result turn=%s tool=%s tenant=%s agent=%s status=%s error=%s latency_ms=%d "
-                    "trace_id=%s args=%r",
+                    "trace_id=%s %s",
                     turn_id, event.tool_name, tenant_id, agent_id, result.status.value, result.error,
-                    latency_ms, trace_id, logged_args,
+                    latency_ms, trace_id, describe_arguments(event.arguments),
                 )
                 _fold_tool_result_into_history(
                     history, event, result, read_only=read_only, latency_ms=latency_ms, trace_id=trace_id,
@@ -400,7 +397,6 @@ class ToolCallOrchestrator:
         timeout_ms = policy.timeout_ms or DEFAULT_TOOL_TIMEOUT_MS
         chain = build_default_chain(
             executor, timeout_ms=timeout_ms, metrics=self._metrics,
-            redact_arg_keys=policy.sensitive_arg_keys,
             latency_store=self._latency_store,
             breaker_board=self._breakers,
         )
@@ -599,6 +595,7 @@ def _fold_tool_result_into_history(
         call_dict["provider_metadata"] = event.provider_metadata
     history.append(ChatMessage(role="assistant", content="", tool_calls=[call_dict]))
     envelope = build_envelope(result, read_only=read_only, latency_ms=latency_ms, trace_id=trace_id)
-    history.append(ChatMessage(
-        role="tool", content=json.dumps(envelope), tool_call_id=event.tool_call_id,
-    ))
+    # ensure_ascii=False keeps non-Latin data readable, but a lone surrogate from a tool's JSON
+    # (e.g. "\ud83d") would then reach the provider's UTF-8 encode and fail every later request.
+    content = json.dumps(envelope, ensure_ascii=False).encode("utf-8", "replace").decode("utf-8")
+    history.append(ChatMessage(role="tool", content=content, tool_call_id=event.tool_call_id))

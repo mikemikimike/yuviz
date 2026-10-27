@@ -91,8 +91,13 @@ async def _deepgram(cfg: dict[str, Any], api_key: str, text: str) -> bytes:
     return resp.content
 
 
-async def synthesize_preview(cfg: dict[str, Any], text: str, *, secret_resolver: SecretResolver) -> bytes:
-    """`cfg` is an already-authorized provider_configs row. Returns WAV bytes."""
+async def synthesize_preview(
+    cfg: dict[str, Any], text: str, *, secret_resolver: SecretResolver, voice_id: str | None = None,
+) -> bytes:
+    """`cfg` is an already-authorized provider_configs row. `voice_id`, already checked against the account's voice
+    list by the caller, replaces the saved ElevenLabs voice. Returns WAV bytes."""
+    if voice_id and cfg.get("engine") == "elevenlabs":
+        cfg = {**cfg, "voice": voice_id}
     text = (text or "").strip()
     if not text:
         raise PreviewUnavailable("nothing to say — write a line first")

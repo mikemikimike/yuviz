@@ -12,6 +12,8 @@ from typing import Any
 
 from services.config import provider_configs
 from services.knowledge import agent_kb as agent_kb_service
+from services.knowledge import cache
+from services.knowledge import retrieval_plan as plans
 from services.knowledge import knowledge_bases as kb_service
 from services.knowledge.embedding_manager import EmbeddingProviderManager
 from services.knowledge.secret_resolver import CompositeSecretResolver
@@ -79,8 +81,43 @@ async def make_kb(pool, tenant, agent, slug: str, *, embedding: bool = True, ass
         tenant_id=tenant["id"], slug=slug, name=slug, embedding_config_id=cfg_id,
     )
     if assign:
-        await agent_kb_service.assign(agent["id"], kb["id"])
+        await use_kb(pool, agent["id"], kb["id"])
     return kb
+
+
+# Tests still think in "this agent uses this KB": each such pair links the KB's documents, present and future.
+_kb_agents: dict[str, set[str]] = {}
+
+
+async def _refresh(pool, agent_id: Any) -> None:
+    """agent_kb._refresh_flag through the superuser pool, so callers need no tenant scope."""
+    row = await pool.fetchrow(
+        "SELECT a.slug AS agent_slug, t.slug AS tenant_slug FROM agents a JOIN tenants t ON t.id = a.tenant_id "
+        "WHERE a.id = $1", agent_id,
+    )
+    plans.invalidate_agent(row["tenant_slug"], row["agent_slug"])
+    has = await pool.fetchval(agent_kb_service._HAS_DOCUMENTS_SQL.format(where="WHERE ad.agent_id = $1"), agent_id)
+    await cache.set_has_enabled_kb(row["tenant_slug"], row["agent_slug"], bool(has))
+
+
+async def use_kb(pool, agent_id: Any, kb_id: Any) -> None:
+    _kb_agents.setdefault(str(kb_id), set()).add(str(agent_id))
+    await pool.execute(
+        "INSERT INTO agent_documents (agent_id, document_id) "
+        "SELECT $1, d.id FROM kb_documents d WHERE d.kb_id = $2 ON CONFLICT DO NOTHING",
+        agent_id, kb_id,
+    )
+    await _refresh(pool, agent_id)
+
+
+async def link_to_kb_agents(pool, kb_id: Any, document_id: Any) -> None:
+    """Link a document uploaded through the API to the agents using its KB, as add_document does."""
+    for agent_id in _kb_agents.get(str(kb_id), ()):
+        await pool.execute(
+            "INSERT INTO agent_documents (agent_id, document_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            agent_id, document_id,
+        )
+        await _refresh(pool, agent_id)
 
 
 async def add_document(
@@ -110,4 +147,5 @@ async def add_document(
         ))
     doc["chunk_ids"] = [str(i) for i in ids]
     doc["parent_id"] = str(parent_id) if parent_id is not None else None
+    await link_to_kb_agents(pool, kb["id"], doc["id"])
     return doc

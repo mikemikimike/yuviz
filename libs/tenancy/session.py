@@ -5,6 +5,7 @@ Target is honoured only for platform-scoped actors, so RLS never just mirrors th
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -83,12 +84,53 @@ async def _resolve_scope_on(conn: asyncpg.Connection, tenant: str | None) -> Non
         raise TenantUnresolved(f"could not resolve a tenant for this connection (tenant={tenant!r})")
 
 
+def _acquire(pool: asyncpg.Pool, timeout: float | None):
+    # Pass no kwarg when unset: other services hand in pool wrappers whose acquire() takes none.
+    return pool.acquire() if timeout is None else pool.acquire(timeout=timeout)
+
+
+@asynccontextmanager
+async def _transaction(conn: asyncpg.Connection, acquire_timeout: float | None) -> AsyncIterator[None]:
+    """`conn.transaction()`; with `acquire_timeout` set, a cancellation also closes `conn`.
+
+    On a blackholed DB asyncpg's ROLLBACK (and a cancelled BEGIN's cleanup) first waits for the
+    cancelled command to finish, which neither command_timeout nor the acquire timeout bounds.
+    Terminating makes them fail fast, the pool replaces the connection, and the caller still
+    sees CancelledError rather than the InterfaceError the closed connection produces.
+    """
+    # Track termination ourselves: once terminated, the pool detaches the proxy and every method
+    # on it, is_closed() included, raises InterfaceError.
+    terminated = False
+
+    def terminate() -> None:
+        nonlocal terminated
+        if acquire_timeout is not None and not terminated:
+            terminated = True
+            conn.terminate()
+
+    try:
+        async with conn.transaction():
+            try:
+                yield
+            except asyncio.CancelledError:
+                terminate()
+                raise
+    except asyncio.CancelledError:
+        terminate()
+        raise
+    except asyncpg.InterfaceError as exc:
+        if terminated and isinstance(exc.__context__, asyncio.CancelledError):
+            raise exc.__context__ from None
+        raise
+
+
 @asynccontextmanager
 async def tenant_conn(
     pool: asyncpg.Pool,
     *,
     explicit_tenant: str | None = None,  # UUID *or* slug; only for the enumerated no-request-context sites
     reason: str | None = None,           # mandatory whenever explicit_tenant is given
+    acquire_timeout: float | None = None,  # see platform_conn
 ) -> AsyncIterator[asyncpg.Connection]:
     """Yield a pooled connection in a transaction with tenant GUCs set via SET LOCAL.
 
@@ -121,8 +163,8 @@ async def tenant_conn(
                 scope.caller, scope.target,
             )
 
-    async with pool.acquire() as conn:
-        async with conn.transaction():
+    async with _acquire(pool, acquire_timeout) as conn:
+        async with _transaction(conn, acquire_timeout):
             await _resolve_scope_on(conn, tenant)
             yield conn
 
@@ -133,13 +175,19 @@ async def platform_conn(
     *,
     reason: str,
     stamp_tenant: str | None = None,  # UUID or slug; sets the GUCs for audit_log's DEFAULT only
+    acquire_timeout: float | None = None,
 ) -> AsyncIterator[asyncpg.Connection]:
     """Yield a connection under SET LOCAL ROLE yuviz_platform (BYPASSRLS).
 
     `reason` makes every bypass greppable; `stamp_tenant` only feeds audit_log's default.
+    `acquire_timeout` (here and on tenant_conn) is passed to pool.acquire(timeout=): it bounds the
+    wait for a free connection and, because asyncpg reuses it as the budget for releasing the
+    connection, the release after a cancellation before BEGIN. When set, a cancellation after BEGIN
+    also terminates the connection so ROLLBACK cannot hang. None keeps asyncpg's unbounded default
+    and the plain rollback.
     """
-    async with pool.acquire() as conn:
-        async with conn.transaction():
+    async with _acquire(pool, acquire_timeout) as conn:
+        async with _transaction(conn, acquire_timeout):
             await conn.execute("SET LOCAL ROLE yuviz_platform")
             if stamp_tenant is not None:
                 await _resolve_scope_on(conn, stamp_tenant)

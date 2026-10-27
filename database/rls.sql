@@ -293,6 +293,17 @@ END $$;
 
 DO $$
 BEGIN
+    DROP POLICY IF EXISTS kb_document_texts_tenant_isolation ON kb_document_texts;
+    CREATE POLICY kb_document_texts_tenant_isolation ON kb_document_texts
+        FOR ALL TO yuviz_app
+        USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+        WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+    ALTER TABLE kb_document_texts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE kb_document_texts FORCE  ROW LEVEL SECURITY;
+END $$;
+
+DO $$
+BEGIN
     DROP POLICY IF EXISTS telephony_configs_tenant_isolation ON telephony_configs;
     CREATE POLICY telephony_configs_tenant_isolation ON telephony_configs
         FOR ALL TO yuviz_app
@@ -442,6 +453,17 @@ END $$;
 
 DO $$
 BEGIN
+    DROP POLICY IF EXISTS agent_documents_tenant_isolation ON agent_documents;
+    CREATE POLICY agent_documents_tenant_isolation ON agent_documents
+        FOR ALL TO yuviz_app
+        USING      (EXISTS (SELECT 1 FROM agents p WHERE p.id = agent_documents.agent_id))
+        WITH CHECK (EXISTS (SELECT 1 FROM agents p WHERE p.id = agent_documents.agent_id));
+    ALTER TABLE agent_documents ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE agent_documents FORCE  ROW LEVEL SECURITY;
+END $$;
+
+DO $$
+BEGIN
     DROP POLICY IF EXISTS agent_retrieval_policies_tenant_isolation ON agent_retrieval_policies;
     CREATE POLICY agent_retrieval_policies_tenant_isolation ON agent_retrieval_policies
         FOR ALL TO yuviz_app
@@ -516,6 +538,26 @@ BEGIN
         'clinic_settings', 'clinic_api_keys', 'clinic_departments', 'clinic_doctors',
         'clinic_doctor_schedules', 'clinic_doctor_leaves', 'clinic_appointments',
         'clinic_slot_holds', 'clinic_outbox', 'clinic_reminder_calls'
+    ] LOOP
+        CONTINUE WHEN to_regclass(t) IS NULL;
+        EXECUTE format('DROP POLICY IF EXISTS %I ON %I', t || '_tenant_isolation', t);
+        EXECUTE format(
+            'CREATE POLICY %I ON %I FOR ALL TO yuviz_app '
+            'USING (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid) '
+            'WITH CHECK (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid)',
+            t || '_tenant_isolation', t);
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+        EXECUTE format('ALTER TABLE %I FORCE  ROW LEVEL SECURITY', t);
+    END LOOP;
+END $$;
+
+-- ── Real-estate sales (database/realestate_schema.sql) ──────────────────────
+-- Every re_* table carries tenant_id. Skipped when realestate_schema.sql was not applied.
+DO $$
+DECLARE t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        're_settings', 're_api_keys', 're_projects', 're_site_visits', 're_leads', 're_callbacks'
     ] LOOP
         CONTINUE WHEN to_regclass(t) IS NULL;
         EXECUTE format('DROP POLICY IF EXISTS %I ON %I', t || '_tenant_isolation', t);

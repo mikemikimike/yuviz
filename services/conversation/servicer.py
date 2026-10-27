@@ -9,15 +9,17 @@ Wire protocol per stream:
 
 An internal asyncio.Queue decouples gRPC message reading from processing.
 This allows cancel_generation messages to be processed between pipeline
-stages even when the servicer is inside a speech_ended() async-for loop.
+stages even while a speech_ended() turn is blocked on the LLM or a tool.
 """
 
 from __future__ import annotations
 
 import asyncio
+import collections
+import contextlib
 import logging
 import time
-from typing import Awaitable, AsyncIterator, Callable
+from typing import AsyncGenerator, Awaitable, AsyncIterator, Callable
 
 import grpc
 import grpc.aio
@@ -27,6 +29,7 @@ from .rejection import RejectedCallHangup
 from .session import (
     AgentUnavailable, ConversationSession, IConversationHandler, RoutingStatus, SessionContext,
 )
+from .transcript_builder import TranscriptBuilder
 
 from .generated.voiceai.v1 import conversation_pb2 as pb
 from .generated.voiceai.v1 import conversation_pb2_grpc as pb_grpc
@@ -34,6 +37,12 @@ from .generated.voiceai.v1 import conversation_pb2_grpc as pb_grpc
 log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "1.0"
+
+# One refusal text for a live session_id, whichever tenant holds it.
+_SESSION_IN_USE = "session_id already in use"
+# Fixed peer-facing texts: exception strings can carry hosts, ports and DSNs, so they stay in the server log.
+_INTERNAL_MESSAGE = "internal error"
+_REJECTED_MESSAGE = "call rejected"
 
 # UNSPECIFIED is a non-gateway client: webcall, vobiz, tests.
 _ROUTING_STATUS = {
@@ -85,15 +94,30 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
     """Stateless servicer: a fresh ConversationSession and handler per Converse() call."""
 
     def __init__(
-        self, handler_factory: Callable[[SessionContext], Awaitable[IConversationHandler]],
+        self,
+        handler_factory: Callable[[SessionContext], Awaitable[IConversationHandler]],
+        transcripts: TranscriptBuilder | None = None,
     ) -> None:
         self._handler_factory = handler_factory
+        self._transcripts = transcripts
+        self._stream_tasks: set[asyncio.Task] = set()
+        self._live_sessions: set[str] = set()
+
+    async def wait_closed(self, timeout: float) -> None:
+        """Wait for open streams to finish their teardown, so end-of-call writes are queued
+        before the caller closes the transcript pool. Call after the server has stopped."""
+        if self._stream_tasks:
+            await asyncio.wait(self._stream_tasks, timeout=timeout)
 
     async def Converse(
         self,
         request_iterator: AsyncIterator[pb.GatewayMessage],
         context: grpc.aio.ServicerContext,
     ) -> AsyncIterator[pb.ServiceMessage]:
+
+        stream_task = asyncio.current_task()
+        self._stream_tasks.add(stream_task)
+        stream_task.add_done_callback(self._stream_tasks.discard)
 
         # ── 1. Handshake ───────────────────────────────────────────────────────
         try:
@@ -119,6 +143,31 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             )
             return
 
+        # Per-session state downstream (transcript bookkeeping, STT stream, call row) is keyed by the
+        # client-supplied session_id, so one live stream per id, across tenants. The refusal text is
+        # the same whichever tenant holds the id.
+        sid = open_req.session_id
+        if sid in self._live_sessions:
+            log.warning("Converse: duplicate live session_id refused session=%s tenant=%s",
+                        sid, open_req.tenant_id)
+            await context.abort(grpc.StatusCode.ALREADY_EXISTS, _SESSION_IN_USE)
+            return
+        self._live_sessions.add(sid)
+        try:
+            async with contextlib.aclosing(self._serve(open_req, request_iterator)) as stream:
+                async for message in stream:
+                    yield message
+        finally:
+            # end_call() normally cleared these; a teardown cut short before it must not leave them behind.
+            if self._transcripts is not None:
+                self._transcripts.discard_session(sid)
+            self._live_sessions.discard(sid)
+
+    async def _serve(
+        self,
+        open_req: pb.SessionOpenRequest,
+        request_iterator: AsyncIterator[pb.GatewayMessage],
+    ) -> AsyncIterator[pb.ServiceMessage]:
         sid = open_req.session_id
         routing_status = _ROUTING_STATUS.get(open_req.routing_status)
         if routing_status is None:
@@ -151,6 +200,17 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     session_id=sid,
                     code="AGENT_UNAVAILABLE",
                     message="agent unavailable",
+                    fatal=True,
+                )
+            )
+            return
+        except Exception:
+            log.exception("Converse: handler factory failed session=%s", sid)
+            yield pb.ServiceMessage(
+                error=pb.ServiceError(
+                    session_id=sid,
+                    code="INTERNAL",
+                    message=_INTERNAL_MESSAGE,
                     fatal=True,
                 )
             )
@@ -276,6 +336,45 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
 
         msg_fut: asyncio.Future | None = None
         out_fut: asyncio.Future | None = None
+        turn = None
+
+        # Messages taken off msg_q while a turn runs, ahead of anything still queued.
+        backlog: collections.deque[pb.GatewayMessage | None] = collections.deque()
+        # Once a speech_ended / transfer_* is deferred to the outer loop, everything behind it
+        # belongs to later utterances and waits here, ahead of `backlog`, until the outer loop
+        # reaches it. A turn's drain never pops from it, so a deferred message is examined once,
+        # not again by each later turn (which would discard the next utterance's audio as
+        # "trailing frames").
+        held: collections.deque[pb.GatewayMessage] = collections.deque()
+        turn_stream: AsyncGenerator | None = None
+
+        async def _turn_responses(turn: AsyncIterator) -> AsyncGenerator:
+            """Yield the turn's responses, or None whenever a gateway message arrives first,
+            so a cancel is seen while the turn is blocked on the LLM or a tool."""
+            next_resp = asyncio.ensure_future(turn.__anext__())
+            next_msg: asyncio.Future | None = None
+            try:
+                while True:
+                    if next_msg is None:
+                        next_msg = asyncio.ensure_future(msg_q.get())
+                    await asyncio.wait({next_resp, next_msg}, return_when=asyncio.FIRST_COMPLETED)
+                    if next_msg.done():
+                        backlog.append(next_msg.result())
+                        next_msg = None
+                        yield None
+                    elif next_resp.done():
+                        try:
+                            response = next_resp.result()
+                        except StopAsyncIteration:
+                            return
+                        next_resp = asyncio.ensure_future(turn.__anext__())
+                        yield response
+            finally:
+                if next_msg is not None and not next_msg.cancel():
+                    backlog.append(next_msg.result())
+                if not next_resp.done():
+                    next_resp.cancel()
+                    await asyncio.gather(next_resp, return_exceptions=True)
 
         try:
             # Inside the try: a hangup while the greeting is still synthesizing
@@ -284,7 +383,11 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                 yield out
 
             while True:
-                if session.out_responses is not None:
+                if held:
+                    msg = held.popleft()
+                elif backlog:
+                    msg = backlog.popleft()
+                elif session.out_responses is not None:
                     if msg_fut is None:
                         msg_fut = asyncio.ensure_future(msg_q.get())
                     if out_fut is None:
@@ -351,27 +454,33 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     # Stream SttResult/TTS chunks as the pipeline produces them —
                     # buffering the whole turn would trip the gateway's SttTimeout.
                     tts_started_sent      = False
+                    audio_sent            = False
                     cancelled             = False
                     stt_sent              = False
                     end_call_requested    = False
                     end_call_grace_period = 0
                     turn_transfer         = None
 
-                    async for response in session.speech_ended(
-                        se.duration_ms, se.energy_db
-                    ):
+                    # Keep the inner turn: teardown must aclose() it (not only the wrapper) so the
+                    # pipeline's GeneratorExit handler records the interrupted turn.
+                    turn = session.speech_ended(se.duration_ms, se.energy_db)
+                    turn_stream = _turn_responses(turn.__aiter__())
+                    # Behind a deferred message only a cancel or end of stream still stops this turn.
+                    async for response in turn_stream:
                         # Drain BEFORE sending so a cancel_generation that arrived
                         # during synthesis stops this turn's audio from being sent.
-                        while not msg_q.empty():
-                            pending = msg_q.get_nowait()
+                        while backlog or not msg_q.empty():
+                            pending = backlog.popleft() if backlog else msg_q.get_nowait()
                             if pending is None:
                                 # Stream ended during pipeline — stop generating.
                                 await session.cancel()
                                 cancelled = True
-                                await msg_q.put(None)  # re-enqueue so outer loop exits
+                                backlog.appendleft(None)  # so outer loop exits
                                 break
                             pcase = pending.WhichOneof("payload")
-                            if pcase == "cancel_generation":
+                            if held and pcase != "cancel_generation":
+                                held.append(pending)
+                            elif pcase == "cancel_generation":
                                 await session.cancel()
                                 cancelled = True
                                 # Ack now so C++ leaves BargeIn without waiting for
@@ -413,21 +522,22 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     )
                             elif pcase == "speech_ended":
                                 # New utterance while this turn's pipeline still runs —
-                                # re-enqueue for the outer loop.
-                                await msg_q.put(pending)
-                                break
+                                # leave it for the outer loop.
+                                held.append(pending)
                             elif pcase in (
                                 "transfer_initiated", "transfer_completed", "transfer_failed",
                             ):
                                 # Defer: transfer_failed streams its own TTS, which would
                                 # interleave with this turn's audio.
-                                await msg_q.put(pending)
-                                break
+                                held.append(pending)
                             else:
                                 log.warning(
                                     "Unexpected %s during speech pipeline session=%s",
                                     pcase, sid,
                                 )
+
+                        if response is None:
+                            continue  # woken by a message, already handled above
 
                         if not cancelled:
                             if response.end_call:
@@ -466,6 +576,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             # advances C++ FSM Thinking→Synthesizing→Speaking so
                             # barge-in detection works during playback.
                             if response.tts_payloads:
+                                # A filler replays from cache even while TTS is down, so it is not the goodbye.
+                                audio_sent = audio_sent or not response.filler
                                 if not tts_started_sent:
                                     yield pb.ServiceMessage(
                                         tts_started=pb.TtsStarted(session_id=sid)
@@ -490,7 +602,6 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                         session_id=sid, text=response.response_text,
                                     )
                                 )
-
                     # Empty transcript (noise / filtered hallucination): tell the
                     # gateway so its FSM returns to Listening instead of waiting
                     # out the 8 s SttTimeout in silence.
@@ -500,6 +611,12 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 session_id=sid, text="", confidence=0.0, is_final=True,
                             )
                         )
+
+                    # TTS produced no audio for a transcribed turn (provider failure): still
+                    # close the turn, or the gateway waits in silence until the caller speaks again.
+                    if stt_sent and not tts_started_sent and not cancelled and turn_transfer is None:
+                        yield pb.ServiceMessage(tts_started=pb.TtsStarted(session_id=sid))
+                        tts_started_sent = True
 
                     # End-of-response marker: empty is_final chunk; the gateway
                     # holds playback_finished until the final frame drains.
@@ -517,8 +634,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         )
 
                     # Sent after the final TtsChunk so the gateway waits for the goodbye to drain.
-                    # Requires TTS this turn, else the flag leaks into a later turn's playback.
-                    if end_call_requested and not cancelled and tts_started_sent:
+                    # Requires reply or goodbye audio this turn (not a filler or the synthetic TtsStarted),
+                    # else the flag leaks into a later turn's playback.
+                    if end_call_requested and not cancelled and audio_sent:
                         log.info(
                             "Converse: sending EndCall grace_period_ms=%d session=%s",
                             end_call_grace_period, sid,
@@ -530,7 +648,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 grace_period_ms=end_call_grace_period,
                             )
                         )
-                    elif end_call_requested and not cancelled and not tts_started_sent:
+                    elif end_call_requested and not cancelled:
                         log.warning(
                             "Converse: end-call marker detected but turn produced no "
                             "TTS audio — not sending EndCall (would leak into a later "
@@ -585,9 +703,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                 elif payload_case == "transfer_initiated":
                     ti = msg.transfer_initiated
                     transfer_started_at = time.monotonic()
-                    log.info("Converse: transfer_initiated type=%s destination=%s reason=%s "
+                    log.info("Converse: transfer_initiated type=%s destination=%s "
                              "transfer_id=%s session=%s",
-                             ti.transfer_type, ti.destination, ti.reason, ti.transfer_id, sid)
+                             ti.transfer_type, ti.destination, ti.transfer_id, sid)
                     session.on_transfer_initiated(ti.transfer_type, ti.destination, ti.reason,
                                                   ti.transfer_id)
 
@@ -668,15 +786,15 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         except RejectedCallHangup as exc:
             log.info("Converse: hanging up rejected call: %s", exc)
             yield pb.ServiceMessage(
-                error=pb.ServiceError(session_id=sid, code="CALL_REJECTED", message=str(exc), fatal=True)
+                error=pb.ServiceError(session_id=sid, code="CALL_REJECTED", message=_REJECTED_MESSAGE, fatal=True)
             )
-        except Exception as exc:
+        except Exception:
             log.exception("Converse error session=%s", sid)
             yield pb.ServiceMessage(
                 error=pb.ServiceError(
                     session_id=sid,
                     code="INTERNAL",
-                    message=str(exc),
+                    message=_INTERNAL_MESSAGE,
                     fatal=True,
                 )
             )
@@ -686,12 +804,17 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             for pending_fut in (msg_fut, out_fut):
                 if pending_fut is not None and not pending_fut.done():
                     pending_fut.cancel()
+            if turn_stream is not None:
+                await turn_stream.aclose()  # stops a turn still running behind the stream
             reader_task.cancel()
             try:
                 await reader_task
             except asyncio.CancelledError:
                 pass
 
+            # A hangup abandons the turn at a yield; close it so the pipeline persists the turn before close().
+            if turn is not None:
+                await turn.aclose()
             await session.close("stream_ended")
             # Drain the bus before stopping so SessionEnded and other close-path
             # events are delivered to subscribers.

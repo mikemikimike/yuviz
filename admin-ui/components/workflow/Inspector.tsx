@@ -10,6 +10,9 @@ import type {
 import { ExtractionEditor } from "./ExtractionEditor";
 
 // SYSTEM_DISPOSITIONS from libs/config_sdk/workflow.py; suggestions only, any string is allowed.
+// The runner only checks that a step's knowledge_base_ids is non-empty; the agent's documents set the scope.
+const STAGE_KNOWLEDGE_ON = "agent-documents";
+
 const DISPOSITIONS = [
   "completed", "qualified", "not_qualified", "transferred", "abandoned", "failed",
 ];
@@ -31,7 +34,8 @@ export interface Selection {
 interface Props {
   selection: Selection | null;
   agentTools: string[];
-  knowledgeBases: { id: string; name: string }[];
+  /** How many documents the agent answers from; a step's lookup searches all of them. */
+  documentCount: number;
   errors: WorkflowError[];
   warnings: WorkflowError[];
   availableVariables: string[];
@@ -106,7 +110,7 @@ function PromptField({
 }
 
 export function Inspector({
-  selection, agentTools, knowledgeBases, errors, warnings, availableVariables,
+  selection, agentTools, documentCount, errors, warnings, availableVariables,
   onChangeNode, onChangeNodeType, onChangeEdge, onDelete,
 }: Props) {
   if (!selection) {
@@ -331,23 +335,19 @@ export function Inspector({
 
           <div className="form-group">
             <label className="form-label">Can it look things up here?</label>
-            {knowledgeBases.length === 0 ? (
-              <div className="form-hint">
-                No knowledge bases attached — see the <strong>Knowledge Base</strong> tab.
-              </div>
-            ) : (
-              knowledgeBases.map((kb) => (
-                <label key={kb.id} className="wf-check">
-                  <input
-                    type="checkbox"
-                    checked={(data.knowledge_base_ids || []).includes(kb.id)}
-                    onChange={() => set({ knowledge_base_ids: toggle(data.knowledge_base_ids, kb.id) })}
-                  />
-                  <span>{kb.name}</span>
-                </label>
-              ))
-            )}
-            <div className="form-hint">Steps with nothing ticked skip the lookup entirely, which is faster.</div>
+            <label className="wf-check">
+              <input
+                type="checkbox"
+                checked={(data.knowledge_base_ids?.length ?? 0) > 0}
+                onChange={(e) => set({ knowledge_base_ids: e.target.checked ? [STAGE_KNOWLEDGE_ON] : [] })}
+              />
+              <span>Search the agent&apos;s documents in this step</span>
+            </label>
+            <div className="form-hint">
+              {documentCount === 0
+                ? "This agent has no documents yet. Pick some on its Knowledge tab."
+                : `Searches the agent's ${documentCount} document${documentCount === 1 ? "" : "s"}. Steps that don't search skip the lookup entirely, which is faster.`}
+            </div>
           </div>
 
           <ExtractionEditor

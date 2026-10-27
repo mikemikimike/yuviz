@@ -18,7 +18,7 @@ from services.knowledge.vector_repository import PgVectorRepository
 from services.knowledge.storage import LocalStorageProvider
 from services.knowledge.tests.eval.golden import ALL_DOCS, QUESTIONS
 from services.knowledge.tests.eval.harness import Metrics, _norm
-from services.knowledge.tests.rag_fakes import FakeEmbedder, make_kb, make_manager
+from services.knowledge.tests.rag_fakes import FakeEmbedder, link_to_kb_agents, make_kb, make_manager
 
 TOP_K = 5
 _BENIGN = frozenset({"prompt_docs_trimmed"})  # not a fallback: tiny prompt-mode docs (a cold plan is retrieval_metadata.plan_cache)
@@ -96,7 +96,8 @@ async def run_pipeline_eval(
     previous_tenants = os.environ.get("KNOWLEDGE_ENRICH_TENANTS")
     if llm_config:  # enrichment is per-tenant opt-in: enable exactly this throwaway tenant
         os.environ["KNOWLEDGE_ENRICH_TENANTS"] = slug
-    tenant = dict(await pool.fetchrow("INSERT INTO tenants (name, slug) VALUES ($1, $1) RETURNING *", slug))
+    tenant = dict(await pool.fetchrow(  # the golden corpus is larger than the default per-tenant file limit
+        "INSERT INTO tenants (name, slug, knowledge_max_documents) VALUES ($1, $1, 1000) RETURNING *", slug))
     try:
         agent = dict(await pool.fetchrow(
             "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'golden', 'Golden') RETURNING *", tenant["id"]))
@@ -117,6 +118,7 @@ async def run_pipeline_eval(
             doc = await documents_service.upload_document(
                 tenant_id=tenant["id"], kb_id=kb["id"], title=name, filename=f"{name}.{ext}", content_type=ctype,
                 content=text.encode(), storage=storage)
+            await link_to_kb_agents(pool, kb["id"], doc["id"])
             job = dict(await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
             set_caller_tenant(None)
             await process_one_job(pool, storage, manager, job)

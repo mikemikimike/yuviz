@@ -42,6 +42,7 @@ WAVE_B_TABLES = {
     "api_chain_steps",
     "transcript_entries",
     "agent_knowledge_bases",
+    "agent_documents",
     "agent_retrieval_policies",
     "kb_ingestion_jobs",
 }
@@ -242,6 +243,8 @@ _EXPLICIT_OVERRIDE_REASONS = {
     # Clinic workers act for the row's own tenant after a cross-tenant claim; the seed script names its tenant.
     "clinic-reminder-dial", "clinic-tool-call", "clinic-outbox-deliver", "clinic-outbox-done", "clinic-outbox-failed",
     "seed-clinic-demo",
+    # Real estate: the tool API names the tenant its bearer key belongs to; the seed script names its own.
+    "realestate-tool-call", "seed-realestate-demo",
 }
 
 # Every platform_conn(reason=...) literal; a new bypass must be added here.
@@ -294,6 +297,8 @@ _BYPASS_REASONS = {
     # Clinic: one worker leases due rows across tenants; the bearer key is what names the tenant;
     # originate results are matched by FreeSWITCH job uuid, never by tenant-supplied input.
     "clinic-outbox-claim", "clinic-reminder-claim", "clinic-reminder-job-event", "clinic-tool-key-lookup",
+    # Real estate: same shape as clinic-tool-key-lookup. The bearer key is what names the tenant.
+    "realestate-tool-key-lookup",
 }
 
 # Platform-branch mutations with genuinely no tenant to stamp.

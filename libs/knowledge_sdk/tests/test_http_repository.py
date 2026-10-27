@@ -91,9 +91,12 @@ async def test_has_enabled_kb_true_after_assignment(service_account, tenant_agen
         "VALUES ($1, 'policies', 'Policies', $2) RETURNING *",
         tenant["id"], embedding_cfg["id"],
     )
+    document = await pool.fetchrow(
+        "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type, status) "
+        "VALUES ($1, $2, 'Refunds', 'inline', 'text/plain', 'ready') RETURNING id", kb["id"], tenant["id"],
+    )
     await pool.execute(
-        "INSERT INTO agent_knowledge_bases (agent_id, kb_id, enabled) VALUES ($1, $2, true)",
-        agent["id"], kb["id"],
+        "INSERT INTO agent_documents (agent_id, document_id) VALUES ($1, $2)", agent["id"], document["id"],
     )
 
     repo = _repo(service_account)

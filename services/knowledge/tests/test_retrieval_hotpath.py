@@ -264,7 +264,7 @@ async def test_selective_kb_filter_still_returns_top_k_through_hnsw(pool, tenant
     tenant, agent = tenant_agent
     set_caller_tenant(str(tenant["id"]))
     big, small = await _selective_world(pool, tenant, agent, 1500 if mode != "fallback" else 300)
-    args = (vec_literal(embed_text("alpha beta gamma")), [str(small["id"])], 5, vr.SEARCHABLE_STATUSES, -1.0, None)
+    args = (vec_literal(embed_text("alpha beta gamma")), [str(small["id"])], 5, vr.SEARCHABLE_STATUSES, -1.0, None, None)
 
     async with _hnsw_forced(pool) as conn:
         # Premise 1: the repository's own SQL is driven by the HNSW index here.
@@ -355,7 +355,7 @@ async def test_parent_too_big_for_the_budget_falls_back_to_its_child(pool, world
 
 # --- plan cache ----------------------------------------------------------------------------------------------
 
-_PLAN_TABLES = ("FROM agents", "agent_retrieval_policies", "agent_knowledge_bases", "provider_configs", "kb_documents d")
+_PLAN_TABLES = ("FROM agents", "agent_retrieval_policies", "agent_documents", "provider_configs", "kb_documents d")
 
 
 def _spy_queries(monkeypatch) -> list[str]:
@@ -394,22 +394,23 @@ async def test_cold_plan_costs_queries_and_prewarm_removes_them(world, monkeypat
     set_caller_tenant(str(world["tenant"]["id"]))
     assert await plans.prewarm(world["tenant"]["slug"], world["agent"]["slug"],
                                embedding_manager=make_manager(world["embedder"])) is True
-    assert len([q for q in seen if "FROM agents" in q or "agent_knowledge_bases" in q]) >= 2
+    assert len([q for q in seen if "FROM agents" in q or "agent_documents" in q]) >= 2
     result = await _run(world["tenant"], world["agent"], world["embedder"], "refund")
     assert result["retrieval_metadata"]["plan_cache"] == "hit"
 
 
-async def test_plan_invalidates_when_a_kb_is_assigned_or_disabled(pool, world):
+async def test_plan_invalidates_when_a_document_is_linked_or_unlinked(pool, world):
     from services.knowledge import agent_kb as agent_kb_service
     t, a = world["tenant"], world["agent"]
     first = await _run(t, a, world["embedder"], "orbital docking procedure")
     assert first["status"] == "no_match"
     extra = await make_kb(pool, t, a, "extra", assign=False)
-    await add_document(pool, t, extra, "Docking", ["Orbital docking procedure requires two operators."])
+    docking = await add_document(pool, t, extra, "Docking", ["Orbital docking procedure requires two operators."])
+    before = [str(d["document_id"]) for d in await agent_kb_service.list_for_agent(a["id"])]
     assert (await _run(t, a, world["embedder"], "orbital docking procedure"))["status"] == "no_match"  # cached plan
-    await agent_kb_service.assign(a["id"], extra["id"])  # explicit invalidate
+    await agent_kb_service.replace_documents(a["id"], [*before, str(docking["id"])])  # explicit invalidate
     assert (await _run(t, a, world["embedder"], "orbital docking procedure"))["status"] == "ok"
-    await agent_kb_service.set_enabled(a["id"], extra["id"], enabled=False)
+    await agent_kb_service.replace_documents(a["id"], before)
     assert (await _run(t, a, world["embedder"], "orbital docking procedure"))["status"] == "no_match"
 
 
@@ -494,7 +495,7 @@ async def test_embedding_cache_hits_for_same_tenant_and_never_crosses_tenants(po
     finally:
         await retrieval_log.flush()
         await pool.execute("DELETE FROM retrieval_logs WHERE tenant_id = $1", other["id"])
-        await pool.execute("DELETE FROM agent_knowledge_bases WHERE agent_id = $1", other_agent["id"])
+        await pool.execute("DELETE FROM agent_documents WHERE agent_id = $1", other_agent["id"])
         await pool.execute("DELETE FROM kb_chunks WHERE tenant_id = $1", other["id"])
         await pool.execute("DELETE FROM kb_documents WHERE tenant_id = $1", other["id"])
         await pool.execute("DELETE FROM knowledge_bases WHERE tenant_id = $1", other["id"])
@@ -601,6 +602,106 @@ async def test_hung_embedder_cannot_hold_the_call_past_the_deadline(world):
     assert elapsed < 0.4, elapsed
     assert result["status"] == "partial" and "lexical_only" in result["degraded"]
     assert result["chunks"][0]["content"] == REFUND
+
+
+async def test_slow_embedder_costs_only_the_grace_once_lexical_has_matches(world):
+    cfg = RetrievalConfig(dense_grace_s=0.05, deadline_s=0.8, embed_timeout_override_s=0.6)
+    t0 = time.monotonic()
+    result = await _run(world["tenant"], world["agent"], FakeEmbedder(latency_s=0.5), "refunds processed days",
+                        config=cfg)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.3, elapsed                      # not the embedder's 0.5 s
+    assert result["chunks"][0]["content"] == REFUND
+    assert "lexical_only" in result["degraded"] and "deadline" not in result["degraded"]
+    assert result["retrieval_metadata"]["timings_ms"]["dense_grace_cut"] == 1.0
+
+
+async def test_every_grace_cut_counts_against_the_embedder_until_its_breaker_opens(world):
+    cfg = RetrievalConfig(dense_grace_s=0.04, deadline_s=0.8, embed_timeout_override_s=0.6, breaker_failures=3)
+    slow = FakeEmbedder(latency_s=0.5)
+    for _ in range(3):
+        result = await _run(world["tenant"], world["agent"], slow, "refunds processed days", config=cfg)
+        assert result["chunks"][0]["content"] == REFUND
+    assert {b.state for k, b in resilience.breakers._breakers.items() if k.startswith("embed:")} == {"open"}
+    calls_before = slow.calls
+    t0 = time.monotonic()
+    result = await _run(world["tenant"], world["agent"], slow, "refunds processed days", config=cfg)
+    assert time.monotonic() - t0 < 0.15 and slow.calls == calls_before        # open: no wait, no provider call
+    assert result["chunks"][0]["content"] == REFUND
+
+
+async def test_a_cached_query_cut_during_the_vector_search_does_not_charge_the_embedder(world):
+    """The embedding was a cache hit (no provider call); only the HNSW search was slow. The embedder did nothing
+    wrong, so its breaker must stay closed even with a threshold of one."""
+    cfg = RetrievalConfig(dense_grace_s=0.04, deadline_s=0.8, embed_timeout_override_s=0.6, dense_timeout_s=1.0,
+                          breaker_failures=1)
+    query = "refunds processed days"
+    await _run(world["tenant"], world["agent"], FakeEmbedder(), query, config=cfg)          # warms the embedding cache
+    resilience.breakers.clear()
+    unused = FakeEmbedder(latency_s=0.5)
+    result = await _run(world["tenant"], world["agent"], unused, query, repo=FaultRepo(dense_sleep=0.5), config=cfg)
+
+    assert result["retrieval_metadata"]["timings_ms"]["dense_grace_cut"] == 1.0              # the dense branch was cut
+    assert result["chunks"][0]["content"] == REFUND
+    assert unused.calls == 0
+    assert {b.state for k, b in resilience.breakers._breakers.items() if k.startswith("embed:")} <= {"closed"}
+
+
+async def test_the_grace_is_off_unless_configured(world):
+    assert RetrievalConfig().dense_grace_s is None
+    result = await _run(world["tenant"], world["agent"], FakeEmbedder(latency_s=0.2), "how long do refunds take",
+                        config=RetrievalConfig(deadline_s=0.8, embed_timeout_override_s=0.6))
+    assert result["degraded"] == [] and "dense_grace_cut" not in result["retrieval_metadata"]["timings_ms"]
+
+
+def test_grace_env_parsing_is_defensive(monkeypatch):
+    for raw, expected in ((None, None), ("", None), ("  ", None), ("abc", None), ("nan", None), ("100", 0.1),
+                          ("0", 0.0), ("-5", 0.0), ("99999", 2.0)):
+        if raw is None:
+            monkeypatch.delenv("KNOWLEDGE_DENSE_GRACE_MS", raising=False)
+        else:
+            monkeypatch.setenv("KNOWLEDGE_DENSE_GRACE_MS", raw)
+        assert RetrievalConfig.from_env().dense_grace_s == expected, raw
+
+
+async def test_fast_embedder_still_joins_the_fusion(world):
+    cfg = RetrievalConfig(dense_grace_s=0.2, deadline_s=0.8, embed_timeout_override_s=0.6)
+    result = await _run(world["tenant"], world["agent"], FakeEmbedder(latency_s=0.03), "how long do refunds take",
+                        config=cfg)
+    assert result["chunks"][0]["content"] == REFUND
+    assert result["degraded"] == [] and "dense_grace_cut" not in result["retrieval_metadata"]["timings_ms"]
+
+
+async def test_lexical_without_matches_still_waits_for_the_dense_branch(world):
+    # Words that appear in no document: lexical finds nothing, so the slower dense branch is the only evidence.
+    cfg = RetrievalConfig(dense_grace_s=0.0, deadline_s=0.8, embed_timeout_override_s=0.6)
+    result = await _run(world["tenant"], world["agent"], FakeEmbedder(latency_s=0.15), "zzqx unrelated words",
+                        config=cfg)
+    assert "dense_grace_cut" not in result["retrieval_metadata"]["timings_ms"]
+    assert "deadline" not in result["degraded"]
+
+
+async def test_wait_lexical_first_distinguishes_a_cut_from_a_missed_deadline():
+    from types import SimpleNamespace
+
+    async def branch(delay, matches):
+        await asyncio.sleep(delay)
+        return SimpleNamespace(matches=matches)
+
+    t0 = time.monotonic()
+    tasks = {"lexical": asyncio.create_task(branch(0.0, [object()])), "dense": asyncio.create_task(branch(1.0, [object()]))}
+    done, pending, cut = await retrieval._wait_lexical_first(tasks, lambda: 5.0, 0.05)
+    assert cut and pending == {tasks["dense"]} and time.monotonic() - t0 < 0.3
+    tasks["dense"].cancel()
+
+    tasks = {"lexical": asyncio.create_task(branch(0.0, [])), "dense": asyncio.create_task(branch(0.1, [object()]))}
+    done, pending, cut = await retrieval._wait_lexical_first(tasks, lambda: 5.0, 0.0)
+    assert not cut and not pending and len(done) == 2                # empty lexical: dense is awaited in full
+
+    tasks = {"dense": asyncio.create_task(branch(1.0, [object()]))}
+    done, pending, cut = await retrieval._wait_lexical_first(tasks, lambda: 0.05, 0.1)
+    assert not cut and pending                                       # a real deadline miss stays a deadline miss
+    tasks["dense"].cancel()
 
 
 async def test_slow_database_returns_unavailable_inside_the_deadline(world):

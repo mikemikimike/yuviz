@@ -15,7 +15,8 @@ import logging
 import signal
 import socket
 import sys
-from collections.abc import Coroutine
+import time
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 import grpc.aio
@@ -23,6 +24,7 @@ import redis.asyncio as aioredis
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 from libs.config_sdk import CacheAsideConfigProvider, HttpConfigRepository, IConfigProvider, RedisConfigRepository
+from libs.config_sdk.dial_targets import TransferPolicy
 from libs.config_sdk.languages import normalize_language, stt_languages, tts_languages
 from libs.config_sdk.test_credentials import redeem_test_credential
 from libs.knowledge_sdk import (
@@ -35,6 +37,7 @@ from libs.knowledge_sdk import (
 from .agent_config import load_agent, to_runtime_config
 from .agent_resolver import resolve_handler_deps
 from .ai_provider_manager import AIProviderManager, close_not_ready_providers
+from .bounded import run_bounded
 from .provider_config_subscriber import ProviderConfigSubscriber
 from .callflow.handler import CallFlowConversationHandler
 from .callflow.resolver import resolve_call_flow
@@ -66,6 +69,16 @@ from .workflow import graph_for
 from .generated.voiceai.v1 import conversation_pb2_grpc as pb_grpc
 
 SERVICE_NAME = "voiceai.v1.ConversationService"
+
+log = logging.getLogger(__name__)
+
+HEARTBEAT_INTERVAL_S = 15
+# Node is considered dead after 3 missed heartbeats (45s).
+REAP_WINDOW_S = 3 * HEARTBEAT_INTERVAL_S
+# Gateway ends silent callers in ~19s, so minutes without transcript activity means a zombie call.
+INACTIVE_CALL_TIMEOUT_S = 300
+HEARTBEAT_STEP_TIMEOUT_S = 5
+HEARTBEAT_RETRY_BACKOFF_S = 2
 
 
 async def _resolve_session_deps(
@@ -214,6 +227,46 @@ def _spawn(coro: Coroutine[Any, Any, None], name: str) -> asyncio.Task:
     task = asyncio.create_task(coro, name=name)
     task.add_done_callback(_log_task_failure)
     return task
+
+
+async def _bounded_step(name: str, coro: Awaitable[object]) -> bool:
+    """Run one heartbeat-loop step under a timeout; True on success. Failures are logged here and
+    never raised, so a slow or down Postgres cannot kill the loop. CancelledError still propagates."""
+    try:
+        await run_bounded(coro, HEARTBEAT_STEP_TIMEOUT_S)
+    except TimeoutError:
+        log.warning("Heartbeat step %s timed out after %ss", name, HEARTBEAT_STEP_TIMEOUT_S)
+        return False
+    except Exception:
+        log.exception("Heartbeat step %s failed", name)
+        return False
+    return True
+
+
+async def _run_heartbeat_loop(
+    transcripts: TranscriptBuilder, *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Write this node's heartbeat and run the reconcile sweeps until cancelled.
+
+    After a failed write, retry quickly and hold off reaping peers until REAP_WINDOW_S of good
+    writes: our own gap would otherwise look like theirs, and we would close live calls."""
+    healthy_since = float("-inf")
+    while True:
+        if not await _bounded_step("heartbeat", transcripts.heartbeat()):
+            healthy_since = None
+            await sleep(HEARTBEAT_RETRY_BACKOFF_S)
+            continue
+        if healthy_since is None:
+            healthy_since = clock()
+        if clock() - healthy_since >= REAP_WINDOW_S:
+            await _bounded_step(
+                "reconcile_dead_nodes", transcripts.reconcile_dead_nodes(stale_after_seconds=REAP_WINDOW_S))
+        await _bounded_step(
+            "reconcile_inactive_calls",
+            transcripts.reconcile_inactive_calls(inactive_after_seconds=INACTIVE_CALL_TIMEOUT_S))
+        await sleep(HEARTBEAT_INTERVAL_S)
 
 
 async def _await_stopped(task: asyncio.Task) -> None:
@@ -468,16 +521,24 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 handoff=handoff,
                 voice_for=voice_for,
                 agent_slugs=flow.agent_slugs,
+                transfer_policy=TransferPolicy(
+                    runtime_config.tenant.home_calling_code, runtime_config.tenant.allow_international_transfers,
+                ),
+                transcripts=transcripts,
+                call_row=dict(
+                    direction=ctx.direction or "inbound",
+                    caller_number=ctx.caller_did, called_number=ctx.called_did,
+                    agent_id=runtime_config.agent.id,
+                    agent_config_version=runtime_config.version or None,
+                ),
             )
 
     # Disable SO_REUSEPORT so a duplicate process fails to bind instead of silently sharing the port.
     server = grpc.aio.server(options=[("grpc.so_reuseport", 0)])
 
     # Conversation service
-    pb_grpc.add_ConversationServiceServicer_to_server(
-        ConversationServicer(handler_factory),
-        server,
-    )
+    conversation_servicer = ConversationServicer(handler_factory, transcripts)
+    pb_grpc.add_ConversationServiceServicer_to_server(conversation_servicer, server)
 
     # Health check — stays NOT_SERVING until the Whisper model finishes loading.
     health_servicer = health.HealthServicer()
@@ -501,19 +562,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
 
     load_task = _spawn(_load_and_promote(), "startup load")
 
-    # Node is considered dead after 3 missed heartbeats (45s).
-    HEARTBEAT_INTERVAL_S = 15
-    # Gateway ends silent callers in ~19s, so minutes without transcript activity means a zombie call.
-    INACTIVE_CALL_TIMEOUT_S = 300
-
-    async def _heartbeat_loop() -> None:
-        while True:
-            await transcripts.heartbeat()
-            await transcripts.reconcile_dead_nodes(stale_after_seconds=HEARTBEAT_INTERVAL_S * 3)
-            await transcripts.reconcile_inactive_calls(inactive_after_seconds=INACTIVE_CALL_TIMEOUT_S)
-            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
-
-    heartbeat_task = _spawn(_heartbeat_loop(), "heartbeat")
+    heartbeat_task = _spawn(_run_heartbeat_loop(transcripts), "heartbeat")
     # Keeps outage copies of agent configs recent; cold path, off the call path.
     refresh_task = _spawn(config.run_refresh(), "config refresh") if isinstance(
         config, CacheAsideConfigProvider) else None
@@ -534,6 +583,8 @@ async def serve(port: int, args: argparse.Namespace) -> None:
         log.info("Shutting down…")
         health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING)
         await server.stop(grace=5)
+        # server.stop() cancels streams without waiting for their teardown, which queues the end_call write.
+        await conversation_servicer.wait_closed(timeout=10)
     finally:
         await close_not_ready_providers()
         if llm is not None:

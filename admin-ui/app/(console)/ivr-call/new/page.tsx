@@ -63,6 +63,7 @@ export default function NewCallFlowPage() {
 
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [draftNotice, setDraftNotice] = useState<{ id: string; reasons: string[] } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -127,7 +128,7 @@ export default function NewCallFlowPage() {
 
   const cloneSource = existing.find((f) => f.id === cloneFromId);
   const dir = DIRECTIONS.find((d) => d.value === direction)!;
-  const canCreate = !creating && !!tenantSlug && slugify(name) !== "" && (!cloning || !!cloneSource);
+  const canCreate = !creating && !draftNotice && !!tenantSlug && slugify(name) !== "" && (!cloning || !!cloneSource);
 
   const handleCreate = async () => {
     if (!canCreate) return;
@@ -140,6 +141,11 @@ export default function NewCallFlowPage() {
         direction,
         ...(cloning ? { clone_from_id: cloneFromId } : { graph }),
       });
+      if (flow.warnings?.length) {
+        setDraftNotice({ id: flow.id, reasons: flow.warnings.map((w) => w.message) });
+        setCreating(false);
+        return;
+      }
       router.push(`/ivr-call/${flow.id}`);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
@@ -273,6 +279,13 @@ export default function NewCallFlowPage() {
           <div className="form-hint">Address: <span className="mono">{slugify(name) || "—"}</span></div>
         )}
 
+        {draftNotice && (
+          <div className="error-banner" style={{ marginTop: 12 }}>
+            Saved as a draft, it cannot be published yet:
+            <ul>{draftNotice.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
+            <button className="btn btn-sm" onClick={() => router.push(`/ivr-call/${draftNotice.id}`)}>Open the draft</button>
+          </div>
+        )}
         {(error ?? tenantError) && <div className="error-banner" style={{ marginTop: 12 }}>{error ?? tenantError}</div>}
 
         <div className="qc-foot">

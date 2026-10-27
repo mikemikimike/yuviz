@@ -5,7 +5,7 @@ type ReplacementApi = {
     kbId: string,
     file: File,
     title: string,
-    options: { language: string | null; tags: Record<string, unknown> },
+    options: { language: string | null; tags: Record<string, unknown>; replaces: string },
   ) => Promise<KbDocument>;
   listDocuments: (kbId: string) => Promise<KbDocument[]>;
   updateDocument: (id: string, update: DocumentUpdate) => Promise<KbDocument>;
@@ -41,6 +41,7 @@ export async function replaceKnowledgeFile(
       {
         language: original.language,
         tags: original.tags,
+        replaces: original.id,
       },
     );
     for (

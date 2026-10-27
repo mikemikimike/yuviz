@@ -17,9 +17,11 @@ from typing import Any, AsyncGenerator
 
 from libs.config_sdk import RuntimeConfig, validate_transfer_timeout_ms
 from libs.config_sdk.dial_targets import (
+    TransferPolicy,
     is_platform_ai_number,
     is_sip_uri_shape,
     is_transfer_destination,
+    transfer_policy_problem,
 )
 from libs.knowledge_sdk import IKnowledgeProvider, RetrievalPolicy
 
@@ -32,7 +34,7 @@ from .directives import (
     TransferRequest,
     strip_markdown_chars,
 )
-from . import phrase_audio
+from . import phrase_audio, prefetch
 from .fillers import FillerSelector
 from .i18n import closure_phrases, farewell_phrases, first_turn_fillers, has_phrase_tables, t, tool_fillers
 from .guardrails import GuardrailCounter, GuardrailDetector
@@ -90,9 +92,20 @@ class _SessionState:
     first_turn_filler_spoken:        bool = False
     fabrication_triggered_transfer:  bool = False
     confirmed_booking_slot:          str | None = None
+    # Sentences of this turn's reply whose TTS produced no audio, so the transcript and history leave them out.
+    unspoken_sentences:              list[str] = field(default_factory=list)
     # Multilingual agents only; None = single-language (fixed language).
     language:                        "LanguageTracker | None" = None
     unchecked_languages_logged:      set = field(default_factory=set)
+
+
+@dataclass
+class _TurnProgress:
+    """What a turn has produced so far, for persisting it if the caller hangs up before it finishes."""
+    stt_text:       str = ""
+    stt_confidence: float = 0.0
+    reply_tokens:   list[str] = field(default_factory=list)
+    recorded:       bool = False
 
 
 # Split after ! or ?, and after . unless it follows a title abbreviation or middle initial.
@@ -268,6 +281,23 @@ def _last_sentence(reply_text: str) -> str:
     return next((p for p in reversed(sentences) if p), "")
 
 
+def _spoken_reply(raw_tokens: list[str], unspoken: list[str]) -> str:
+    """The reply text minus directives and the sentences whose TTS produced no audio."""
+    text = DirectiveParser.parse("".join(raw_tokens)).clean_text.strip()
+    if not unspoken:
+        return text
+    for failed in unspoken:
+        # A whole sentence, once: "No." failing must not strip "Account No. 4512". A failed first clause (or a
+        # multi-sentence line) is no whole sentence, so its first occurrence goes.
+        sentences = [s.strip() for s in _SENTENCE_RE.split(text)]
+        if failed in sentences:
+            sentences.remove(failed)
+            text = " ".join(sentences)
+        else:
+            text = text.replace(failed, "", 1)
+    return " ".join(text.split())
+
+
 def _end_call_rejection(reply_text: str, caller_text: str, language: str | None) -> str | None:
     """Why an [[END_CALL]] marker should not hang up, or None to honour it."""
     last_sentence = _last_sentence(reply_text)
@@ -307,6 +337,14 @@ _TOOL_CALL_FILLER_MIN_GAP_S = 4.0
 # as soon as anything else arrives to be said. A fast answer therefore never gets one.
 _FILLER_DELAY_MS_DEFAULT = 1200
 _FIRST_TURN = "__first_turn__"
+
+
+def _merge_turn_notes(*notes: ChatMessage | None) -> ChatMessage | None:
+    """One transient note from several: they are folded into the caller's turn together (with_directive takes one)."""
+    present = [n for n in notes if n is not None]
+    if len(present) <= 1:
+        return present[0] if present else None
+    return ChatMessage(role="user", content="\n\n".join(n.content for n in present))
 
 
 def _filler_delay_s() -> float:
@@ -451,14 +489,14 @@ def _build_transfer_instruction(
 # Runtime ESL-injection allowlist for transfer destinations, including
 # workflow-rendered ones. Must match EslClient.cpp's is_safe_destination;
 # never relax it for convenience.
-def transfer_destination_problem(destination: str | None) -> str | None:
+def transfer_destination_problem(destination: str | None, policy: TransferPolicy) -> str | None:
     """None when the destination looks routable; otherwise a human-readable
     diagnosis for the session-setup error log. Checks the exact value the
     Gateway will receive (no strip), with the Gateway's own allowlist."""
     if destination is None or not destination.strip():
         return "transfer_destination is empty"
     if is_transfer_destination(destination):
-        return None
+        return transfer_policy_problem(destination, policy)
     if is_platform_ai_number(destination):
         return (
             f"transfer_destination {destination!r} is one of this platform's own AI numbers "
@@ -581,6 +619,9 @@ class PipelineConversationHandler:
         self._call_started_at = time.monotonic()
         self._transfer_type_default        = runtime_config.policies.transfer_type
         self._transfer_destination_default = runtime_config.policies.transfer_destination
+        self._transfer_policy = TransferPolicy(
+            runtime_config.tenant.home_calling_code, runtime_config.tenant.allow_international_transfers,
+        )
         self._escalation_threshold         = runtime_config.policies.escalation_threshold
         # Caller-ID resolution inputs (see transfer_engine._resolve_caller_id).
         self._caller_id_policy  = runtime_config.policies.caller_id_policy
@@ -600,7 +641,7 @@ class PipelineConversationHandler:
                 tt, runtime_config.agent.slug,
             )
         elif tt and tt != "none":
-            problem = transfer_destination_problem(self._transfer_destination_default)
+            problem = transfer_destination_problem(self._transfer_destination_default, self._transfer_policy)
             if problem:
                 log.error(
                     "Transfer misconfigured for agent %s (transfer_type=%s): %s "
@@ -639,21 +680,22 @@ class PipelineConversationHandler:
             self._llm, threshold_msgs=summary_threshold_for(max_history),
         )
         graph = graph_for(runtime_config)
+        call_context = {
+            "caller_number": caller_number,
+            "called_number": called_number,
+            "direction":     direction,
+            "agent_name":    runtime_config.agent.name,
+            "business_name": runtime_config.tenant.name,
+            "current_date":  now.strftime("%Y-%m-%d"),
+            "current_time":  now.strftime("%H:%M"),
+        }
         self._workflow = WorkflowRunner(
             graph,
             base_suffix=self._prompt_suffix,
             default_global=self._default_system_prompt,
             # Call-flow handoff values override the call-context defaults.
-            variables={
-                "caller_number": caller_number,
-                "called_number": called_number,
-                "direction":     direction,
-                "agent_name":    runtime_config.agent.name,
-                "business_name": runtime_config.tenant.name,
-                "current_date":  now.strftime("%Y-%m-%d"),
-                "current_time":  now.strftime("%H:%M"),
-                **(initial_variables or {}),
-            },
+            variables={**call_context, **(initial_variables or {})},
+            context_variables=call_context,
             extractor=self._extractor,
             summarizer=self._summarizer,
         )
@@ -893,11 +935,36 @@ class PipelineConversationHandler:
         duration_ms: int,
         energy_db:   float,
     ) -> AsyncGenerator[HandlerResponse, None]:
+        progress = _TurnProgress()
+        turn = self._run_turn(session_id, audio, duration_ms, energy_db, progress)
+        try:
+            async for response in turn:
+                yield response
+        except (GeneratorExit, asyncio.CancelledError):
+            # Caller hung up mid-turn: nothing after this point runs, so persist what the turn produced.
+            if progress.stt_text and not progress.recorded and self._transcripts is not None:
+                self._transcripts.record_turn(
+                    session_id, progress.stt_text, progress.stt_confidence,
+                    _spoken_reply(progress.reply_tokens, self._session(session_id).unspoken_sentences), True,
+                )
+            raise
+        finally:
+            await turn.aclose()
+
+    async def _run_turn(
+        self,
+        session_id:  str,
+        audio:       bytes,
+        duration_ms: int,
+        energy_db:   float,
+        progress:    _TurnProgress,
+    ) -> AsyncGenerator[HandlerResponse, None]:
         log.info("speech_ended session=%s duration_ms=%d audio_bytes=%d energy_db=%.1f",
                  session_id, duration_ms, len(audio), energy_db)
         # Fresh per-turn event, replaced before any await: a cancel targets the prior response only.
         cancel_event = asyncio.Event()
         self._session(session_id).cancelled = cancel_event
+        self._session(session_id).unspoken_sentences.clear()
 
         # Free the shared call LLM before this turn's generate — a prior
         # turn's extract/summarize would otherwise queue behind Ollama.
@@ -954,8 +1021,8 @@ class PipelineConversationHandler:
                 # own transcript confidence (Deepgram; Whisper reports 1.0 and gates on no_speech_prob).
                 if stt_result.confidence < lang_state.SHORT_MIN_SPEECH_CONFIDENCE or not tracker.accept_short(heard):
                     log.debug(
-                        "Skipping short utterance %r lang=%s conf=%s stt_conf=%.2f (session language %s) session=%s",
-                        stt_result.text, heard.language, heard.confidence, stt_result.confidence,
+                        "Skipping short utterance chars=%d lang=%s conf=%s stt_conf=%.2f (session language %s) session=%s",
+                        len(stt_result.text), heard.language, heard.confidence, stt_result.confidence,
                         tracker.current, session_id,
                     )
                     return
@@ -964,13 +1031,14 @@ class PipelineConversationHandler:
 
         if tracker is not None:
             log.info(
-                "STT result=%r language=%s conf=%s session_language=%s session=%s",
-                stt_result.text, heard.language,
+                "STT result chars=%d language=%s conf=%s session_language=%s session=%s",
+                len(stt_result.text), heard.language,
                 f"{heard.confidence:.2f}" if heard.confidence is not None else None,
                 tracker.current, session_id,
             )
         else:
-            log.info("STT result=%r session=%s", stt_result.text, session_id)
+            log.info("STT result chars=%d session=%s", len(stt_result.text), session_id)
+        progress.stt_text, progress.stt_confidence = stt_result.text, stt_result.confidence
         yield HandlerResponse(stt_text=stt_result.text, stt_confidence=stt_result.confidence)
 
         # A breach only stores a pending transfer; the agent still answers this turn first.
@@ -981,8 +1049,7 @@ class PipelineConversationHandler:
         violation = GuardrailDetector.check(stt_result.text, check_language)
         if violation is not None:
             log.info(
-                "Guardrail violation category=%s matched=%r session=%s",
-                violation.category, violation.matched, session_id,
+                "Guardrail violation category=%s session=%s", violation.category, session_id,
             )
             self.record_guardrail_violation(session_id)
         else:
@@ -1018,6 +1085,7 @@ class PipelineConversationHandler:
                         tts_engine=type(self._tts).__name__,
                     ),
                 )
+                progress.recorded = True
             yield HandlerResponse(
                 end_call=True,
                 end_call_grace_period_ms=self._goodbye_grace_period_ms,
@@ -1031,20 +1099,28 @@ class PipelineConversationHandler:
         # mid-call transition lands before the next generation.
         self._refresh_node_prompt(history, session_id)
         history.append(ChatMessage(role="user", content=stt_result.text))
+        pre_retrieval = self._start_pre_retrieval(stt_result.text)
 
         # The first reply's filler is armed here and spoken only if the reply is slow (_with_filler_timer).
         first_turn_filler = is_first_turn and not self._session(session_id).first_turn_filler_spoken
         if first_turn_filler:
             self._session(session_id).first_turn_filler_spoken = True
 
-        # Knowledge retrieval is the `search_knowledge` local tool, called only when needed.
+        # Knowledge retrieval is the `search_knowledge` local tool, called only when needed. A turn that looks like
+        # a knowledge question searches up front instead (prefetch.py), so the model answers in one pass. The
+        # passages ride on every LLM call and are never stored in history.
         producer_history = list(history)
         producer_history_start = len(producer_history)
         messages_for_llm = producer_history
+        turn_context: ChatMessage | None = None
+        if pre_retrieval is not None:
+            block = await self._pre_retrieval_block(pre_retrieval, session_id)
+            if block:
+                turn_context = ChatMessage(role="user", content=block)
 
         directives: list[Directive] = []
         producer_directives: list[Directive] = []
-        full_response: list[str] = []
+        full_response: list[str] = progress.reply_tokens
         tool_calls_made: list[str] = []
         producer_tool_calls: list[str] = []
         output_started = asyncio.Event()
@@ -1062,6 +1138,7 @@ class PipelineConversationHandler:
             stream = self._llm_to_tts(
                 messages_for_llm, cancel_event, session_id, producer_directives, producer_tool_calls,
                 store=producer_history, caller_text=stt_result.text, first_turn_filler=first_turn_filler,
+                turn_context=turn_context,
             )
             iterator = stream.__aiter__()
             pending_read: asyncio.Task[Any] | None = None
@@ -1147,9 +1224,10 @@ class PipelineConversationHandler:
                     if first_audio_at is None:
                         first_audio_at = now   # a filler is the first thing the caller hears, so it counts here
                         output_started.set()
-                    if not isinstance(chunk, _FillerText):
+                    is_filler = isinstance(chunk, _FillerText)
+                    if not is_filler:
                         any_audio = True
-                    yield HandlerResponse(tts_payloads=[tts_audio])
+                    yield HandlerResponse(tts_payloads=[tts_audio], filler=is_filler)
                 if cancel_event.is_set():
                     break
         finally:
@@ -1185,7 +1263,8 @@ class PipelineConversationHandler:
         voice_to_voice_ms = (first_audio_at - turn_start) * 1000 if first_audio_at else None
 
         # full_response holds raw tokens, so strip directives again.
-        assistant_text = DirectiveParser.parse("".join(full_response)).clean_text.strip()
+        unspoken = self._session(session_id).unspoken_sentences
+        assistant_text = _spoken_reply(full_response, unspoken)
 
         # Models sometimes claim a booking without calling a tool. Already spoken, so
         # correct the next turn and escalate repeats; a recap of the real slot is allowed.
@@ -1202,14 +1281,15 @@ class PipelineConversationHandler:
             and _claims_booking_without_tool_call(assistant_text, check_language)
         )
 
-        if full_response and not cancel_event.is_set():
+        # A reply whose every sentence failed TTS was never said, so it is not history either.
+        if full_response and not cancel_event.is_set() and (assistant_text or not unspoken):
             yield HandlerResponse(response_text=assistant_text)
             # Cancelled turns are discarded so history only holds complete pairs.
             history.append(ChatMessage(role="assistant", content=assistant_text))
             if fabricated_booking_claim:
                 log.warning(
                     "Possible fabricated booking claim (no tool call this turn) "
-                    "session=%s text=%r", session_id, assistant_text,
+                    "session=%s chars=%d", session_id, len(assistant_text),
                 )
                 history.append(ChatMessage(
                     role="system",
@@ -1238,6 +1318,7 @@ class PipelineConversationHandler:
                     tts_engine=type(self._tts).__name__,
                 ),
             )
+            progress.recorded = True
 
         # End node hangup; [[END_CALL]] off-graph marks ended_off_graph for disposition.
         ended_on_end_node = self._workflow.pending_end
@@ -1245,15 +1326,27 @@ class PipelineConversationHandler:
             end_call = True
         elif end_call:
             self._workflow.ended_off_graph = True
+        if ended_on_end_node and cancel_event.is_set():
+            # The caller barged in on the goodbye: carry on from the step before the end node,
+            # or the next reply would be followed by a hangup.
+            self._workflow.abandon_end()
 
         # At most one transfer per turn: directive, then workflow, then pending escalation.
         # Computed before end_call, since yielding end_call first would tear the session down.
         transfer_request: TransferRequest | None = None
+        refused_reason: str | None = None
         if not cancel_event.is_set():
             transfer_directive = next(
                 (d for d in directives if isinstance(d, TransferDirective)), None,
             )
-            if transfer_directive is not None:
+            directive_problem = (
+                transfer_destination_problem(self._transfer_destination_default, self._transfer_policy)
+                if transfer_directive is not None and self._transfer_type_default != "none" else None
+            )
+            if directive_problem is not None:
+                log.warning("Transfer directive rejected: %s session=%s", directive_problem, session_id)
+                refused_reason = "destination_not_permitted"
+            elif transfer_directive is not None:
                 decision = self._transfer_engine.evaluate(
                     self._decision_context(session_id),
                     TransferTrigger(type=TriggerType.LLM_DIRECTIVE, directive=transfer_directive),
@@ -1261,13 +1354,19 @@ class PipelineConversationHandler:
                 if decision.accepted:
                     transfer_request = decision.request
                     self._session(session_id).transfer_requested = True
+                elif decision.rejection_reason != "already_transferring":
+                    refused_reason = decision.rejection_reason
             if transfer_request is None:
-                transfer_request = await self._workflow_transfer(session_id)
+                transfer_request, workflow_refusal = await self._workflow_transfer(session_id)
+                refused_reason = refused_reason or workflow_refusal
             # Also covers a directive rejected as already_transferring because of this pending request.
             if transfer_request is None:
                 state = self._session(session_id)
                 transfer_request = state.pending_transfer
                 state.pending_transfer = None
+        elif self._workflow.pending_transfer is not None:
+            # Barge-in on the announcement: the caller interrupted, so the node must not transfer after the next reply.
+            self._workflow.abandon_transfer()
 
         # Not on barge-in (stale decision), a pending transfer, or a fabricated claim
         # (keep the line open for the correction turn).
@@ -1278,15 +1377,23 @@ class PipelineConversationHandler:
                 async for chunk in self._synthesize_sentence_stream(self._farewell_message, session_id):
                     got_farewell_audio = True
                     yield HandlerResponse(tts_payloads=[chunk])
+            got_goodbye_audio = False
             if not any_audio and not got_farewell_audio:
                 # The servicer needs some audio to key EndCall off.
                 goodbye = t("fallback_goodbye", self._spoken_language(session_id))
                 async for chunk in self._synthesize_sentence_stream(goodbye, session_id):
+                    got_goodbye_audio = True
                     yield HandlerResponse(tts_payloads=[chunk])
-            yield HandlerResponse(
-                end_call=True,
-                end_call_grace_period_ms=self._goodbye_grace_period_ms,
-            )
+            if any_audio or got_farewell_audio or got_goodbye_audio:
+                yield HandlerResponse(
+                    end_call=True,
+                    end_call_grace_period_ms=self._goodbye_grace_period_ms,
+                )
+            else:
+                # Hanging up now would end the call with no answer and no goodbye, and an end node left
+                # latched would hang up on the caller's next reply: carry on from the step before it.
+                log.warning("End of call withheld: no reply or goodbye audio was produced session=%s", session_id)
+                self._workflow.abandon_end()
 
         if transfer_request is not None:
             announcement = (
@@ -1300,6 +1407,11 @@ class PipelineConversationHandler:
                 async for chunk in self._synthesize_sentence_stream(announcement, session_id):
                     yield HandlerResponse(tts_payloads=[chunk])
             yield HandlerResponse(transfer_request=transfer_request)
+        elif refused_reason is not None and not end_call and not cancel_event.is_set():
+            # The model's own words ("connecting you") are already spoken by now, so tell it the transfer is not
+            # happening and let it correct itself and carry on.
+            async for response in self.on_transfer_failed(session_id, "", refused_reason):
+                yield response
 
     async def on_cancel(self, session_id: str) -> None:
         self._cancel_event(session_id).set()
@@ -1348,6 +1460,7 @@ class PipelineConversationHandler:
             session_id=session_id, tenant_id=self._tenant_id, call_id=self._call_id,
             transfer_type=self._transfer_type_default,
             transfer_destination=destination_override or self._transfer_destination_default,
+            transfer_policy=self._transfer_policy,
             escalation_threshold=self._escalation_threshold,
             already_requested=self._session(session_id).transfer_requested,
             caller_id_policy=self._caller_id_policy,
@@ -1496,10 +1609,11 @@ class PipelineConversationHandler:
         else:
             history.insert(0, prompt)
 
-    async def _workflow_transfer(self, session_id: str) -> TransferRequest | None:
+    async def _workflow_transfer(self, session_id: str) -> tuple[TransferRequest | None, str | None]:
+        """The accepted request, or the refusal reason the model is told about (None when nothing was refused)."""
         node = self._workflow.pending_transfer
         if node is None:
-            return None
+            return None, None
         self._workflow.pending_transfer = None
         # Do not let a queued summary race the transfer path on the call LLM.
         self._summarizer.cancel()
@@ -1515,15 +1629,23 @@ class PipelineConversationHandler:
                     "routing with variables collected so far; stragglers left running",
                     session_id,
                 )
-        destination = self._workflow.render(node.transfer_destination or "") or None
-        problem = transfer_destination_problem(destination)
+        destination = self._workflow.render_transfer_destination(
+            node.transfer_destination or "",
+        ) or None
+        # Category only: a rendered destination is caller-derived, so never logged.
+        if destination is None:
+            problem = "destination is empty or uses a variable a destination may not (caller_number, called_number, extracted)"
+        elif transfer_destination_problem(destination, self._transfer_policy) is not None:
+            problem = "rendered destination failed the transfer allowlist"
+        else:
+            problem = None
         if problem is not None:
             log.warning(
                 "Workflow transfer node %r rejected: %s session=%s",
                 node.name, problem, session_id,
             )
             self._workflow.abandon_transfer()
-            return None
+            return None, "destination_not_permitted"
         decision = self._transfer_engine.evaluate(
             self._decision_context(session_id, destination_override=destination),
             TransferTrigger(
@@ -1536,9 +1658,9 @@ class PipelineConversationHandler:
                 node.name, decision.rejection_reason, session_id,
             )
             self._workflow.abandon_transfer()
-            return None
+            return None, (None if decision.rejection_reason == "already_transferring" else decision.rejection_reason)
         self._session(session_id).transfer_requested = True
-        return decision.request
+        return decision.request, None
 
     def _interrupt_workflow_background_llm(self) -> None:
         self._extractor.interrupt_for_live_turn()
@@ -1594,11 +1716,15 @@ class PipelineConversationHandler:
         tool_calls_made: list[str],
         store: list[ChatMessage] | None = None,
         carry_taint: bool = False,
+        turn_context: ChatMessage | None = None,
     ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
-        """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech."""
+        """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech.
+        turn_context (pre-retrieved passages) rides on every LLM call of the turn with the reply-language line,
+        folded into the caller's turn and never stored, and starts the turn tainted: it is retrieved, tenant-uploaded
+        text, so a write is held for the caller's yes as after a search_knowledge lookup."""
+        trailing = _merge_turn_notes(turn_context, self._reply_directive(session_id))
         if self._tool_orchestrator is None:
-            directive = self._reply_directive(session_id)
-            async for event in LLMAdapter(self._llm).generate(with_directive(history, directive)):
+            async for event in LLMAdapter(self._llm).generate(with_directive(history, trailing)):
                 assert isinstance(event, ToolTokenEvent)
                 yield event.text
             return
@@ -1612,7 +1738,7 @@ class PipelineConversationHandler:
             caller_number=self._caller_number, called_number=self._called_number,
             call_direction=self._direction, cancel_event=cancel_event,
             local_tools=local_tools, only_tools=only_tools, carry_taint=carry_taint,
-            trailing_message=self._reply_directive(session_id),
+            trailing_message=trailing, pre_tainted=turn_context is not None,
         ):
             if isinstance(event, ToolCallStartedEvent):
                 if not event.filler_only:
@@ -1643,6 +1769,7 @@ class PipelineConversationHandler:
         silent_turn_text: str = "fallback_llm_error",
         caller_text:  str = "",
         first_turn_filler: bool = False,
+        turn_context: ChatMessage | None = None,
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """Stream LLM tokens and synthesize per sentence, yielding (raw_token, tts_bytes, end_call).
         Directives are stripped before TTS and appended to `directives` in place.
@@ -1659,7 +1786,9 @@ class PipelineConversationHandler:
         first_piece_sent = False  # the reply's first sentence or clause has gone to TTS
         try:
             async for item in _with_filler_timer(
-                self._token_stream(history, session_id, cancel_event, tool_calls_made, store, carry_taint),
+                self._token_stream(
+                    history, session_id, cancel_event, tool_calls_made, store, carry_taint, turn_context,
+                ),
                 _filler_delay_s(), arm_first=first_turn_filler,
             ):
                 if cancel_event.is_set():
@@ -1734,7 +1863,7 @@ class PipelineConversationHandler:
                     sentence, text_buffer = parts[0].strip(), parts[1]
                     if sentence:
                         first_piece_sent = True
-                        async for chunk in self._synthesize_sentence_stream(sentence, session_id):
+                        async for chunk in self._synthesize_sentence_stream(sentence, session_id, in_reply=True):
                             yield "", chunk, end_call
                 # Nothing spoken yet and the first sentence is still open: start on its first clause.
                 if not first_piece_sent:
@@ -1743,7 +1872,7 @@ class PipelineConversationHandler:
                         if len(clause) >= _FIRST_CLAUSE_MIN_CHARS:
                             text_buffer = text_buffer[match.end():]
                             first_piece_sent = True
-                            async for chunk in self._synthesize_sentence_stream(clause, session_id):
+                            async for chunk in self._synthesize_sentence_stream(clause, session_id, in_reply=True):
                                 yield "", chunk, end_call
                             break
         except Exception as exc:
@@ -1791,7 +1920,7 @@ class PipelineConversationHandler:
 
         end_call = any(isinstance(d, EndCallDirective) for d in directives)
         if text_buffer.strip() and not cancel_event.is_set():
-            async for chunk in self._synthesize_sentence_stream(text_buffer.strip(), session_id):
+            async for chunk in self._synthesize_sentence_stream(text_buffer.strip(), session_id, in_reply=True):
                 yield "", chunk, end_call
         elif not spoke and not directives and not cancel_event.is_set() and not self._ending_or_transferring(session_id):
             # Nothing reached the caller (e.g. the model's only output was a dropped text tool call): never go silent.
@@ -1821,6 +1950,64 @@ class PipelineConversationHandler:
         if self._knowledge is not None and self._workflow.knowledge_enabled():
             tools[SEARCH_KNOWLEDGE.name] = (SEARCH_KNOWLEDGE, self._make_knowledge_handler(session_id))
         return tools
+
+    def _start_pre_retrieval(self, text: str) -> "asyncio.Task | None":
+        """Start the knowledge search for a turn that looks like a question the documents answer, or None.
+        Only agents with a knowledge base (workflow.knowledge_enabled) ever search; the gate keeps booking, name
+        and confirmation turns out of it."""
+        if self._knowledge is None or not prefetch.enabled() or not self._workflow.knowledge_enabled():
+            return None
+        if not prefetch.wants_knowledge(text):
+            return None
+        return asyncio.get_running_loop().create_task(
+            self._knowledge.retrieve(self._tenant_slug, self._agent_slug, text, RetrievalPolicy()),
+        )
+
+    async def _pre_retrieval_block(self, task: "asyncio.Task", session_id: str) -> str | None:
+        """The reference block for the model, or None when the search was late, failed, found nothing sure, or
+        the turn was cancelled. Never raises and never waits past VOICEAI_PRE_RETRIEVAL_WAIT_MS: a miss only means
+        the model falls back to calling search_knowledge itself, as before."""
+        started = time.monotonic()
+        try:
+            done, _ = await asyncio.wait({task}, timeout=prefetch.wait_s())
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        waited_ms = (time.monotonic() - started) * 1000
+        if task not in done:
+            task.cancel()
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            self._metrics.increment("pre_retrieval_late")
+            log.info("pre_retrieval: outcome=late waited_ms=%.0f session=%s", waited_ms, session_id)
+            return None
+        self._metrics.observe("pre_retrieval_wait_ms", waited_ms)
+        try:
+            context = task.result()
+        except Exception:  # noqa: BLE001
+            self._metrics.increment("pre_retrieval_error")
+            log.warning("pre_retrieval: outcome=error waited_ms=%.0f session=%s", waited_ms, session_id, exc_info=True)
+            return None
+        if context is None or context.status not in ("ok", "partial") or not context.chunks:
+            # trace_id, never the query: the caller's words are not logged.
+            log.info(
+                "pre_retrieval: outcome=skipped status=%s chunks=%d waited_ms=%.0f session=%s",
+                getattr(context, "status", None), len(getattr(context, "chunks", None) or ()), waited_ms, session_id,
+            )
+            return None
+        answer_in = self._session_language(session_id) or normalize_language(self._agent_language)
+        block = prefetch.reference_block(
+            [c.content for c in context.chunks],
+            int(context.retrieval_metadata.get("always_included") or 0),
+            answer_in=language_name(answer_in) if answer_in else None,
+            low_confidence=bool(context.low_confidence) or context.status == "partial",
+        )
+        self._metrics.increment("pre_retrieval_used" if block else "pre_retrieval_empty")
+        log.info(
+            "pre_retrieval: outcome=%s status=%s chunks=%d low_confidence=%s waited_ms=%.0f trace_id=%s session=%s",
+            "used" if block else "empty", context.status, len(context.chunks), context.low_confidence, waited_ms,
+            context.trace_id, session_id,
+        )
+        return block
 
     def _make_knowledge_handler(self, session_id: str):
         async def handler(arguments: dict[str, Any]) -> ToolResult:
@@ -1890,11 +2077,14 @@ class PipelineConversationHandler:
 
     async def _synthesize_sentence_stream(
         self, text: str, session_id: str, *, cache: bool = False, pin: bool = False, language: str | None = None,
+        in_reply: bool = False,
     ) -> AsyncGenerator[bytes, None]:
         """cache=True is for fixed phrases (the greeting, fillers): the audio is kept on the TTS instance and
         replayed with no synthesis the next time. pin=True also asks a voice that can keep audio for the life of
         the process (pin_phrases) to do so. `language` forces one, for prewarming a language the session has not
-        switched to yet."""
+        switched to yet. in_reply=True marks text that is part of the turn's stored reply: if its TTS
+        produces no audio it is left out of the transcript and history."""
+        sentence = text
         # Every text source reaches TTS here, so strip markdown once for all of them.
         text = strip_markdown_chars(text)
         language = language or self._session_language(session_id) or self._tts_fixed_language
@@ -1920,6 +2110,7 @@ class PipelineConversationHandler:
         flight = phrase_audio.begin(tts, key) if cache else None
         collected: list[bytes] = []
         complete = False
+        got_audio = False
         try:
             pin_phrases = getattr(tts, "pin_phrases", None) if pin else None
             if pin_phrases is not None:
@@ -1928,12 +2119,15 @@ class PipelineConversationHandler:
                 except Exception:
                     log.warning("TTS pin failed session=%s", session_id, exc_info=True)
             async for chunk in tts.synthesize_stream(text, self._sample_rate, **kwargs):
+                got_audio = True
                 if cache:
                     collected.append(chunk)
                 yield chunk
             complete = True
         except Exception:
-            log.exception("TTS streaming failed text=%r session=%s", text, session_id)
+            log.exception("TTS streaming failed chars=%d session=%s", len(text), session_id)
+            if in_reply and not got_audio:
+                self._session(session_id).unspoken_sentences.append(sentence)
         finally:
             if cache:
                 phrase_audio.finish(tts, key, flight, collected if complete else None)

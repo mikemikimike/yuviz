@@ -578,7 +578,7 @@ export default function AgentDetailPage() {
 
         <main className="ed2-main">
           <div className="ed2-sec-hdr">
-            <h2>{sectionInfo.label}</h2>
+            <h2>{sectionInfo.label}{(section === "knowledge" || section === "tools") && <span className="ed2-optional"> (Optional)</span>}</h2>
             <p>{sectionInfo.hint}</p>
           </div>
           {saveError && (
