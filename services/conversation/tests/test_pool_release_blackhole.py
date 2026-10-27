@@ -1,4 +1,5 @@
-"""A task cancelled inside platform_conn on a blackholed Postgres must give its pool slot back.
+"""A task cancelled inside platform_conn or tenant_conn on a blackholed Postgres must give its
+pool slot back.
 
 A tiny in-process server speaks just enough of the protocol to accept connections, answers the
 first N simple queries, then goes silent. The control case (acquire_timeout=None) shows the
@@ -13,7 +14,7 @@ import struct
 import asyncpg
 import pytest
 
-from libs.tenancy.session import platform_conn
+from libs.tenancy.session import platform_conn, tenant_conn
 
 ACQUIRE_TIMEOUT_S = 1.0
 MARGIN_S = 1.5
@@ -71,14 +72,23 @@ async def blackhole_server():
         server.close()
 
 
-async def _cancel_mid_flight(port: int, acquire_timeout: float | None):
-    """Cancel a platform_conn user while the server is silent; return (task, pool)."""
+def _platform(pool, acquire_timeout):
+    return platform_conn(pool, reason="test", acquire_timeout=acquire_timeout)
+
+
+def _tenant(pool, acquire_timeout):
+    # The policy resolver's two lookups (fetch and execute_api specialize) both open this.
+    return tenant_conn(pool, explicit_tenant="t1", reason="test", acquire_timeout=acquire_timeout)
+
+
+async def _cancel_mid_flight(port: int, acquire_timeout: float | None, open_conn=_platform):
+    """Cancel a connection user while the server is silent; return (task, pool)."""
     pool = await asyncpg.create_pool(
         f"postgresql://u@127.0.0.1:{port}/d", min_size=1, max_size=2, command_timeout=30, ssl=False
     )
 
     async def work():
-        async with platform_conn(pool, reason="test", acquire_timeout=acquire_timeout) as conn:
+        async with open_conn(pool, acquire_timeout) as conn:
             await conn.execute("SELECT hang")
 
     task = asyncio.ensure_future(work())
@@ -88,10 +98,12 @@ async def _cancel_mid_flight(port: int, acquire_timeout: float | None):
     return task, pool
 
 
-# answer=0: BEGIN itself is never answered; answer=1: BEGIN succeeds, SET LOCAL ROLE hangs.
+# answer=0: BEGIN itself is never answered; answer=1: BEGIN succeeds, then the first statement
+# (SET LOCAL ROLE, or tenant_conn's scope lookup) hangs.
+@pytest.mark.parametrize("open_conn", [_platform, _tenant], ids=["platform_conn", "tenant_conn"])
 @pytest.mark.parametrize("answer", [0, 1], ids=["blackhole_before_begin", "blackhole_after_begin"])
-async def test_cancelled_user_releases_slot_within_bound(blackhole_server, answer):
-    task, pool = await _cancel_mid_flight(await blackhole_server(answer), ACQUIRE_TIMEOUT_S)
+async def test_cancelled_user_releases_slot_within_bound(blackhole_server, answer, open_conn):
+    task, pool = await _cancel_mid_flight(await blackhole_server(answer), ACQUIRE_TIMEOUT_S, open_conn)
     try:
         assert task.done()
         assert task.cancelled()  # the caller sees its own cancellation, not asyncpg's InterfaceError

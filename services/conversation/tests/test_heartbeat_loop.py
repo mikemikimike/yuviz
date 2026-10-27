@@ -11,6 +11,7 @@ from services.conversation.__main__ import (
     HEARTBEAT_INTERVAL_S,
     HEARTBEAT_RETRY_BACKOFF_S,
     HEARTBEAT_STEP_TIMEOUT_S,
+    INACTIVE_CALL_TIMEOUT_S,
     REAP_WINDOW_S,
     _bounded_step,
     _run_heartbeat_loop,
@@ -102,9 +103,10 @@ class _VirtualClock:
 
 
 class _FakeTranscripts:
-    def __init__(self, vc: dict, recovery_at: float):
+    def __init__(self, vc: dict, recovery_at: float, reap_raises_from: float = 0.0):
         self._vc = vc
         self._recovery_at = recovery_at
+        self._reap_raises_from = reap_raises_from
         self.writes: list[float] = []
         self.reaps: list[float] = []
         self.inactive_runs: list[float] = []
@@ -121,7 +123,7 @@ class _FakeTranscripts:
     async def reconcile_dead_nodes(self, *, stale_after_seconds):
         now = self._vc["v"].now
         self.reaps.append(now)
-        if self.reap_raised_at is None:
+        if self.reap_raised_at is None and now >= self._reap_raises_from:
             self.reap_raised_at = now
             raise ConnectionRefusedError("reap failed")
 
@@ -156,10 +158,12 @@ async def test_outage_then_recovery_never_reaps_a_live_peer():
     peer_reaped = [t for t in transcripts.reaps if t < peer_first_write]
     assert peer_reaped == []
 
-    # The iteration where reconcile_dead_nodes raised still ran reconcile_inactive_calls.
-    assert transcripts.reap_raised_at in transcripts.inactive_runs
-    # And the loop kept going after the raise.
+    # The loop kept going after reconcile_dead_nodes raised.
     assert len(transcripts.reaps) > 1
+
+    # Calls whose transcript writes failed during the outage are not swept as inactive on recovery.
+    assert transcripts.inactive_runs
+    assert transcripts.inactive_runs[0] - first_good >= INACTIVE_CALL_TIMEOUT_S
 
 
 async def test_a_hung_write_is_followed_by_a_good_one_within_the_reap_budget():
@@ -202,20 +206,26 @@ async def _until(predicate):
         await asyncio.sleep(0.05)
 
 
-async def test_healthy_node_reaps_on_its_first_iteration():
-    # healthy_since starts at -inf, so a node that never failed behaves as before.
+async def test_a_fresh_node_waits_a_full_window_before_each_sweep():
+    # A node booting as Postgres recovers has never failed a write, yet its peers may still be
+    # recovering: it must not reap them, or sweep their calls, on its first iteration.
     holder: dict = {}
-    transcripts = _FakeTranscripts(holder, recovery_at=0.0)
+    transcripts = _FakeTranscripts(holder, recovery_at=0.0, reap_raises_from=INACTIVE_CALL_TIMEOUT_S)
 
     async def on_sleep(vc):
-        raise asyncio.CancelledError
+        if vc.now > INACTIVE_CALL_TIMEOUT_S + HEARTBEAT_INTERVAL_S:
+            raise asyncio.CancelledError
 
     vc = holder["v"] = _VirtualClock(on_sleep)
 
     with pytest.raises(asyncio.CancelledError):
         await _run_heartbeat_loop(transcripts, clock=vc.clock, sleep=vc.sleep)
 
-    assert transcripts.reaps == [0.0]
+    assert transcripts.writes[0] == 0.0
+    assert transcripts.reaps[0] == REAP_WINDOW_S
+    assert transcripts.inactive_runs[0] == INACTIVE_CALL_TIMEOUT_S
+    # The iteration where reconcile_dead_nodes raised still ran reconcile_inactive_calls.
+    assert transcripts.reap_raised_at in transcripts.inactive_runs
 
 
 async def test_cancel_during_a_failing_iteration_is_prompt():
