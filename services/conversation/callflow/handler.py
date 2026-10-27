@@ -67,7 +67,7 @@ class CallFlowConversationHandler:
         self._transcripts = transcripts
 
         # The call row starts here, ahead of the driver, so it covers the IVR and names the flow's
-        # agent; a delegate's own begin_call() at handoff is then a no-op (ON CONFLICT DO NOTHING).
+        # agent; a delegate's own begin_call() at handoff is then a same-tenant upsert that changes nothing.
         if transcripts is not None:
             transcripts.begin_call(session_id, tenant_id, call_id, **(call_row or {}))
 

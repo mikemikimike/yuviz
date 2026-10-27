@@ -537,7 +537,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
     server = grpc.aio.server(options=[("grpc.so_reuseport", 0)])
 
     # Conversation service
-    conversation_servicer = ConversationServicer(handler_factory)
+    conversation_servicer = ConversationServicer(handler_factory, transcripts)
     pb_grpc.add_ConversationServiceServicer_to_server(conversation_servicer, server)
 
     # Health check — stays NOT_SERVING until the Whisper model finishes loading.
