@@ -264,7 +264,7 @@ async def test_selective_kb_filter_still_returns_top_k_through_hnsw(pool, tenant
     tenant, agent = tenant_agent
     set_caller_tenant(str(tenant["id"]))
     big, small = await _selective_world(pool, tenant, agent, 1500 if mode != "fallback" else 300)
-    args = (vec_literal(embed_text("alpha beta gamma")), [str(small["id"])], 5, vr.SEARCHABLE_STATUSES, -1.0, None)
+    args = (vec_literal(embed_text("alpha beta gamma")), [str(small["id"])], 5, vr.SEARCHABLE_STATUSES, -1.0, None, None)
 
     async with _hnsw_forced(pool) as conn:
         # Premise 1: the repository's own SQL is driven by the HNSW index here.
@@ -355,7 +355,7 @@ async def test_parent_too_big_for_the_budget_falls_back_to_its_child(pool, world
 
 # --- plan cache ----------------------------------------------------------------------------------------------
 
-_PLAN_TABLES = ("FROM agents", "agent_retrieval_policies", "agent_knowledge_bases", "provider_configs", "kb_documents d")
+_PLAN_TABLES = ("FROM agents", "agent_retrieval_policies", "agent_documents", "provider_configs", "kb_documents d")
 
 
 def _spy_queries(monkeypatch) -> list[str]:
@@ -394,22 +394,23 @@ async def test_cold_plan_costs_queries_and_prewarm_removes_them(world, monkeypat
     set_caller_tenant(str(world["tenant"]["id"]))
     assert await plans.prewarm(world["tenant"]["slug"], world["agent"]["slug"],
                                embedding_manager=make_manager(world["embedder"])) is True
-    assert len([q for q in seen if "FROM agents" in q or "agent_knowledge_bases" in q]) >= 2
+    assert len([q for q in seen if "FROM agents" in q or "agent_documents" in q]) >= 2
     result = await _run(world["tenant"], world["agent"], world["embedder"], "refund")
     assert result["retrieval_metadata"]["plan_cache"] == "hit"
 
 
-async def test_plan_invalidates_when_a_kb_is_assigned_or_disabled(pool, world):
+async def test_plan_invalidates_when_a_document_is_linked_or_unlinked(pool, world):
     from services.knowledge import agent_kb as agent_kb_service
     t, a = world["tenant"], world["agent"]
     first = await _run(t, a, world["embedder"], "orbital docking procedure")
     assert first["status"] == "no_match"
     extra = await make_kb(pool, t, a, "extra", assign=False)
-    await add_document(pool, t, extra, "Docking", ["Orbital docking procedure requires two operators."])
+    docking = await add_document(pool, t, extra, "Docking", ["Orbital docking procedure requires two operators."])
+    before = [str(d["document_id"]) for d in await agent_kb_service.list_for_agent(a["id"])]
     assert (await _run(t, a, world["embedder"], "orbital docking procedure"))["status"] == "no_match"  # cached plan
-    await agent_kb_service.assign(a["id"], extra["id"])  # explicit invalidate
+    await agent_kb_service.replace_documents(a["id"], [*before, str(docking["id"])])  # explicit invalidate
     assert (await _run(t, a, world["embedder"], "orbital docking procedure"))["status"] == "ok"
-    await agent_kb_service.set_enabled(a["id"], extra["id"], enabled=False)
+    await agent_kb_service.replace_documents(a["id"], before)
     assert (await _run(t, a, world["embedder"], "orbital docking procedure"))["status"] == "no_match"
 
 
@@ -494,7 +495,7 @@ async def test_embedding_cache_hits_for_same_tenant_and_never_crosses_tenants(po
     finally:
         await retrieval_log.flush()
         await pool.execute("DELETE FROM retrieval_logs WHERE tenant_id = $1", other["id"])
-        await pool.execute("DELETE FROM agent_knowledge_bases WHERE agent_id = $1", other_agent["id"])
+        await pool.execute("DELETE FROM agent_documents WHERE agent_id = $1", other_agent["id"])
         await pool.execute("DELETE FROM kb_chunks WHERE tenant_id = $1", other["id"])
         await pool.execute("DELETE FROM kb_documents WHERE tenant_id = $1", other["id"])
         await pool.execute("DELETE FROM knowledge_bases WHERE tenant_id = $1", other["id"])

@@ -73,7 +73,7 @@ class _FakePool:
     def __init__(self, conn: _FakeConn) -> None:
         self._conn = conn
 
-    def acquire(self) -> _Acquire:
+    def acquire(self, timeout: float | None = None) -> _Acquire:
         return _Acquire(self._conn)
 
 

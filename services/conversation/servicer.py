@@ -40,6 +40,9 @@ PROTOCOL_VERSION = "1.0"
 
 # One refusal text for a live session_id, whichever tenant holds it.
 _SESSION_IN_USE = "session_id already in use"
+# Fixed peer-facing texts: exception strings can carry hosts, ports and DSNs, so they stay in the server log.
+_INTERNAL_MESSAGE = "internal error"
+_REJECTED_MESSAGE = "call rejected"
 
 # UNSPECIFIED is a non-gateway client: webcall, vobiz, tests.
 _ROUTING_STATUS = {
@@ -197,6 +200,17 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     session_id=sid,
                     code="AGENT_UNAVAILABLE",
                     message="agent unavailable",
+                    fatal=True,
+                )
+            )
+            return
+        except Exception:
+            log.exception("Converse: handler factory failed session=%s", sid)
+            yield pb.ServiceMessage(
+                error=pb.ServiceError(
+                    session_id=sid,
+                    code="INTERNAL",
+                    message=_INTERNAL_MESSAGE,
                     fatal=True,
                 )
             )
@@ -772,7 +786,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         except RejectedCallHangup as exc:
             log.info("Converse: hanging up rejected call: %s", exc)
             yield pb.ServiceMessage(
-                error=pb.ServiceError(session_id=sid, code="CALL_REJECTED", message=str(exc), fatal=True)
+                error=pb.ServiceError(session_id=sid, code="CALL_REJECTED", message=_REJECTED_MESSAGE, fatal=True)
             )
         except Exception:
             log.exception("Converse error session=%s", sid)
@@ -780,7 +794,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                 error=pb.ServiceError(
                     session_id=sid,
                     code="INTERNAL",
-                    message="internal error",
+                    message=_INTERNAL_MESSAGE,
                     fatal=True,
                 )
             )

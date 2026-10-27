@@ -436,3 +436,26 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     *Earned: PR #103 deferred Kokoro's KPipeline load to keep it off the loop, so every agent's first greeting
     after a restart paid 1-3 s of dead air. A new `FasterWhisperSTT.aclose()` was then picked up by the bundle's
     "close the unused Ollama client" cleanup, which cancelled the shared Whisper download on every call.*
+
+52. [architect][implementer][critic] `asyncio.wait_for(x, t)` waits for the cancelled task to finish, so its bound is only as
+    tight as the cleanup. An asyncpg `pool.acquire()` exit can wait on a blackholed server with no timeout. To bound a DB or network
+    call, use `asyncio.wait({task}, timeout=t)`, cancel without awaiting, and consume the task's exception in a done-callback
+    (PR #214's `services/conversation/bounded.py`).
+    *Earned: PR #214's 2 s policy lookup and 5 s heartbeat step could stall for the TCP timeout. Design, code review and the
+    security audit were all GREEN; only the independent review caught it.*
+
+53. [architect][implementer][critic][tester] A cache or fallback refreshed under failure must be single-flight per key: N
+    overlapping callers share one attempt and one WARNING. Test it with callers that really overlap, not one after another.
+    *Earned: PR #214, where every live call on an expired key ran its own 2 s DB attempt and logged its own warning during the outage.*
+
+54. [planner][tester][approver] When the suite needs a service the local machine lacks, the task file must say so up front
+    (`## Test environment`), and the fan-in must check failures against the base commit before halting. A failure that is
+    identical on base is pre-existing, not a blocker.
+    *Earned: the PR #214 run halted twice at build on 50 clinic/toolexec fixture errors (no local Postgres socket) that failed
+    identically on base.*
+
+55. [all] Repo-wide scans read `git ls-files`, so they cannot see untracked files: a local run passes, then CI fails once
+    the files are committed. Run the suite with new files marked intent-to-add (`git add -N`), and run `pytest tests/`
+    again after staging. Never put a literal credential-shaped URL in an artifact; write `<password>`.
+    *Earned: PR #214 failed CI on `tests/test_env_catalogue.py` because `02-design.md` contained an example DSN with a literal `user:pass@` in it,
+    which was untracked during every local run.*

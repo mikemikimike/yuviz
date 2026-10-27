@@ -758,7 +758,7 @@ async def test_redis_flag_uses_a_new_namespace_and_has_a_ttl():
 
 async def test_legacy_purge_deletes_only_keys_under_its_prefix_in_the_client_it_is_given():
     import redis.asyncio as aioredis
-    own = aioredis.from_url("redis://localhost:6379/13", decode_responses=True)  # test-only database
+    own = aioredis.from_url(os.environ["REDIS_URL"].rsplit("/", 1)[0] + "/13", decode_responses=True)  # test-only database
     prefix = f"legacytest{uuid.uuid4().hex[:8]}:"
     mine, other = [f"{prefix}{i}" for i in range(3)], f"othertest{uuid.uuid4().hex[:8]}:x"
     try:

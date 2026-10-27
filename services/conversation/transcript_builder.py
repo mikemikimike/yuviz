@@ -12,6 +12,7 @@ import asyncpg
 
 from libs.tenancy import platform_conn, tenant_conn
 
+from .bounded import POOL_COMMAND_TIMEOUT_S, POOL_RELEASE_TIMEOUT_S
 from .sentiment import SentimentScorer, Turn
 
 log = logging.getLogger(__name__)
@@ -56,7 +57,9 @@ class TranscriptBuilder:
         if not database_url:
             log.info("TranscriptBuilder disabled — POSTGRES_DSN not set")
             return cls(pool=None)
-        pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
+        pool = await asyncpg.create_pool(
+            database_url, min_size=1, max_size=5, command_timeout=POOL_COMMAND_TIMEOUT_S,
+        )
         log.info(
             "TranscriptBuilder connected node_id=%s sentiment=%s",
             node_id, "on" if sentiment is not None else "off",
@@ -100,24 +103,27 @@ class TranscriptBuilder:
         return count
 
     async def heartbeat(self) -> None:
-        """Liveness UPSERT for other instances' reconcile_dead_nodes(); shares no state with the call path."""
+        """Liveness UPSERT for other instances' reconcile_dead_nodes(); shares no state with the call path.
+
+        Raises on a DB failure: the heartbeat loop must tell a failed write from a good one."""
         if self._pool is None or not self._node_id:
             return
-        try:
-            async with platform_conn(self._pool, reason="conversation-reconcile-sweep") as conn:
-                await conn.execute(
-                    "INSERT INTO conversation_node_heartbeats (node_id, last_seen_at) VALUES ($1, NOW()) "
-                    "ON CONFLICT (node_id) DO UPDATE SET last_seen_at = NOW()",
-                    self._node_id,
-                )
-        except Exception:
-            log.exception("TranscriptBuilder: heartbeat write failed node_id=%s", self._node_id)
+        async with platform_conn(
+            self._pool, reason="conversation-reconcile-sweep", acquire_timeout=POOL_RELEASE_TIMEOUT_S,
+        ) as conn:
+            await conn.execute(
+                "INSERT INTO conversation_node_heartbeats (node_id, last_seen_at) VALUES ($1, NOW()) "
+                "ON CONFLICT (node_id) DO UPDATE SET last_seen_at = NOW()",
+                self._node_id,
+            )
 
     async def reconcile_dead_nodes(self, *, stale_after_seconds: int) -> int:
         """Close live calls owned by any node whose heartbeat is missing or older than stale_after_seconds."""
         if self._pool is None:
             return 0
-        async with platform_conn(self._pool, reason="conversation-reconcile-sweep") as conn:
+        async with platform_conn(
+            self._pool, reason="conversation-reconcile-sweep", acquire_timeout=POOL_RELEASE_TIMEOUT_S,
+        ) as conn:
             result = await conn.execute(
                 """
                 UPDATE calls SET ended_at = NOW(), close_reason = 'reconciled_dead_node'
@@ -140,7 +146,9 @@ class TranscriptBuilder:
         Time-based and idempotent, so any instance may run it for any node."""
         if self._pool is None:
             return 0
-        async with platform_conn(self._pool, reason="conversation-reconcile-sweep") as conn:
+        async with platform_conn(
+            self._pool, reason="conversation-reconcile-sweep", acquire_timeout=POOL_RELEASE_TIMEOUT_S,
+        ) as conn:
             result = await conn.execute(
                 """
                 UPDATE calls SET ended_at = NOW(), close_reason = 'reconciled_inactive'

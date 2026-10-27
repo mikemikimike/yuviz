@@ -1,6 +1,7 @@
 // Typed client for Config Service's REST API. Shapes mirror services/config/schemas.py.
 
 import { clearToken, getToken } from "./auth";
+import { previewBody } from "./voicePicker";
 
 const BASE_URL = process.env.NEXT_PUBLIC_CONFIG_SERVICE_URL || "http://localhost:8000";
 
@@ -181,8 +182,9 @@ export interface ElevenLabsVoice {
   verified_languages: ElevenLabsVoiceVerifiedLanguage[];
 }
 
-/** Speak `text` in this provider's voice as WAV. Local engines (macos, kokoro) return 400. */
-export const previewVoice = async (providerId: string, text: string): Promise<Blob> => {
+/** Speak `text` as WAV in `voiceId` (one of the account's voices) or else the provider's saved voice.
+ * Local engines (macos, kokoro) return 400. */
+export const previewVoice = async (providerId: string, text: string, voiceId?: string): Promise<Blob> => {
   const token = getToken();
   const res = await fetch(`${BASE_URL}/providers/${providerId}/preview`, {
     method: "POST",
@@ -190,7 +192,7 @@ export const previewVoice = async (providerId: string, text: string): Promise<Bl
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(previewBody(text, voiceId)),
   });
   if (!res.ok) {
     let detail = res.statusText;
