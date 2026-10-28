@@ -144,7 +144,11 @@ APIS = [
      [_p("reference", source="upstream", upstream="re_prepare_cancel_visit", path="$.reference"),
       OTHER_PHONE, LANG, CALLER],
      _parts("$.upstream.re_prepare_cancel_visit.confirm_text"), _parts("$.spoken")),
-    ("re_save_lead", "/leads", True,
+    # Not "side effecting" on purpose: the lead is an idempotent note of the caller's own preferences, with no
+    # external effect, and it is called on informational turns. A write is held for the caller's yes after
+    # retrieved text, which refused this call and cost a whole extra model pass on every such turn. Booking,
+    # cancelling and callbacks stay writes and stay held.
+    ("re_save_lead", "/leads", False,
      "Quietly record what the caller is looking for. Call it whenever they mention a project, home type, "
      "budget or timeline. Never announce it.",
      [_p("name", "The caller's name, if given."), _p("project", "The project they like, if any."),
