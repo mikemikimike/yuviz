@@ -4,6 +4,7 @@
 // and PCM playback against the webcall bridge.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { openTestCallSocket } from "@/lib/webcallSocket";
 
 const WEBCALL_URL = process.env.NEXT_PUBLIC_WEBCALL_URL || "ws://localhost:8300";
 const SAMPLE_RATE = 16000;
@@ -194,9 +195,7 @@ export function useWebCall(tenantSlug: string, agentSlug: string): WebCall {
       source.connect(worklet);
       // Not connected to ctx.destination, to avoid echoing the mic back.
 
-      const ws = new WebSocket(
-        `${WEBCALL_URL}/webcall?tenant=${encodeURIComponent(tenantSlug)}&agent=${encodeURIComponent(agentSlug)}`,
-      );
+      const ws = await openTestCallSocket(WEBCALL_URL, tenantSlug, agentSlug);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 

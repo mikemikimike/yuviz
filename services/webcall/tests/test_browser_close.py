@@ -8,7 +8,7 @@ import json
 from types import SimpleNamespace
 
 from services.webcall import __main__ as webcall
-from services.webcall.tests.test_first_frame import PLAIN_PATH, FakeCall, FakeWs, pb
+from services.webcall.tests.test_first_frame import CRED_FRAME, PLAIN_PATH, FakeCall, FakeWs, pb
 
 
 class OpenUntilHalfClosedCall(FakeCall):
@@ -41,7 +41,7 @@ async def test_normal_browser_close_half_closes_call_so_session_ends(monkeypatch
     monkeypatch.setattr(
         webcall.pb_grpc, "ConversationServiceStub", lambda channel: SimpleNamespace(Converse=lambda: call),
     )
-    ws = FakeWs(PLAIN_PATH, [json.dumps({"type": "speech_ended", "duration_ms": 100})])
+    ws = FakeWs(PLAIN_PATH, [CRED_FRAME, json.dumps({"type": "speech_ended", "duration_ms": 100})])
 
     await asyncio.wait_for(webcall._handle_connection(ws), 2)
 

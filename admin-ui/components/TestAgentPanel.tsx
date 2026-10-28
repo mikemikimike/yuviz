@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Modal } from "@/components/Modal";
+import { openTestCallSocket } from "@/lib/webcallSocket";
 
 const WEBCALL_URL = process.env.NEXT_PUBLIC_WEBCALL_URL || "ws://localhost:8300";
 const SAMPLE_RATE = 16000;
@@ -187,9 +188,7 @@ export function TestAgentPanel({
       // Deliberately not connected to ctx.destination — we don't want the
       // caller's own mic echoed back to them.
 
-      const ws = new WebSocket(
-        `${WEBCALL_URL}/webcall?tenant=${encodeURIComponent(tenantSlug)}&agent=${encodeURIComponent(agentSlug)}`,
-      );
+      const ws = await openTestCallSocket(WEBCALL_URL, tenantSlug, agentSlug);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
