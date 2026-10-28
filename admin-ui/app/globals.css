@@ -2347,3 +2347,127 @@ button.topbar-cta { border: 0; font-family: inherit; }
 }
 .knowledge-reading-card { margin-top: 0; padding: 14px; background: var(--surf-2); border: 1px solid var(--border-2); border-radius: var(--rs); }
 .knowledge-reading-card input { flex-shrink: 0; }
+
+
+/* Yuviz sign-in: premium lavender/coral visual language, isolated to auth routes */
+.auth-split {
+  --bg: #fbf9ff;
+  --surf: #ffffff;
+  --surf-2: #f2effb;
+  --border: #e4def4;
+  --border-2: #e9e4f3;
+  --text: #24233b;
+  --text-2: #5e617c;
+  --text-3: #777b96;
+  --cyan: #7964d8;
+  --cyan-dim: #eee9ff;
+  --cyan-border: #d9cffb;
+  --lime: #7964d8;
+  --lime-soft: #eee9ff;
+  background: linear-gradient(135deg, #fbfaff 0%, #f5f1fc 48%, #fff8f5 100%);
+}
+.auth-hero {
+  border-right: 1px solid rgba(129, 110, 195, .12);
+  background:
+    radial-gradient(ellipse 75% 62% at 24% 38%, rgba(164, 143, 255, .19), transparent 70%),
+    radial-gradient(ellipse 52% 44% at 86% 88%, rgba(255, 164, 145, .14), transparent 72%),
+    linear-gradient(145deg, #f4f0ff 0%, #f8f5ff 52%, #fff7f4 100%);
+}
+.auth-hero::after {
+  content: "";
+  position: absolute;
+  width: 360px;
+  height: 360px;
+  right: -170px;
+  top: 22%;
+  border: 1px solid rgba(145, 125, 216, .13);
+  border-radius: 50%;
+  box-shadow: 0 0 0 34px rgba(145, 125, 216, .035), 0 0 0 68px rgba(145, 125, 216, .025);
+  pointer-events: none;
+}
+.auth-hero-main, .auth-logo, .auth-facts { position: relative; z-index: 1; }
+.auth-eyebrow { color: #7862d0; }
+.auth-hero-title { color: #24233b; letter-spacing: -.045em; }
+.auth-hero-title::selection { background: #ddd3ff; }
+.auth-hero-body { color: #626781; }
+.auth-chip {
+  color: #5f5b78;
+  background: rgba(255,255,255,.82);
+  border-color: #e3dcf2;
+  border-radius: 999px;
+}
+.auth-fact-value { color: #292742; }
+.auth-fact-label { color: #72758e; }
+.auth-panel {
+  background: rgba(255,255,255,.64);
+  backdrop-filter: blur(12px);
+}
+.auth-form { max-width: 392px; }
+.auth-title { color: #25243d; font-size: 1.5rem; letter-spacing: -.035em; }
+.auth-sub { color: #73758d; }
+.auth-back { color: #74718a; transition: color .16s ease; }
+.auth-back:hover { color: #6f59c8; }
+.auth-split .login-google {
+  min-height: 46px;
+  border-radius: 14px;
+  border-color: #e3def0;
+  background: #fff;
+  color: #302d49;
+  transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+.auth-split .login-google:hover {
+  border-color: #c9baf8;
+  box-shadow: 0 8px 24px rgba(93, 72, 166, .08);
+  transform: translateY(-1px);
+}
+.auth-split .login-input {
+  min-height: 43px;
+  border-radius: 11px;
+  border-color: #e1dced;
+  background: rgba(255,255,255,.86);
+  color: #292741;
+}
+.auth-split .login-input:focus {
+  outline: none;
+  border-color: #a99ae9;
+  box-shadow: 0 0 0 3px rgba(137, 113, 218, .13);
+}
+.auth-split .login-label { color: #686780; }
+.auth-split .login-btn,
+.auth-split .auth-submit {
+  min-height: 44px;
+  border: 0;
+  border-radius: 13px;
+  color: #211d37;
+  font-weight: 700;
+  background: linear-gradient(105deg, #bca9ff 0%, #a38af5 52%, #ffa998 100%);
+  box-shadow: 0 8px 20px rgba(133, 105, 210, .16);
+  transition: filter .18s ease, transform .18s ease, box-shadow .18s ease;
+}
+.auth-split .login-btn:hover:not(:disabled),
+.auth-split .auth-submit:hover:not(:disabled) {
+  filter: saturate(1.06) brightness(1.02);
+  transform: translateY(-1px);
+  box-shadow: 0 11px 26px rgba(133, 105, 210, .22);
+}
+.auth-split .login-btn:disabled,
+.auth-split .auth-submit:disabled { opacity: .6; box-shadow: none; }
+.auth-split .login-alt { color: #77758e; }
+.auth-split .login-alt button,
+.auth-split .login-alt a { color: #735ec7; }
+.auth-split .login-alt button:hover,
+.auth-split .login-alt a:hover { color: #5943af; }
+.auth-split .error-banner { border-radius: 12px; }
+.auth-split .login-divider { color: #85819b; }
+.auth-split .login-divider::before,
+.auth-split .login-divider::after { background: #e4dfef; }
+
+@media (max-width: 900px) {
+  .auth-split {
+    background:
+      radial-gradient(ellipse at 15% 5%, rgba(184, 165, 255, .22), transparent 38%),
+      radial-gradient(ellipse at 100% 100%, rgba(255, 169, 152, .15), transparent 36%),
+      #fbfaff;
+  }
+  .auth-panel { background: transparent; }
+}
