@@ -14,31 +14,19 @@ import { clearToken, setToken } from "@/lib/auth";
 import { COUNTRY_DIAL_CODES } from "@/lib/countries";
 import { SelectMenu } from "@/components/SelectMenu";
 
-// Messaging aligned with the public Yuviz.ai website and current product positioning.
+// Concise copy aligned with the public Yuviz.ai website.
 const HERO = {
   signin: {
-    eyebrow: "Voice AI for real customer conversations",
+    eyebrow: "VOICE AI FOR CUSTOMER CONVERSATIONS",
     title: "Every call has a next step.",
-    body: "Build voice-agent experiences that listen to your customers, work with business context, and help move the conversation forward. Shape the call flow around a clear job, with a defined next step when a person needs to take over.",
-    facts: [
-      { value: "Listen", label: "Start with what the caller needs" },
-      { value: "Understand", label: "Use relevant context and knowledge" },
-      { value: "Move forward", label: "Define the right next step" },
-    ],
+    body: "Yuviz helps businesses handle customer calls with AI voice agents that listen, understand, and guide each conversation forward.",
   },
   create: {
-    eyebrow: "Start with one clear workflow",
-    title: "Build a voice experience around your business.",
-    body: "Create your Yuviz workspace to configure an agent, connect the relevant voice and AI services, and shape a customer conversation around a specific business need.",
-    facts: [
-      { value: "01", label: "Set up your workspace" },
-      { value: "02", label: "Configure the voice experience" },
-      { value: "03", label: "Validate the workflow and next step" },
-    ],
+    eyebrow: "GET STARTED WITH YUVIZ",
+    title: "Give every conversation a clear next step.",
+    body: "Create your workspace to build and configure an AI voice agent for your business.",
   },
 };
-
-const PROVIDERS = ["OpenAI", "Anthropic", "Gemini", "Ollama", "Deepgram", "ElevenLabs", "Whisper", "Kokoro"];
 
 const DIAL_CODE = Object.fromEntries(COUNTRY_DIAL_CODES);
 // Mirrors verification.RESEND_COOLDOWN_SECONDS.
@@ -295,18 +283,6 @@ export default function LoginPage() {
           <div className="auth-eyebrow">{hero.eyebrow}</div>
           <h1 className="auth-hero-title">{hero.title}</h1>
           <p className="auth-hero-body">{hero.body}</p>
-          <div className="auth-providers">
-            <span className="auth-providers-label">Works with</span>
-            {PROVIDERS.map((p) => <span key={p} className="auth-chip">{p}</span>)}
-          </div>
-        </div>
-        <div className="auth-facts">
-          {hero.facts.map((f) => (
-            <div key={f.label}>
-              <div className="auth-fact-value">{f.value}</div>
-              <div className="auth-fact-label">{f.label}</div>
-            </div>
-          ))}
         </div>
       </aside>
 
