@@ -250,9 +250,10 @@ async def _run_heartbeat_loop(
 ) -> None:
     """Write this node's heartbeat and run the reconcile sweeps until cancelled.
 
-    After a failed write, retry quickly and hold off reaping peers until REAP_WINDOW_S of good
-    writes: our own gap would otherwise look like theirs, and we would close live calls."""
-    healthy_since = float("-inf")
+    After a failed write, retry quickly. Each sweep waits for one full window of good writes, at
+    startup too: a node booting as Postgres recovers would otherwise reap peers that are still
+    recovering, and calls whose transcript writes failed during the outage would look inactive."""
+    healthy_since: float | None = clock()
     while True:
         if not await _bounded_step("heartbeat", transcripts.heartbeat()):
             healthy_since = None
@@ -260,12 +261,14 @@ async def _run_heartbeat_loop(
             continue
         if healthy_since is None:
             healthy_since = clock()
-        if clock() - healthy_since >= REAP_WINDOW_S:
+        healthy_for = clock() - healthy_since
+        if healthy_for >= REAP_WINDOW_S:
             await _bounded_step(
                 "reconcile_dead_nodes", transcripts.reconcile_dead_nodes(stale_after_seconds=REAP_WINDOW_S))
-        await _bounded_step(
-            "reconcile_inactive_calls",
-            transcripts.reconcile_inactive_calls(inactive_after_seconds=INACTIVE_CALL_TIMEOUT_S))
+        if healthy_for >= INACTIVE_CALL_TIMEOUT_S:
+            await _bounded_step(
+                "reconcile_inactive_calls",
+                transcripts.reconcile_inactive_calls(inactive_after_seconds=INACTIVE_CALL_TIMEOUT_S))
         await sleep(HEARTBEAT_INTERVAL_S)
 
 
