@@ -5,10 +5,8 @@ RetryOnceLLM — retries an ILLM once on failure, only if nothing was yielded ye
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
-from contextvars import ContextVar
 import logging
-from typing import Any, AsyncGenerator, Callable, Iterator
+from typing import Any, AsyncGenerator, Callable
 
 from ..interfaces import ChatMessage
 
@@ -18,27 +16,6 @@ _STREAM_CLEANUP_TIMEOUT_S = 0.1
 
 class LlmResponseTimeout(TimeoutError):
     """The response deadline expired before any output reached the caller."""
-
-
-class _ResponseBudget:
-    """Share one first-output deadline and completion signal across retry attempts."""
-
-    def __init__(self, deadline: float, output_started: asyncio.Event) -> None:
-        self.deadline = deadline
-        self.output_started = output_started
-
-
-_response_budget: ContextVar[_ResponseBudget | None] = ContextVar("llm_response_budget", default=None)
-
-
-@contextmanager
-def response_budget(timeout_s: float, output_started: asyncio.Event) -> Iterator[None]:
-    """Share one first-output deadline across LLM attempts in a turn."""
-    token = _response_budget.set(_ResponseBudget(asyncio.get_running_loop().time() + timeout_s, output_started))
-    try:
-        yield
-    finally:
-        _response_budget.reset(token)
 
 
 def _consume_task(task: asyncio.Task[Any]) -> None:
@@ -66,35 +43,6 @@ def _schedule_stream_close(stream: Any) -> None:
     cleanup_task.add_done_callback(_consume_task)
 
 
-async def _next_with_budget(read_task: asyncio.Task[Any], budget: _ResponseBudget) -> Any:
-    """Wait for one item until the shared deadline or until caller output starts."""
-    remaining = budget.deadline - asyncio.get_running_loop().time()
-    if remaining <= 0:
-        read_task.cancel()
-        raise LlmResponseTimeout("LLM response deadline expired")
-
-    output_task = asyncio.create_task(budget.output_started.wait())
-    try:
-        done, _ = await asyncio.wait(
-            {read_task, output_task}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
-        )
-    except BaseException:
-        output_task.cancel()
-        if not read_task.done():
-            read_task.cancel()
-        raise
-
-    output_task.cancel()
-    output_task.add_done_callback(_consume_task)
-    if read_task in done:
-        return read_task.result()
-    if output_task in done:
-        return await read_task
-
-    read_task.cancel()
-    raise LlmResponseTimeout("LLM response deadline expired")
-
-
 class RetryOnceLLM:
     """Retry provider failures before the stream emits its first item."""
 
@@ -105,8 +53,6 @@ class RetryOnceLLM:
     async def _with_retry(self, make_call: Callable[[], AsyncGenerator[Any, None]]) -> AsyncGenerator[Any, None]:
         """Apply one pre-output retry and the active turn's first-output budget."""
         yielded_any = False
-        budget = _response_budget.get()
-
         async def stream_call() -> AsyncGenerator[Any, None]:
             nonlocal yielded_any
             stream = make_call()
@@ -116,15 +62,7 @@ class RetryOnceLLM:
             try:
                 while True:
                     try:
-                        if budget is None or budget.output_started.is_set():
-                            item = await iterator.__anext__()
-                        else:
-                            pending_read = asyncio.create_task(iterator.__anext__())
-                            try:
-                                item = await _next_with_budget(pending_read, budget)
-                            finally:
-                                if pending_read.done():
-                                    pending_read = None
+                        item = await iterator.__anext__()
                     except StopAsyncIteration:
                         completed = True
                         return

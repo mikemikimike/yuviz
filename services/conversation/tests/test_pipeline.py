@@ -3956,6 +3956,35 @@ async def test_partial_tokens_are_discarded_and_cancellation_resistant_stream_do
 
 
 @pytest.mark.asyncio
+async def test_timeout_persists_tool_outcome_folded_during_stream_cancellation():
+    """A tool envelope folded during cancellation reaches session history."""
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    class _FoldOnClose:
+        async def run_turn(self, *args, **kwargs):
+            history = args[4]
+            try:
+                await asyncio.Event().wait()
+                yield ToolCallStartedEvent(tool_name="unused")
+            finally:
+                history.append(ChatMessage(role="tool", content='{"error":{"code":"outcome_unknown"}}'))
+
+    handler = _make_handler(
+        _make_stt("book it"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
+        tool_orchestrator=_FoldOnClose(), llm_timeout_ms=50,
+    )
+    handler._session("s1").first_turn_filler_spoken = True
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+
+    assert any(
+        message.role == "tool" and "outcome_unknown" in message.content
+        for message in handler._get_history("s1")
+    )
+
+
+@pytest.mark.asyncio
 async def test_slow_tool_turn_continues_after_first_filler_output(monkeypatch):
     """Once a filler reaches the caller, the deadline no longer cuts off a tool."""
     from ..tools.llm_adapter import TokenEvent as ToolTokenEvent

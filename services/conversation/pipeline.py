@@ -43,7 +43,7 @@ from .language import LanguageTracker, fixed_language_instruction, reply_languag
 from .metrics import IMetrics, NullMetrics
 from .pipeline_config import env_ms
 from .provider_bundle import ProviderBundle
-from .providers.llm.retry import LlmResponseTimeout, response_budget
+from .providers.llm.retry import LlmResponseTimeout
 from .tool_latency import ToolLatencyStore
 from .providers.interfaces import ChatMessage, SttResult, with_directive
 from libs.config_sdk.languages import language_name, normalize_language
@@ -390,6 +390,13 @@ async def _close_stream_bounded(stream: Any) -> None:
         close_task.add_done_callback(_consume_async_task)
     else:
         _consume_async_task(close_task)
+
+
+async def _settle_pending_read(pending_read: asyncio.Task[Any]) -> None:
+    """Give a cancelled stream read a bounded chance to fold tool state into history."""
+    if not pending_read.done():
+        pending_read.cancel()
+    await asyncio.wait({pending_read}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
 
 
 class _FillerText(str):
@@ -1121,6 +1128,7 @@ class PipelineConversationHandler:
         # a knowledge question searches up front instead (prefetch.py), so the model answers in one pass. The
         # passages ride on every LLM call and are never stored in history.
         producer_history = list(history)
+        producer_history_start = len(producer_history)
         messages_for_llm = producer_history
         turn_context: ChatMessage | None = None
         if pre_retrieval is not None:
@@ -1156,34 +1164,33 @@ class PipelineConversationHandler:
             completed = False
             deadline = asyncio.get_running_loop().time() + self._llm_response_timeout_s
             try:
-                with response_budget(self._llm_response_timeout_s, output_started):
-                    while True:
-                        pending_read = asyncio.create_task(iterator.__anext__())
-                        if output_started.is_set():
-                            try:
-                                item = await asyncio.shield(pending_read)
-                            except asyncio.CancelledError:
-                                pending_read.cancel()
-                                _defer_stream_close(stream, pending_read)
-                                defer_close = True
-                                raise
-                        else:
-                            remaining = deadline - asyncio.get_running_loop().time()
-                            if remaining <= 0:
-                                pending_read.cancel()
-                                _defer_stream_close(stream, pending_read)
-                                defer_close = True
-                                raise LlmResponseTimeout("LLM response deadline expired")
-                            done, _ = await asyncio.wait({pending_read}, timeout=remaining)
-                            if not done:
-                                pending_read.cancel()
-                                _defer_stream_close(stream, pending_read)
-                                defer_close = True
-                                raise LlmResponseTimeout("LLM response deadline expired")
-                            item = pending_read.result()
-                        if item[1]:
-                            output_started.set()
-                        await items.put(item)
+                while True:
+                    pending_read = asyncio.create_task(iterator.__anext__())
+                    if output_started.is_set():
+                        try:
+                            item = await asyncio.shield(pending_read)
+                        except asyncio.CancelledError:
+                            await _settle_pending_read(pending_read)
+                            _defer_stream_close(stream, pending_read)
+                            defer_close = True
+                            raise
+                    else:
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            await _settle_pending_read(pending_read)
+                            _defer_stream_close(stream, pending_read)
+                            defer_close = True
+                            raise LlmResponseTimeout("LLM response deadline expired")
+                        done, _ = await asyncio.wait({pending_read}, timeout=remaining)
+                        if not done:
+                            await _settle_pending_read(pending_read)
+                            _defer_stream_close(stream, pending_read)
+                            defer_close = True
+                            raise LlmResponseTimeout("LLM response deadline expired")
+                        item = pending_read.result()
+                    if item[1]:
+                        output_started.set()
+                    await items.put(item)
             except StopAsyncIteration:
                 completed = True
                 await items.put(_STREAM_END)
@@ -1239,6 +1246,7 @@ class PipelineConversationHandler:
                 producer.cancel()
             producer.add_done_callback(lambda task: task.cancelled() or task.exception())
             await asyncio.wait({producer}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
+        history.extend(producer_history[producer_history_start:])
         if stream_completed:
             directives.extend(producer_directives)
             tool_calls_made.extend(producer_tool_calls)
