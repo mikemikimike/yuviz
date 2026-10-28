@@ -14,26 +14,26 @@ import { clearToken, setToken } from "@/lib/auth";
 import { COUNTRY_DIAL_CODES } from "@/lib/countries";
 import { SelectMenu } from "@/components/SelectMenu";
 
-// Only claims the product can back up — no invented usage numbers.
+// Messaging aligned with the public Yuviz.ai website and current product positioning.
 const HERO = {
   signin: {
-    eyebrow: "Voice AI platform",
-    title: "Voice agents that listen, think and talk back",
-    body: "Your AI assistant answers calls on the phone or your website, understands what callers say, replies in a natural voice, finds answers in your documents, and passes the call to a real person when needed.",
+    eyebrow: "Voice AI for real customer conversations",
+    title: "Every call has a next step.",
+    body: "Build voice-agent experiences that listen to your customers, work with business context, and help move the conversation forward. Shape the call flow around a clear job, with a defined next step when a person needs to take over.",
     facts: [
-      { value: "Phone & web", label: "Answers calls from any phone or browser" },
-      { value: "Natural voice", label: "Listens and replies instantly" },
-      { value: "Private", label: "Each organization's data kept separate" },
+      { value: "Listen", label: "Start with what the caller needs" },
+      { value: "Understand", label: "Use relevant context and knowledge" },
+      { value: "Move forward", label: "Define the right next step" },
     ],
   },
   create: {
-    eyebrow: "Get started",
-    title: "Set up your voice AI workspace",
-    body: "Create your organization and admin account, invite your team and launch your first AI voice assistant.",
+    eyebrow: "Start with one clear workflow",
+    title: "Build a voice experience around your business.",
+    body: "Create your Yuviz workspace to configure an agent, connect the relevant voice and AI services, and shape a customer conversation around a specific business need.",
     facts: [
-      { value: "01", label: "Create your organization" },
-      { value: "02", label: "Connect your AI and voice services" },
-      { value: "03", label: "Invite your team and go live" },
+      { value: "01", label: "Set up your workspace" },
+      { value: "02", label: "Configure the voice experience" },
+      { value: "03", label: "Validate the workflow and next step" },
     ],
   },
 };
