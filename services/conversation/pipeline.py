@@ -43,7 +43,6 @@ from .language import LanguageTracker, fixed_language_instruction, reply_languag
 from .metrics import IMetrics, NullMetrics
 from .pipeline_config import env_ms
 from .provider_bundle import ProviderBundle
-from .providers.llm.retry import LlmResponseTimeout, response_budget
 from .tool_latency import ToolLatencyStore
 from .providers.interfaces import ChatMessage, SttResult, with_directive
 from libs.config_sdk.languages import language_name, normalize_language
@@ -77,6 +76,10 @@ log = logging.getLogger(__name__)
 _DEFAULT_LLM_TIMEOUT_MS = 20_000
 _LLM_RESPONSE_RESERVE_RATIO = 0.1
 _STREAM_CLEANUP_TIMEOUT_S = 0.1
+
+
+class LlmResponseTimeout(TimeoutError):
+    """The first-output deadline expired before a response reached the caller."""
 
 
 @dataclass
@@ -1156,34 +1159,36 @@ class PipelineConversationHandler:
             completed = False
             deadline = asyncio.get_running_loop().time() + self._llm_response_timeout_s
             try:
-                with response_budget(self._llm_response_timeout_s, output_started):
-                    while True:
-                        pending_read = asyncio.create_task(iterator.__anext__())
-                        if output_started.is_set():
-                            try:
-                                item = await asyncio.shield(pending_read)
-                            except asyncio.CancelledError:
-                                pending_read.cancel()
-                                _defer_stream_close(stream, pending_read)
-                                defer_close = True
-                                raise
-                        else:
-                            remaining = deadline - asyncio.get_running_loop().time()
-                            if remaining <= 0:
-                                pending_read.cancel()
-                                _defer_stream_close(stream, pending_read)
-                                defer_close = True
-                                raise LlmResponseTimeout("LLM response deadline expired")
-                            done, _ = await asyncio.wait({pending_read}, timeout=remaining)
-                            if not done:
-                                pending_read.cancel()
-                                _defer_stream_close(stream, pending_read)
-                                defer_close = True
-                                raise LlmResponseTimeout("LLM response deadline expired")
-                            item = pending_read.result()
-                        if item[1]:
-                            output_started.set()
-                        await items.put(item)
+                while True:
+                    pending_read = asyncio.create_task(iterator.__anext__())
+                    if output_started.is_set():
+                        try:
+                            item = await asyncio.shield(pending_read)
+                        except asyncio.CancelledError:
+                            pending_read.cancel()
+                            await asyncio.wait({pending_read}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
+                            _defer_stream_close(stream, pending_read)
+                            defer_close = True
+                            raise
+                    else:
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            pending_read.cancel()
+                            await asyncio.wait({pending_read}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
+                            _defer_stream_close(stream, pending_read)
+                            defer_close = True
+                            raise LlmResponseTimeout("LLM response deadline expired")
+                        done, _ = await asyncio.wait({pending_read}, timeout=remaining)
+                        if not done:
+                            pending_read.cancel()
+                            await asyncio.wait({pending_read}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
+                            _defer_stream_close(stream, pending_read)
+                            defer_close = True
+                            raise LlmResponseTimeout("LLM response deadline expired")
+                        item = pending_read.result()
+                    if item[1]:
+                        output_started.set()
+                    await items.put(item)
             except StopAsyncIteration:
                 completed = True
                 await items.put(_STREAM_END)
@@ -1192,6 +1197,7 @@ class PipelineConversationHandler:
             except asyncio.CancelledError:
                 if pending_read is not None and not pending_read.done() and not defer_close:
                     pending_read.cancel()
+                    await asyncio.wait({pending_read}, timeout=_STREAM_CLEANUP_TIMEOUT_S)
                     _defer_stream_close(stream, pending_read)
                     defer_close = True
                 raise
