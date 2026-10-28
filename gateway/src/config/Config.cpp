@@ -18,6 +18,18 @@ const char* env_value(const char* name) {
     return (v != nullptr && *v != '\0') ? v : nullptr;
 }
 
+uint32_t parse_vad_hold_ms(const char* name, const std::string& s) {
+    if (s.empty() || s.size() > 5 || s.find_first_not_of("0123456789") != std::string::npos) {
+        throw std::runtime_error(std::string(name) + " is not a number of milliseconds: '" + s + "'");
+    }
+    const unsigned long ms = std::stoul(s);
+    if (ms < kVadHoldMinMs || ms > kVadHoldMaxMs) {
+        throw std::runtime_error(std::string(name) + " must be " + std::to_string(kVadHoldMinMs) + "-" +
+                                 std::to_string(kVadHoldMaxMs) + " ms, got " + s);
+    }
+    return static_cast<uint32_t>(ms);
+}
+
 uint16_t parse_port(const char* name, const char* v) {
     const std::string s(v);
     if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos || s.size() > 5) {
@@ -78,6 +90,8 @@ void apply_redis_url(RedisConfig& redis, const std::string& url) {
 
 // .env owns every address and secret; gateway.yaml only tunes behaviour.
 void apply_env(GatewayConfig& cfg) {
+    // Blank = keep the yaml value (default 600).
+    if (const char* v = env_value("GATEWAY_VAD_HOLD_MS")) cfg.media.vad_hold_ms = parse_vad_hold_ms("GATEWAY_VAD_HOLD_MS", v);
     apply_esl_env(cfg.esl);
     if (const char* v = env_value("CONVERSATION_SVC_TARGET")) cfg.conversation.endpoint = v;
     if (const char* v = env_value("REDIS_URL"))               apply_redis_url(cfg.redis, v);
@@ -122,6 +136,7 @@ void Config::load(const std::string& path) {
         if (med["ring_buffer_ms"]) config_.media.ring_buffer_ms = med["ring_buffer_ms"].as<uint32_t>();
         if (med["vad_engine"])     config_.media.vad_engine     = med["vad_engine"].as<std::string>();
         if (med["vad_model_path"]) config_.media.vad_model_path = med["vad_model_path"].as<std::string>();
+        if (med["vad_hold_ms"])    config_.media.vad_hold_ms    = parse_vad_hold_ms("media.vad_hold_ms", med["vad_hold_ms"].as<std::string>());
     }
 
     if (const auto conv = gw["conversation"]) {
@@ -170,6 +185,8 @@ TenantConfig TenantConfig::from_default(const GatewayConfig& cfg) noexcept {
 
     t.vad_engine        = cfg.media.vad_engine;
     t.silero.model_path = cfg.media.vad_model_path;
+    t.silero.hold_ms    = cfg.media.vad_hold_ms;   // a tenant's own vad_hold_ms overrides this later
+    t.vad.hold_ms       = cfg.media.vad_hold_ms;
 
     // timers use CallFsmTimerConfig defaults
 
@@ -205,8 +222,15 @@ TenantConfig TenantConfig::from_redis(
             if (silero) t.silero.onset_ms = ms; else t.vad.onset_ms = ms;
         }
         if (j.contains("vad_hold_ms") && j["vad_hold_ms"].is_number()) {
-            const auto ms = j["vad_hold_ms"].get<uint32_t>();
-            if (silero) t.silero.hold_ms = ms; else t.vad.hold_ms = ms;
+            const auto ms = j["vad_hold_ms"].get<int64_t>();
+            // Same bounds as the gateway-wide setting: 0 or a huge value would break turn-taking for the tenant.
+            if (ms >= kVadHoldMinMs && ms <= kVadHoldMaxMs) {
+                if (silero) t.silero.hold_ms = static_cast<uint32_t>(ms);
+                else        t.vad.hold_ms    = static_cast<uint32_t>(ms);
+            } else if (logger) {
+                logger->warn("TenantConfig: vad_hold_ms={} out of bounds [{}, {}] for tenant={} — using {}ms",
+                             ms, kVadHoldMinMs, kVadHoldMaxMs, tenant_id, silero ? t.silero.hold_ms : t.vad.hold_ms);
+            }
         }
         if (j.contains("vad_speech_threshold") && j["vad_speech_threshold"].is_number()) {
             const auto v = j["vad_speech_threshold"].get<float>();
