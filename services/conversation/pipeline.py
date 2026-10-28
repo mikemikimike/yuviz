@@ -43,7 +43,6 @@ from .language import LanguageTracker, fixed_language_instruction, reply_languag
 from .metrics import IMetrics, NullMetrics
 from .pipeline_config import env_ms
 from .provider_bundle import ProviderBundle
-from .providers.llm.retry import LlmResponseTimeout
 from .tool_latency import ToolLatencyStore
 from .providers.interfaces import ChatMessage, SttResult, with_directive
 from libs.config_sdk.languages import language_name, normalize_language
@@ -77,6 +76,10 @@ log = logging.getLogger(__name__)
 _DEFAULT_LLM_TIMEOUT_MS = 20_000
 _LLM_RESPONSE_RESERVE_RATIO = 0.1
 _STREAM_CLEANUP_TIMEOUT_S = 0.1
+
+
+class LlmResponseTimeout(TimeoutError):
+    """The first-output deadline expired before a response reached the caller."""
 
 
 @dataclass
