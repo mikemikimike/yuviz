@@ -30,8 +30,8 @@ from . import tenants as tenants_service
 from .routers import (
     agent_tool_policies, agents, audit_log, auth, call_flows, calls, carriers,
     invites as invites_router,
-    live_calls, local_models, phone_numbers, provider_configs, telephony_configs, tenants, tool_catalog,
-    tool_provider_configs, users,
+    live_calls, local_models, phone_numbers, provider_configs, public_demo, telephony_configs, tenants,
+    tool_catalog, tool_provider_configs, users,
 )
 
 log = logging.getLogger(__name__)
@@ -204,8 +204,10 @@ app.state.register_throttle = AcceptThrottle()
 app.state.verify_throttle = AcceptThrottle()
 app.state.live_calls_throttle = LiveCallsThrottle()
 app.state.agent_assist_throttle = AgentAssistThrottle()
+app.state.public_demo_throttle = public_demo.PublicDemoThrottle()
 
 app.include_router(auth.router)
+app.include_router(public_demo.router)
 app.include_router(users.router)
 app.include_router(invites_router.router)
 app.include_router(tenants.router)
