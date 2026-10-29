@@ -38,8 +38,10 @@ from ..pipeline import (
     PipelineConversationHandler,
     _END_CALL_MARKER,
     _FALLBACK_GOODBYE,
+    _join_sentences,
     _TOOL_CALL_FILLER_MIN_GAP_S,
     _TRANSFER_FAILED_FALLBACK,
+    _spoken_reply,
 )
 
 _TOOL_CALL_FILLERS = {t for t, _ in _TOOL_FILLERS}
@@ -130,6 +132,27 @@ def _make_tts(pcm: bytes = b"\x00" * 320) -> MagicMock:
             yield audio
 
     tts.synthesize_stream = _stream
+    return tts
+
+
+def _scripted_tts(default: str = "audio", **by_text: str) -> MagicMock:
+    """A TTS whose result depends on the text. Modes: "audio" (one chunk), "none" (no chunks),
+    "blank" (only b""), "raise". `default` applies to any text not named in `by_text`."""
+    tts = MagicMock()
+    log: list[str] = []
+
+    async def _stream(text, sample_rate):
+        log.append(text)
+        mode = by_text.get(text, default)
+        if mode == "raise":
+            raise RuntimeError("tts down")
+        if mode == "blank":
+            yield b""
+        elif mode == "audio":
+            yield b"\x01" * 320
+
+    tts.synthesize_stream = _stream
+    tts.log = log
     return tts
 
 
@@ -1052,6 +1075,48 @@ async def test_pipeline_max_call_duration_ends_call_without_calling_llm():
     end_call_responses = [r for r in responses if r.end_call]
     assert len(end_call_responses) == 1
     assert end_call_responses[0].end_call_grace_period_ms == 1500
+
+
+async def _max_duration_turn(tts, caplog):
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("are you still there"), _make_spy_llm(["unused"])[0], tts,
+        max_call_duration_s=60, transcripts=transcripts,
+    )
+    handler._call_started_at -= 61
+    with caplog.at_level("WARNING", logger=pipeline_module.log.name):
+        responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    return responses, transcripts.record_turn.call_args.args[3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["none", "blank", "raise"])
+async def test_max_duration_with_no_goodbye_audio_records_empty_text_and_flags_the_end(mode, caplog):
+    responses, agent_text = await _max_duration_turn(_scripted_tts(default=mode), caplog)
+
+    assert agent_text == ""
+    assert responses[-1].end_call and responses[-1].end_call_without_audio
+    assert "Max-duration goodbye produced no audio" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_max_duration_records_the_fallback_goodbye_when_only_it_plays(caplog):
+    fallback = t("fallback_goodbye", "en")
+    tts = _scripted_tts(default="none", **{fallback: "audio"})
+    responses, agent_text = await _max_duration_turn(tts, caplog)
+
+    assert agent_text == fallback
+    assert responses[-1].end_call
+    assert "Max-duration goodbye produced no audio" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_max_duration_records_the_goodbye_when_it_plays(caplog):
+    responses, agent_text = await _max_duration_turn(_scripted_tts(default="audio"), caplog)
+
+    assert agent_text == t("max_duration_goodbye", "en")
+    assert responses[-1].end_call
+    assert "Max-duration goodbye produced no audio" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -3875,3 +3940,143 @@ def test_the_booking_prompt_and_transfer_caller_id_use_the_customers_number(dire
     # The prompt spells the number out digit by digit for the voice.
     assert " ".join(customer) in handler._prompt_suffix and " ".join(own) not in handler._prompt_suffix
     assert handler._decision_context("s1").caller_number == customer
+
+
+# ---------------------------------------------------------------------------
+# TTS that returns no audio counts as a failure, whether it raises or returns nothing
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["none", "blank", "raise"])
+async def test_a_reply_sentence_with_no_audio_is_left_out_of_the_transcript_and_history(mode):
+    """"raise" is the control: PR #200 already behaves this way, so it passes on base too."""
+    transcripts = MagicMock()
+    tts = _scripted_tts(**{"-5 degrees outside today.": mode})
+    handler = _make_handler(
+        _make_stt("weather"), _make_llm(["-5 degrees outside today. ", "Second."]), tts, transcripts=transcripts,
+    )
+    handler._session("s1").first_turn_filler_spoken = True
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    payloads = [p for r in responses for p in r.tts_payloads]
+    assert payloads == [b"\x01" * 320]            # only "Second." was heard, and no b"" went out
+    assert [m.content for m in handler._get_history("s1") if m.role == "assistant"] == ["Second."]
+    await handler.on_session_end("s1", "caller_hangup")
+    assert transcripts.record_turn.call_args.args[3] == "Second."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["none", "blank"])
+async def test_a_stream_with_no_audio_logs_a_warning(mode, caplog):
+    handler = _make_handler(_make_stt(), _make_llm(), _scripted_tts(default=mode))
+    with caplog.at_level("WARNING", logger=pipeline_module.log.name):
+        chunks = [c async for c in handler._synthesize_sentence_stream("Hello there.", "s1")]
+
+    assert chunks == []
+    assert "TTS produced no audio chars=12 session=s1" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Fixed-phrase cache never keeps or replays an empty result
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_request_that_overlaps_an_empty_synthesis_still_gets_audio():
+    """Regression guard: phrase_audio already refuses to replay an empty result, so this passes on base."""
+    first_started, release = asyncio.Event(), asyncio.Event()
+    calls = {"n": 0}
+    started_after_release = []
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            first_started.set()
+            await release.wait()
+            return
+        started_after_release.append(release.is_set())
+        yield b"\x01\x00"
+
+    tts.synthesize_stream = _stream
+    first = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome.")
+    second = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome.")
+
+    first_task = asyncio.create_task(first.greeting("s1"))
+    await first_started.wait()
+    second_task = asyncio.create_task(second.greeting("s2"))
+    await asyncio.sleep(0)          # the second request is now waiting on the first one's flight
+    release.set()
+
+    assert await first_task == []
+    assert await second_task == [b"\x01\x00"]
+    assert started_after_release and all(started_after_release)   # no synthesis other than the first began before it ended
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", [[], [b""]])
+async def test_an_empty_greeting_is_synthesized_again_on_the_next_request(empty):
+    """Only the b"" case failed on base; the no-chunk case is a regression guard (phrase_audio.store refuses an empty result)."""
+    calls = {"n": 0}
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        calls["n"] += 1
+        for chunk in (empty if calls["n"] == 1 else [b"\x01\x00"]):
+            yield chunk
+
+    tts.synthesize_stream = _stream
+    first = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome.")
+    second = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome.")
+
+    assert await first.greeting("s1") == []
+    assert await second.greeting("s2") == [b"\x01\x00"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", [[], [b""]])
+async def test_an_empty_filler_is_synthesized_again_on_the_next_request(empty):
+    """Only the b"" case failed on base; the no-chunk case is a regression guard."""
+    calls = {"n": 0}
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        calls["n"] += 1
+        for chunk in (empty if calls["n"] == 1 else [b"\x01\x00"]):
+            yield chunk
+
+    tts.synthesize_stream = _stream
+    handler = _make_handler(_make_stt(), _make_llm(), tts)
+
+    first = [c async for c in handler._synthesize_sentence_stream("One moment.", "s1", cache=True)]
+    second = [c async for c in handler._synthesize_sentence_stream("One moment.", "s1", cache=True)]
+
+    assert first == []
+    assert second == [b"\x01\x00"]
+
+
+@pytest.mark.parametrize(
+    "reply, failed, expected",
+    [
+        ("我很好。失败。谢谢。", ["失败。"], "我很好。谢谢。"),
+        ("元気です。失敗。ありがとう。", ["失敗。"], "元気です。ありがとう。"),
+        ("I am fine. It failed. Thanks.", ["It failed."], "I am fine. Thanks."),
+        ("मैं ठीक हूँ। यह विफल। धन्यवाद।", ["यह विफल।"], "मैं ठीक हूँ। धन्यवाद।"),
+        ("No. Account No. 4512 is active.", ["No."], "Account No. 4512 is active."),
+    ],
+)
+def test_a_dropped_sentence_is_rejoined_by_the_script_of_its_neighbours(reply, failed, expected):
+    assert _spoken_reply([reply], failed) == expected
+
+
+@pytest.mark.parametrize(
+    "sentences, expected",
+    [
+        (["「はい。」", "ありがとう。"], "「はい。」ありがとう。"),
+        (["そうですね…", "ありがとう。"], "そうですね…ありがとう。"),
+        (["はい．", "ありがとう。"], "はい．ありがとう。"),
+        (["はい｡", "ありがとう。"], "はい｡ありがとう。"),
+        (["Well…", "thanks."], "Well…thanks."),
+    ],
+)
+def test_cjk_closing_punctuation_and_ellipsis_join_without_a_space(sentences, expected):
+    assert _join_sentences(sentences) == expected
