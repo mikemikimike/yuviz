@@ -2487,3 +2487,6 @@ button.topbar-cta { border: 0; font-family: inherit; }
 /* Trend chart styled after the reference: stronger gridlines, larger axis numbers */
 .dash .d-yaxis span, .dash .d-xaxis span { font-size: .8rem; color: var(--text-2); }
 [data-theme="dark"] { --chart-inbound: #B8A5FF; --chart-outbound: #FF9C87; --chart-ai: #F2A7D3; }
+/* Sign-in logo shown on phones (outside the hero panel): readable on the light sign-in background */
+.auth-mobile-logo .login-logo-text { color: #20243A; }
+.auth-mobile-logo .login-logo-text span { color: #6E58C9; }
