@@ -2362,6 +2362,20 @@ button.topbar-cta { border: 0; font-family: inherit; }
     radial-gradient(ellipse 75% 62% at 24% 38%, rgba(164, 143, 255, .19), transparent 70%),
     radial-gradient(ellipse 52% 44% at 86% 88%, rgba(255, 164, 145, .14), transparent 72%),
     linear-gradient(145deg, #f4f0ff 0%, #f8f5ff 52%, #fff7f4 100%);
+  position: relative;
+  overflow: hidden;
+}
+.auth-hero::after {
+  content: "";
+  position: absolute;
+  width: 560px;
+  height: 560px;
+  right: -200px;
+  top: 18%;
+  background: radial-gradient(circle, rgba(164, 143, 255, .15) 0%, rgba(164, 143, 255, .08) 35%, transparent 70%);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(145, 125, 216, .08);
+  pointer-events: none;
 }
 .auth-hero-main, .auth-logo { position: relative; z-index: 1; }
 .auth-eyebrow { color: #7862d0; }
