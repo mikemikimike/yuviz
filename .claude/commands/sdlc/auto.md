@@ -15,7 +15,7 @@ Act on the approver's report:
 - **PROCEED_AFTER_FIXES** — send each fix instruction to the owning agent (SendMessage if still listed, else spawn fresh), respecting file ownership and the one-test-runner rule. Re-run that stage's critic (or, for build, the combined-tree check), then take the gate back to the approver. At most 2 approver rounds per gate; a third is ESCALATE.
 - **ESCALATE** — stop and print the escalations. Do not work around them.
 
-**Ship** is outward-facing: push and open the PR only if $ARGUMENTS contains `--ship`. Otherwise stop after independent with the branch committed locally, and tell me the ship command.
+**Ship** is outward-facing: push and open the PR only if $ARGUMENTS contains `--ship`. Otherwise stop after independent with the work left uncommitted in the worktree, and tell me the ship command.
 
 Between stages, print exactly one line: `<stage>: <verdict> — <approver overall> (<n> fixes, <n> decisions)`. Do not ask me anything else.
 

@@ -453,7 +453,8 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     pre-existing only if the same test node ID fails on the base commit with the same exception type and message. It never
     covers a test in a module the feature changed, or a setup/fixture error in the service the feature touches: those mean
     the feature's own tests never ran (lesson 12), so start the service and re-run. The tester lists excused failures under
-    `## Pre-existing on base` in `06-test-report.md` with the base SHA; ship's zero-failure check excludes only that section.
+    `## Pre-existing on base` in `06-test-report.md` with the base SHA; ship's zero-failure check excludes only that section,
+    and ship step 7 must see those tests pass in CI or report them as not exercised.
     *Earned: the PR #214 run halted twice at build on 50 clinic/toolexec fixture errors (no local Postgres socket) that failed
     identically on base.*
 
