@@ -2465,7 +2465,6 @@ button.topbar-cta { border: 0; font-family: inherit; }
 .auth-eyebrow-dot { width: 7px; height: 7px; border-radius: 50%; background: #3FCB97; box-shadow: 0 0 0 4px rgba(63,203,151,.16); animation: auth-dot-pulse 2.4s ease-in-out infinite; }
 @keyframes auth-dot-pulse { 50% { box-shadow: 0 0 0 7px rgba(63,203,151,0); } }
 @media (prefers-reduced-motion: reduce) { .auth-eyebrow-dot { animation: none; } }
-[data-theme="dark"] .auth-hero .auth-eyebrow { color: #C6B9FF; background: rgba(158,139,255,.1); border-color: rgba(158,139,255,.26); box-shadow: none; }
 /* Sign-in screens use the website's typeface throughout */
 .auth-split, .auth-split input, .auth-split button, .auth-split select, .auth-split textarea { font-family: var(--font-jakarta), system-ui, sans-serif; }
 .auth-split .auth-title { font-size: 1.85rem; font-weight: 800; letter-spacing: -.045em; line-height: 1.1; margin-bottom: 8px; }

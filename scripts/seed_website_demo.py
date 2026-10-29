@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Seed the public website demo: the `yuviz-demo` workspace and its `yuviz-sales` agent. Safe to re-run.
 
-  python3 scripts/seed_website_demo.py --stt <provider_config_id> --llm <id> --tts <id> [--voice <elevenlabs_voice_id>]
+  python3 scripts/seed_website_demo.py --source-tenant <slug> --stt <provider_config_id> --llm <id> --tts <id> [--voice <id>]
 
-Each --stt/--llm/--tts id is an existing, working provider config (in any workspace); it is copied into
-yuviz-demo, its API key re-encrypted for the new workspace. The agent's prompt states only what the
+Each --stt/--llm/--tts id is a working provider config in --source-tenant (the platform's own workspace,
+never a customer's); it is copied into yuviz-demo, its API key re-encrypted for the new workspace.
+Re-running with other ids or --voice updates the copies. The agent's prompt states only what the
 website claims, so a visitor can't talk it into promising features we don't have.
 """
 
@@ -78,31 +79,41 @@ async def ensure_tenant() -> str:
     return str(created["id"])
 
 
-async def copy_provider(tenant_id: str, source_id: str, name: str, voice: str | None = None) -> str:
+async def copy_provider(
+    tenant_id: str, source_tenant: str, source_id: str, name: str, voice: str | None = None,
+) -> str:
     from services.config import db, provider_configs
 
     pool = await db.get_pool()
     async with platform_conn(pool, reason="seed-website-demo-read-source") as conn:
-        source = await conn.fetchrow("SELECT * FROM provider_configs WHERE id = $1 AND deleted_at IS NULL", source_id)
+        source = await conn.fetchrow(
+            "SELECT * FROM provider_configs WHERE id = $1 AND deleted_at IS NULL "
+            "AND tenant_id = (SELECT id FROM tenants WHERE slug = $2 AND deleted_at IS NULL)",
+            source_id, source_tenant,
+        )
     if source is None:
-        raise SystemExit(f"provider config {source_id} not found")
+        raise SystemExit(f"provider config {source_id} not found in workspace {source_tenant}")
     source = dict(source)
-    async with tenant_conn(pool) as conn:
-        existing = await conn.fetchval(
-            "SELECT id FROM provider_configs WHERE tenant_id = $1 AND name = $2 AND deleted_at IS NULL", tenant_id, name)
-    if existing:
-        print(f"  provider exists: {name}")
-        return str(existing)
     extra = source["extra"]
     if isinstance(extra, str):
         import json
         extra = json.loads(extra)
-    created = await provider_configs.create_provider_config(
-        tenant_id=tenant_id, name=name, role=source["role"], engine=source["engine"],
-        environment=source["environment"] or "prod", model=source["model"], voice=voice or source["voice"],
+    fields = dict(
+        engine=source["engine"], environment=source["environment"] or "prod",
+        model=source["model"], voice=voice or (SARAH if source["engine"] == "elevenlabs" else source["voice"]),
         language=source["language"], region=source["region"], api_key=_plain_key(source), extra=extra or None,
-        allow_pointer_schemes=False, user_email="seed_website_demo",
     )
+    async with tenant_conn(pool) as conn:
+        existing = await conn.fetchval(
+            "SELECT id FROM provider_configs WHERE tenant_id = $1 AND name = $2 AND deleted_at IS NULL", tenant_id, name)
+    if existing:
+        await provider_configs.update_provider_config(
+            existing, allow_pointer_schemes=False, user_email="seed_website_demo", **fields)
+        print(f"  provider updated: {name} ({source['role']}/{source['engine']})")
+        return str(existing)
+    created = await provider_configs.create_provider_config(
+        tenant_id=tenant_id, name=name, role=source["role"], allow_pointer_schemes=False,
+        user_email="seed_website_demo", **fields)
     print(f"  provider created: {name} ({source['role']}/{source['engine']})")
     return str(created["id"])
 
@@ -129,18 +140,21 @@ async def upsert_agent(tenant_id: str, stt: str, llm: str, tts: str) -> None:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--source-tenant", required=True, help="Slug of the platform's own workspace that owns the configs")
     parser.add_argument("--stt", required=True, help="Working speech-to-text provider config id to copy")
     parser.add_argument("--llm", required=True, help="Working language-model provider config id to copy")
     parser.add_argument("--tts", required=True, help="Working voice provider config id to copy")
-    parser.add_argument("--voice", default=SARAH, help="Voice id for the copied voice provider")
+    parser.add_argument("--voice", help="Voice id for the copied voice provider (default: Sarah on ElevenLabs, else the source's)")
     args = parser.parse_args()
 
     print("Seeding website demo")
     tenant_id = await ensure_tenant()
     set_target_tenant(tenant_id)
-    stt = await copy_provider(tenant_id, args.stt, "Demo speech-to-text")
-    llm = await copy_provider(tenant_id, args.llm, "Demo language model")
-    tts = await copy_provider(tenant_id, args.tts, "Demo voice", voice=args.voice)
+    if args.source_tenant == TENANT_SLUG:
+        raise SystemExit(f"--source-tenant must be the platform workspace, not {TENANT_SLUG}")
+    stt = await copy_provider(tenant_id, args.source_tenant, args.stt, "Demo speech-to-text")
+    llm = await copy_provider(tenant_id, args.source_tenant, args.llm, "Demo language model")
+    tts = await copy_provider(tenant_id, args.source_tenant, args.tts, "Demo voice", voice=args.voice)
     await upsert_agent(tenant_id, stt, llm, tts)
     print("Done.")
 
