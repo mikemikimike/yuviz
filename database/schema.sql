@@ -555,6 +555,12 @@ ALTER TABLE calls ADD CONSTRAINT calls_sentiment_check
 -- Languages the caller spoke, in order of first appearance (multilingual agents only).
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS detected_languages TEXT[];
 
+-- Post-transfer handoff summary; never a transcript turn (session_finalizer.PersistSummaryStep).
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS session_summary TEXT;
+-- Agent that took the call after a call-flow handoff; agent_id keeps the flow/IVR agent. NULL = no handoff.
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS answering_agent_id UUID REFERENCES agents(id);
+CREATE INDEX IF NOT EXISTS idx_calls_answering_agent ON calls(answering_agent_id) WHERE answering_agent_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_calls_tenant   ON calls(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_calls_started  ON calls(started_at);
 CREATE INDEX IF NOT EXISTS idx_calls_agent    ON calls(agent_id);

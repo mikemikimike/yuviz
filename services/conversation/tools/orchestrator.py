@@ -20,6 +20,7 @@ from .llm_adapter import (
     LocalToolCompletedEvent,
     TokenEvent,
     ToolCallEvent,
+    ToolCallFinishedEvent,
     ToolCallStartedEvent,
     TurnEvent,
 )
@@ -273,6 +274,7 @@ class ToolCallOrchestrator:
                     except BaseException:
                         execute_task.cancel()
                         raise
+                    yield ToolCallFinishedEvent(tool_name=event.tool_name, status=result.status.value)
                 latency_ms = (time.monotonic() - call_t0) * 1000
                 read_only = definition.read_only if definition is not None else False
                 log.info(

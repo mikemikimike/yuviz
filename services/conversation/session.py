@@ -19,7 +19,7 @@ import time
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import AsyncGenerator, Protocol
+from typing import AsyncGenerator, Callable, Protocol
 
 from .directives import TransferRequest
 from .event_bus import (
@@ -67,6 +67,8 @@ class HandlerResponse:
     transfer_request: TransferRequest | None = None
     response_text:  str         = ""
     filler:         bool        = False
+    # The servicer calls this once it sends the tts_payloads, so a handler records what the caller was sent.
+    on_sent:        Callable[[], None] | None = None
 
 
 class IConversationHandler(Protocol):
@@ -98,7 +100,7 @@ class IConversationHandler(Protocol):
         energy_db:   float,
     ) -> AsyncGenerator[HandlerResponse, None]: ...
 
-    async def on_cancel(self, session_id: str) -> None: ...
+    async def on_cancel(self, session_id: str, *, hanging_up: bool = False) -> None: ...
     async def on_session_end(self, session_id: str, reason: str,
                              final_state: str | None = None) -> None: ...
 
@@ -349,15 +351,17 @@ class ConversationSession:
 
         any_audio = False
         first_audio = True
-        async for response in self._handler.on_transfer_failed(
+        # aclosing: a hangup closes this generator, and the handler's apology must see it to persist.
+        async with aclosing(self._handler.on_transfer_failed(
             self._ctx.session_id, destination, reason,
-        ):
-            if response.tts_payloads:
-                any_audio = True
-                if first_audio:
-                    self._fsm.on_recovery_response_ready()
-                    first_audio = False
-            yield response
+        )) as apology:
+            async for response in apology:
+                if response.tts_payloads:
+                    any_audio = True
+                    if first_audio:
+                        self._fsm.on_recovery_response_ready()
+                        first_audio = False
+                yield response
 
         if not any_audio:
             # No audio means no PlaybackFinished; advance the FSM synthetically.
@@ -382,9 +386,9 @@ class ConversationSession:
                  transfer_id, self._ctx.session_id)
         self._handler.on_transfer_cancelled(self._ctx.session_id)
 
-    async def cancel(self) -> None:
+    async def cancel(self, hanging_up: bool = False) -> None:
         self._audio_buffer.clear()
-        await self._handler.on_cancel(self._ctx.session_id)
+        await self._handler.on_cancel(self._ctx.session_id, hanging_up=hanging_up)
         self._fsm.on_cancel()  # handles SPEAKING/THINKING/SYNTHESIZING/RECOGNIZING → LISTENING
 
     async def push_dtmf(self, digit: str) -> None:

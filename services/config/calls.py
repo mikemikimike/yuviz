@@ -64,7 +64,7 @@ async def list_calls(
     params: list[Any] = [tenant_slug]
     if agent_id is not None:
         params.append(agent_id)
-        where.append(f"c.agent_id = ${len(params)}")
+        where.append(f"(c.agent_id = ${len(params)} OR c.answering_agent_id = ${len(params)})")
     if direction is not None:
         params.append(direction)
         where.append(f"c.direction = ${len(params)}")
@@ -107,16 +107,18 @@ async def get_call(
     if tenant_slug is None:
         async with platform_conn(pool, reason="calls-platform-read") as conn:
             row = await conn.fetchrow(
-                "SELECT c.*, a.name AS agent_name FROM calls c "
+                "SELECT c.*, a.name AS agent_name, aa.name AS answering_agent_name FROM calls c "
                 "LEFT JOIN agents a ON a.id = c.agent_id "
+                "LEFT JOIN agents aa ON aa.id = c.answering_agent_id "
                 "WHERE c.session_id = $1",
                 session_id,
             )
     else:
         async with tenant_conn(pool) as conn:
             row = await conn.fetchrow(
-                "SELECT c.*, a.name AS agent_name FROM calls c "
+                "SELECT c.*, a.name AS agent_name, aa.name AS answering_agent_name FROM calls c "
                 "LEFT JOIN agents a ON a.id = c.agent_id "
+                "LEFT JOIN agents aa ON aa.id = c.answering_agent_id "
                 "WHERE c.session_id = $1 AND c.tenant_id = $2",
                 session_id, tenant_slug,
             )
@@ -151,7 +153,9 @@ async def get_transcript(
 async def get_dashboard_stats(tenant_slug: str, *, hours: int = 24 * 30) -> dict[str, Any]:
     """Headline Dashboard numbers for one tenant over `hours`.
 
-    "success" = ended with turns and no TRANSFER_FAILED; live_calls ignores the window."""
+    "success" = ended, not a failed transfer, and either had turns or ended cleanly as a flow-only call;
+    "failed" = ended with no turns and no clean flow ending, or a failed transfer.
+    live_calls ignores the window."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(
@@ -164,11 +168,11 @@ async def get_dashboard_stats(tenant_slug: str, *, hours: int = 24 * 30) -> dict
             COUNT(*) FILTER (WHERE ended_at IS NULL) AS live_calls,
             COUNT(*) FILTER (
                 WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND ended_at IS NOT NULL
-                  AND turn_count > 0 AND close_reason IS DISTINCT FROM 'TRANSFER_FAILED'
+                  AND COALESCE(close_reason <> ALL($5), TRUE) AND (turn_count > 0 OR flow_clean)
             ) AS success_count,
             COUNT(*) FILTER (
                 WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND ended_at IS NOT NULL
-                  AND (turn_count = 0 OR close_reason = 'TRANSFER_FAILED')
+                  AND ((turn_count = 0 AND NOT flow_clean) OR close_reason = ANY($5))
             ) AS failed_count,
             COUNT(*) FILTER (
                 WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND direction = 'inbound'
@@ -238,9 +242,15 @@ async def get_dashboard_stats(tenant_slug: str, *, hours: int = 24 * 30) -> dict
             COUNT(*) FILTER (WHERE started_at >= NOW() - (2 * $2 * INTERVAL '1 hour')
                                AND started_at <  NOW() - ($2 * INTERVAL '1 hour')
                                AND close_reason LIKE 'TRANSFER%') AS prev_escalated_count
-        FROM calls WHERE tenant_id = $1
+        FROM (
+            SELECT *, COALESCE(
+                close_reason = 'TRANSFER_SUCCESS' OR (disposition = ANY($3) AND close_reason = ANY($4)), FALSE
+            ) AS flow_clean
+            FROM calls WHERE tenant_id = $1
+        ) c
         """,
-            tenant_slug, hours,
+            tenant_slug, hours, list(_FLOW_CLEAN_DISPOSITIONS), list(_OUTCOME_REASONS["done"]),
+            list(_OUTCOME_REASONS["transfer_failed"]),
         )
     d = dict(row)
     d["total_minutes"] = round(d.pop("total_duration_ms") / 60000, 2)
@@ -320,19 +330,29 @@ async def get_agent_call_stats(tenant_slug: str) -> list[dict[str, Any]]:
         rows = await conn.fetch(
             """
             SELECT
-                agent_id,
-                COUNT(*) FILTER (WHERE direction IS DISTINCT FROM 'test') AS calls,
-                COUNT(*) FILTER (WHERE direction = 'test') AS tests,
-                AVG(duration_ms) FILTER (WHERE direction IS DISTINCT FROM 'test') AS avg_duration_ms,
+                a.agent_id,
+                COUNT(*) FILTER (WHERE c.direction IS DISTINCT FROM 'test') AS calls,
+                COUNT(*) FILTER (WHERE c.direction = 'test') AS tests,
+                AVG(c.duration_ms) FILTER (WHERE c.direction IS DISTINCT FROM 'test') AS avg_duration_ms,
                 COUNT(*) FILTER (
-                    WHERE direction IS DISTINCT FROM 'test' AND ended_at IS NOT NULL AND close_reason = ANY($2)
+                    WHERE c.direction IS DISTINCT FROM 'test' AND c.ended_at IS NOT NULL AND c.close_reason = ANY($2)
                 ) AS finished,
                 COUNT(*) FILTER (
-                    WHERE direction IS DISTINCT FROM 'test' AND ended_at IS NOT NULL AND close_reason = ANY($3)
+                    WHERE c.direction IS DISTINCT FROM 'test' AND c.ended_at IS NOT NULL AND c.close_reason = ANY($3)
                 ) AS failed
-            FROM calls
-            WHERE tenant_id = $1 AND agent_id IS NOT NULL
-            GROUP BY agent_id
+            FROM calls c
+            -- A call counts once for the agent that took it and once for the agent that answered after a
+            -- handoff; the answering agent only counts when it belongs to the call's own tenant.
+            CROSS JOIN LATERAL (
+                SELECT DISTINCT x AS agent_id
+                FROM unnest(ARRAY[c.agent_id, c.answering_agent_id]) x
+                WHERE x IS NOT NULL AND (x = c.agent_id OR EXISTS (
+                    SELECT 1 FROM agents ag JOIN tenants t ON t.id = ag.tenant_id
+                    WHERE ag.id = x AND t.slug = c.tenant_id
+                ))
+            ) a
+            WHERE c.tenant_id = $1
+            GROUP BY a.agent_id
             """,
             tenant_slug,
             [reason for reasons in _OUTCOME_REASONS.values() for reason in reasons],
@@ -391,6 +411,9 @@ _OUTCOME_REASONS = {
         "transport_error", "close_timeout", "reconciled_inactive", "reconciled_stale", "reconciled_dead_node",
     ),
 }
+# Flow-only calls record their ending as `callflow:<Hangup.reason>` in calls.disposition; these are the
+# clean ones. `callflow:transfer_refused` is deliberately absent: the caller was refused a human.
+_FLOW_CLEAN_DISPOSITIONS = ("callflow:flow_complete", "callflow:retries_exhausted")
 _OUTCOME_LABELS = {
     "done": "Ended normally", "to_person": "Sent to a person",
     "transfer_failed": "Transfer failed", "dropped": "Call dropped",

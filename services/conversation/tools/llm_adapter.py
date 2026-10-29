@@ -55,6 +55,13 @@ class ToolCallStartedEvent(TurnEvent):
 
 
 @dataclass(frozen=True)
+class ToolCallFinishedEvent(TurnEvent):
+    """Yielded once a tool has produced its result; `status` is the ToolStatus value."""
+    tool_name: str
+    status:    str
+
+
+@dataclass(frozen=True)
 class DeterministicSpokenEvent(TurnEvent):
     """Text spoken verbatim with no LLM discretion, so a real tool success can't be confused with a hallucinated one."""
     text: str

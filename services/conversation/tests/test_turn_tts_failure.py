@@ -45,7 +45,7 @@ async def test_a_sentence_that_failed_tts_is_not_stored_as_spoken():
     assert handler._get_history("s1")[-1].content == "Anything else?"
 
 
-async def test_a_reply_whose_tts_failed_entirely_is_not_added_to_history(monkeypatch):
+async def test_a_reply_whose_tts_failed_entirely_leaves_only_the_caller_message_in_history(monkeypatch):
     monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "60000")
     handler = _make_handler(
         _make_stt("when is it"), _make_llm(["Your booking QATTSFAIL is done."]),
@@ -55,7 +55,7 @@ async def test_a_reply_whose_tts_failed_entirely_is_not_added_to_history(monkeyp
     responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
 
     assert not any(r.tts_payloads or r.response_text for r in responses)
-    assert [m.role for m in handler._get_history("s1")] == ["system"]
+    assert [m.role for m in handler._get_history("s1")] == ["system", "user"]
 
 
 async def test_a_turn_with_no_audio_still_sends_the_terminal_chunk(monkeypatch):

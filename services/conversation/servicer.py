@@ -337,6 +337,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         msg_fut: asyncio.Future | None = None
         out_fut: asyncio.Future | None = None
         turn = None
+        apology = None
 
         # Messages taken off msg_q while a turn runs, ahead of anything still queued.
         backlog: collections.deque[pb.GatewayMessage | None] = collections.deque()
@@ -473,7 +474,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             pending = backlog.popleft() if backlog else msg_q.get_nowait()
                             if pending is None:
                                 # Stream ended during pipeline — stop generating.
-                                await session.cancel()
+                                await session.cancel(hanging_up=True)
                                 cancelled = True
                                 backlog.appendleft(None)  # so outer loop exits
                                 break
@@ -583,6 +584,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                         tts_started=pb.TtsStarted(session_id=sid)
                                     )
                                     tts_started_sent = True
+                                # Past the cancel drain: the chunk below is what the caller is sent.
+                                if response.on_sent is not None:
+                                    response.on_sent()
                                 for payload_bytes in response.tts_payloads:
                                     tts_seq += 1
                                     yield pb.ServiceMessage(
@@ -747,12 +751,15 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                              tf.destination, tf.reason, tf.transfer_id, duration_ms, sid)
 
                     tf_tts_started_sent = False
-                    async for response in session.on_transfer_failed(tf.destination, tf.reason,
-                                                                     tf.transfer_id):
+                    # Kept for teardown, like the turn: its aclose() persists an apology cut short by a hangup.
+                    apology = session.on_transfer_failed(tf.destination, tf.reason, tf.transfer_id)
+                    async for response in apology:
                         if response.tts_payloads:
                             if not tf_tts_started_sent:
                                 yield pb.ServiceMessage(tts_started=pb.TtsStarted(session_id=sid))
                                 tf_tts_started_sent = True
+                            if response.on_sent is not None:
+                                response.on_sent()
                             for payload_bytes in response.tts_payloads:
                                 tts_seq += 1
                                 yield pb.ServiceMessage(
@@ -815,6 +822,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             # A hangup abandons the turn at a yield; close it so the pipeline persists the turn before close().
             if turn is not None:
                 await turn.aclose()
+            if apology is not None:
+                await apology.aclose()
             await session.close("stream_ended")
             # Drain the bus before stopping so SessionEnded and other close-path
             # events are delivered to subscribers.

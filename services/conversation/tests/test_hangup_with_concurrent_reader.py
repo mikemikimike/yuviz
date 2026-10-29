@@ -52,10 +52,13 @@ async def test_hangup_mid_turn_writes_one_interrupted_row_and_leaks_no_task(hang
 
     async def consume():
         converse = ConversationServicer(factory).Converse(stream(), AsyncMock())
+        chunks = 0
         async for msg in converse:
             if msg.HasField("tts_chunk"):
+                chunks += 1
                 first_audio.set()
-                if hangup == "generator_closed":
+                # The first chunk is the filler; the reply sentence is the second, and only a sent one is stored.
+                if hangup == "generator_closed" and chunks == 2:
                     await stalled.wait()
                     await asyncio.sleep(0.1)   # the reply so far reaches the pipeline's buffer
                     # Abandoned at a yield, as when the RPC is torn down between messages.
