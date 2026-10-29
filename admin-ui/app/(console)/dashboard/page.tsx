@@ -105,7 +105,7 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
   const colW = points.length === 1 ? 100 : 100 / (points.length - 1);
   const pctX = (i: number) => (xAt(i) / w) * 100;
   const every = Math.max(1, Math.ceil(points.length / 6));
-  const xTicks = points.map((_, i) => i).filter((i) => i % every === 0);
+  const xTicks = points.map((_, i) => i).filter((i) => i % every === 0 || i === points.length - 1);
   return (
     <>
       <div className="d-plot">
@@ -124,6 +124,14 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
             {aiXy.length > 1 && (
               <polyline points={pts(aiXy)} fill="none" stroke="var(--chart-ai)" strokeWidth="2" strokeDasharray="1 4"
                 strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+            )}
+            {points.length === 1 && (
+              <>
+                {series.map((s) => (
+                  <circle key={`dot-${s.key}`} cx={s.xy[0][0]} cy={s.xy[0][1]} r="2" fill={s.color} vectorEffect="non-scaling-stroke" />
+                ))}
+                <circle cx={aiXy[0][0]} cy={aiXy[0][1]} r="2" fill="var(--chart-ai)" vectorEffect="non-scaling-stroke" />
+              </>
             )}
           </svg>
           {hover !== null && series.map((s) => (

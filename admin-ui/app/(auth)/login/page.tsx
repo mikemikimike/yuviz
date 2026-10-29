@@ -288,7 +288,7 @@ export default function LoginPage() {
       </aside>
 
       <main className="auth-panel">
-        <a href={WEBSITE_URL} className="auth-back"><span className="auth-back-icon"><ArrowUpRight size={13} /></span>Explore Yuviz</a>
+        {WEBSITE_URL !== "/" && <a href={WEBSITE_URL} className="auth-back"><span className="auth-back-icon"><ArrowUpRight size={13} /></span>Explore Yuviz</a>}
         <div className="auth-form">
           <div className="auth-mobile-logo"><Logo /></div>
           {verifyingEmail ? (
