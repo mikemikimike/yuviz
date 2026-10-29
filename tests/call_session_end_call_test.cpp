@@ -168,6 +168,9 @@ protected:
         ctx.obs.tenant_id  = "tenant";
         ctx.tenant         = std::make_shared<TenantConfig>();
 
+        // CallSession assigns its MediaSession to a worker; the pool has none until started.
+        ASSERT_TRUE(pool_.start());
+
         auto media = std::make_unique<MediaSession>(
             ctx.obs.session_id, kSampleRate, 1, 1000, kFrameMs,
             std::make_unique<OneShotVad>(), 64, metrics_, clock_, logger_);
@@ -180,10 +183,9 @@ protected:
         cbs_->on_service_ready(session_->session_id());
         ASSERT_TRUE(wait_for([&] { return session_->fsm_state() == CallFsmState::Listening; }));
 
-        // The VAD fires SpeechStart on the first inbound frame.
+        // The VAD fires SpeechStart on the first inbound frame, drained by the pool worker.
         const std::vector<uint8_t> pcm(kFrameBytes);
         session_->push_inbound_audio(pcm.data(), pcm.size());
-        session_->media_session().drain_available();
         ASSERT_TRUE(wait_for([&] { return session_->fsm_state() == CallFsmState::Recognizing; }));
 
         cbs_->on_stt_result("hello", 0.9f);
