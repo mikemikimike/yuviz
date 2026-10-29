@@ -38,7 +38,6 @@ from ..pipeline import (
     PipelineConversationHandler,
     _END_CALL_MARKER,
     _FALLBACK_GOODBYE,
-    _join_sentences,
     _TOOL_CALL_FILLER_MIN_GAP_S,
     _TRANSFER_FAILED_FALLBACK,
     _spoken_reply,
@@ -4066,17 +4065,3 @@ async def test_an_empty_filler_is_synthesized_again_on_the_next_request(empty):
 )
 def test_a_dropped_sentence_is_rejoined_by_the_script_of_its_neighbours(reply, failed, expected):
     assert _spoken_reply([reply], failed) == expected
-
-
-@pytest.mark.parametrize(
-    "sentences, expected",
-    [
-        (["「はい。」", "ありがとう。"], "「はい。」ありがとう。"),
-        (["そうですね…", "ありがとう。"], "そうですね…ありがとう。"),
-        (["はい．", "ありがとう。"], "はい．ありがとう。"),
-        (["はい｡", "ありがとう。"], "はい｡ありがとう。"),
-        (["Well…", "thanks."], "Well…thanks."),
-    ],
-)
-def test_cjk_closing_punctuation_and_ellipsis_join_without_a_space(sentences, expected):
-    assert _join_sentences(sentences) == expected

@@ -277,15 +277,11 @@ def _last_sentence(reply_text: str) -> str:
     return next((p for p in reversed(sentences) if p), "")
 
 
-_CJK_CLOSERS = "」』）】”’"
-
-
 def _join_sentences(sentences: list[str]) -> str:
-    """Rejoin sentences: no space after a CJK sentence end (closing brackets/quotes allowed) or ellipsis, one space after anything else."""
+    """Rejoin _SENTENCE_RE pieces: no space after a CJK sentence end, one space after anything else."""
     joined = ""
     for sentence in filter(None, sentences):
-        cjk_end = joined.rstrip(_CJK_CLOSERS).endswith(("。", "！", "？", "．", "｡")) or joined.endswith("…")
-        joined += sentence if not joined or cjk_end else " " + sentence
+        joined += sentence if not joined or joined.endswith(("。", "！", "？")) else " " + sentence
     return joined
 
 
