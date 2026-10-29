@@ -2,8 +2,8 @@
  "slug": "tts-failure-handling",
  "base": "a841bf1c8fd60f13ab8b5d8672c2db7971a0187e",
  "base_branch": "redesign",
- "stage": "ship",
- "status": "shipping",
+ "stage": "done",
+ "status": "shipped",
  "started_at": "2026-10-29T00:37:11Z",
  "stages": {
   "security_design": {
@@ -259,5 +259,7 @@
   "changed_lines": 1132,
   "backend": 14,
   "admin_ui": 0
- }
+ },
+ "pr": "https://github.com/yuviz-ai/yuviz/pull/228",
+ "ci": "green"
 }

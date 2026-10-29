@@ -1,6 +1,6 @@
 # Run report: tts-failure-handling
-Status: halted at test: 1 still failing after 2 rounds (330 passed, 1 failed)
-PR: none
+Status: shipped (CI green)
+PR: https://github.com/yuviz-ai/yuviz/pull/228
 
 | Stage | Verdict | Rounds | Output tokens (exact) | Est. cost |
 |---|---|---|---|---|
@@ -11,20 +11,15 @@ PR: none
 | build | GREEN | 1 | haiku 7,953 · sonnet 51,007 | $1.17 est. |
 | review | GREEN | 1 | opus 10,345 | $0.41 est. |
 | security_code | GREEN | 1 | (billed to review) | — |
-| test | RED | 2 | sonnet 6,241 | $0.13 est. |
-| independent | not run | 0 | — | — |
-| _state_writes | — | — | haiku 76,532 | $0.81 est. |
-| **Total** | | | | **≈ $6.13 est.** |
+| test | GREEN | 1 (retry after halt) | sonnet 10,418 | $0.22 est. |
+| independent | GREEN | 1 | opus 9,266 | $0.36 est. |
+| _state_writes | — | — | haiku 81,039 | $0.86 est. |
+| **Total** | | | | **≈ $6.63 est.** |
 
-Failing test: test_phrase_audio.py::test_the_cache_dies_with_the_tts_instance — WeakKeyDictionary still holds 1 entry; GC/order dependent (passes alone); failure is in test code; not verified against base.
+Outside the workflow: two follow-up fix passes (independent-review minors), a pre-push full-diff review (GREEN, 4 minors fixed), and one CI fix (new gateway test never started its AudioWorkerPool → SEGFAULT).
 
 Open findings — decide:
-- [medium] test — Gateway C++ tests (call_fsm_test.cpp, call_session_end_call_test.cpp) written but not executed: cmake not installed locally (BLOCKED-ENV); CI must run them.
-- [medium] test — T1 done-when wording in 03-tasks.md:11 is a task-file fix, not a test.
-- [minor] prd — Criterion 13: assert at gateway level (pending_end_call_ false; later on_playback_finished → zero hangups).
-- [minor] design — AC13 gateway test should run both EndCall/terminal-chunk orders (servicer sends EndCall after the terminal chunk).
-- [minor] design — on_end_call_without_playback is a silent no-op in Recognizing; accept it there or log WARNING, and pin with an FSM test.
-- [minor] plan — T1 "fail on base" should exclude the raising control (which passes on base).
-- [minor] review:backend — servicer.py:587 narrowed audio_sent check lacks a servicer-level test (Converse turn with tts_payloads=[b""] + end_call=True → no EndCall).
+- [minor] design — stage closed AMBER; its two minors (both-order AC13 test, Recognizing no-op) were addressed in the test retry and pre-push fixes.
+- [note] #205 is only partly fixed (item 7); the other items belong to the parallel batch, so no "Fixes #205" was posted.
 Lessons added: None
-Workflow run: wf_db85d3ea-47f (resume within this session with resumeFromRunId)
+Workflow run: wf_0ed35fa9-4b5 (resume within this session with resumeFromRunId)
