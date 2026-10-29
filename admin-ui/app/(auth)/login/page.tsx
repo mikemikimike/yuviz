@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ArrowUpRight } from "lucide-react";
 import {
   ApiError, forgotPassword, getCurrentUser, googleSignInUrl, isConsoleRole, login, register,
   resendVerificationCode, resetPassword, SIGNUP_SOURCES, verifyEmail, type UserRole,
@@ -14,17 +13,19 @@ import { clearToken, setToken } from "@/lib/auth";
 import { COUNTRY_DIAL_CODES } from "@/lib/countries";
 import { SelectMenu } from "@/components/SelectMenu";
 
-// Concise copy aligned with the public Yuviz.ai website.
+const WEBSITE_URL = process.env.NEXT_PUBLIC_WEBSITE_URL || "/";
+
 const HERO = {
   signin: {
-    eyebrow: "VOICE AI FOR CUSTOMER CONVERSATIONS",
-    title: "Every call has a next step.",
-    body: "Yuviz helps businesses handle customer calls with AI voice agents that listen, understand, and guide each conversation forward.",
+    eyebrow: "AI voice agents for business",
+    title: "Turn conversations into",
+    accent: "outcomes.",
   },
   create: {
-    eyebrow: "GET STARTED WITH YUVIZ",
-    title: "Give every conversation a clear next step.",
-    body: "Create your workspace to build and configure an AI voice agent for your business.",
+    eyebrow: "Start with one workflow",
+    title: "Your first voice agent,",
+    accent: "in minutes.",
+    body: "Create a workspace, pick a voice, and test a call from your browser.",
   },
 };
 
@@ -40,7 +41,7 @@ const EMPTY_SIGNUP = {
 function Logo() {
   return (
     <div className="auth-logo">
-      <BrandMark size={38} className="login-logo-icon" />
+      <BrandMark size={40} className="login-logo-icon" />
       <div className="login-logo-text">
         Yuviz<span>.ai</span>
       </div>
@@ -118,7 +119,7 @@ export default function LoginPage() {
     // Deferred so the state updates don't run synchronously inside the effect.
     queueMicrotask(() => {
       if (oauthError) setError(oauthError);
-      setMode("signin");
+      setMode(new URLSearchParams(window.location.search).get("mode") === "create" ? "create" : "signin");
     });
   }, [router]);
 
@@ -280,14 +281,14 @@ export default function LoginPage() {
       <aside className="auth-hero">
         <Logo />
         <div className="auth-hero-main">
-          <div className="auth-eyebrow">{hero.eyebrow}</div>
-          <h1 className="auth-hero-title">{hero.title}</h1>
-          <p className="auth-hero-body">{hero.body}</p>
+          <div className="auth-eyebrow"><span className="auth-eyebrow-dot" aria-hidden="true" />{hero.eyebrow}</div>
+          <h1 className="auth-hero-title">{hero.title} <span>{hero.accent}</span></h1>
+          {"body" in hero && <p className="auth-hero-body">{hero.body}</p>}
         </div>
       </aside>
 
       <main className="auth-panel">
-        <Link href="/" className="auth-back"><ArrowLeft size={13} /> Back to homepage</Link>
+        <a href={WEBSITE_URL} className="auth-back"><span className="auth-back-icon"><ArrowUpRight size={13} /></span>Explore Yuviz</a>
         <div className="auth-form">
           <div className="auth-mobile-logo"><Logo /></div>
           {verifyingEmail ? (

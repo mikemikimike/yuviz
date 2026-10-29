@@ -58,7 +58,7 @@ const TONE_COLOR: Record<Tone, string> = {
   g: "var(--green)", a: "var(--amber)", r: "var(--red)", n: "var(--text-3)",
 };
 
-interface ChartPoint { label: string; inbound: number; outbound: number; aiPct: number | null }
+interface ChartPoint { label: string; inbound: number; outbound: number; aiCalls: number; aiPct: number | null }
 
 const DIRECTION_TAG: Record<string, { label: string; tone: Tone }> = {
   inbound: { label: "Incoming", tone: "g" },
@@ -70,105 +70,106 @@ const toChartPoint = (label: string, inbound: number, outbound: number, ended: n
   label,
   inbound,
   outbound,
+  aiCalls: Math.max(0, ended - escalated),
   // null = calls in progress, nothing measured yet; 0 only when there were no calls at all.
   aiPct: inbound + outbound === 0 ? 0 : ended === 0 ? null : ((ended - escalated) / ended) * 100,
 });
+
+function niceStep(max: number): number {
+  const raw = Math.max(1, max / 5);
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 5, 10].map((m) => m * mag).find((m) => m >= raw) ?? 10 * mag;
+}
 
 function TrendChart({ points }: { points: ChartPoint[] }) {
   const [hover, setHover] = useState<number | null>(null);
   if (points.length === 0) return <div className="d-empty">No calls in this period yet.</div>;
   const w = 400;
-  const h = 110;
-  const max = Math.max(1, ...points.map((p) => Math.max(p.inbound, p.outbound)));
+  const h = 160;
+  const peak = Math.max(...points.map((p) => Math.max(p.inbound, p.outbound, p.aiCalls)));
+  const step = niceStep(peak);
+  const top = Math.max(step, Math.ceil(peak / step) * step);
+  const yTicks = Array.from({ length: Math.round(top / step) + 1 }, (_, i) => i * step);
   const xAt = (i: number) => (points.length === 1 ? w / 2 : (i / (points.length - 1)) * w);
-  const yAt = (frac: number) => h - 6 - frac * (h - 16);
+  const yAt = (v: number) => h - (v / top) * h;
   const series = [
-    { key: "inbound", label: "Inbound", color: "var(--chart-inbound)", xy: points.map((p, i) => [xAt(i), yAt(p.inbound / max)]) },
-    { key: "outbound", label: "Outbound", color: "var(--chart-outbound)", xy: points.map((p, i) => [xAt(i), yAt(p.outbound / max)]) },
+    { key: "inbound", label: "Inbound", color: "var(--chart-inbound)", dash: undefined, xy: points.map((p, i) => [xAt(i), yAt(p.inbound)]) },
+    { key: "outbound", label: "Outbound", color: "var(--chart-outbound)", dash: "6 5", xy: points.map((p, i) => [xAt(i), yAt(p.outbound)]) },
   ] as const;
-  const shown = series;
   const pts = (xy: readonly (readonly number[])[]) => xy.map(([x, y]) => `${x},${y}`).join(" ");
-  const inXy = series[0].xy;
-  const aiXy = points.flatMap((p, i) => (p.aiPct == null ? [] : [[xAt(i), yAt(p.aiPct / 100), i]]));
+  const aiXy = points.map((p, i) => [xAt(i), yAt(p.aiCalls)]);
   const calls = (n: number) => `${n} call${n === 1 ? "" : "s"}`;
-  const aiText = (p: ChartPoint) => (p.aiPct == null ? "—" : `${Math.round(p.aiPct)}%`);
+  const aiText = (p: ChartPoint) => `${calls(p.aiCalls)}${p.aiPct == null || p.inbound + p.outbound === 0 ? "" : ` (${Math.round(p.aiPct)}%)`}`;
   const summary = (p: ChartPoint) =>
     `${p.label}: inbound ${calls(p.inbound)}, outbound ${calls(p.outbound)}, handled by AI ${aiText(p)}`;
   const colW = points.length === 1 ? 100 : 100 / (points.length - 1);
   const pctX = (i: number) => (xAt(i) / w) * 100;
-  const ticks = points.length <= 6 ? points.map((_, i) => i) : [0, Math.floor((points.length - 1) / 2), points.length - 1];
+  const every = Math.max(1, Math.ceil(points.length / 6));
+  const xTicks = points.map((_, i) => i).filter((i) => i % every === 0);
   return (
     <>
-      <div className="d-chart">
-        <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label="Inbound and outbound calls over time">
-          <path d={`M0 ${h * 0.25}H${w}M0 ${h * 0.5}H${w}M0 ${h * 0.75}H${w}`} stroke="var(--border)" strokeWidth="1" />
-          <path d={`M${inXy[0][0]} ${h} L${pts(inXy).replaceAll(" ", " L")} L${inXy[inXy.length - 1][0]} ${h}Z`} fill="var(--chart-inbound)" opacity="0.12" />
-          {shown.map((s) => (
-            <polyline key={s.key} points={pts(s.xy)} fill="none" stroke={s.color} strokeWidth="2"
-              strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+      <div className="d-plot">
+        <div className="d-yaxis" aria-hidden="true">
+          {yTicks.map((v) => <span key={v} style={{ top: `${(yAt(v) / h) * 100}%` }}>{v}</span>)}
+        </div>
+        <div className="d-chart">
+          <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label="Inbound and outbound calls over time">
+            {yTicks.map((v) => (
+              <line key={v} x1="0" x2={w} y1={yAt(v)} y2={yAt(v)} stroke={v === 0 ? "var(--text-2)" : "color-mix(in srgb, var(--text) 30%, transparent)"} strokeWidth="1" vectorEffect="non-scaling-stroke" />
+            ))}
+            {series.map((s) => (
+              <polyline key={s.key} points={pts(s.xy)} fill="none" stroke={s.color} strokeWidth="2" strokeDasharray={s.dash}
+                strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+            ))}
+            {aiXy.length > 1 && (
+              <polyline points={pts(aiXy)} fill="none" stroke="var(--chart-ai)" strokeWidth="2" strokeDasharray="1 4"
+                strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+            )}
+          </svg>
+          {hover !== null && series.map((s) => (
+            <span key={s.key} className="d-dot" style={{ left: `${(s.xy[hover][0] / w) * 100}%`, top: `${(s.xy[hover][1] / h) * 100}%`, background: s.color }} />
           ))}
-          {aiXy.length > 1 && (
-            <polyline
-              points={pts(aiXy)} fill="none" stroke="var(--green)" strokeWidth="1.5" opacity="0.7"
-              strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"
-            />
+          {points.map((p, i) => {
+            const left = Math.max(0, pctX(i) - colW / 2);
+            const right = Math.min(100, pctX(i) + colW / 2);
+            const clear = () => setHover((cur) => (cur === i ? null : cur));
+            return (
+              <span
+                key={`hover-${i}`}
+                className="d-hover"
+                tabIndex={0}
+                aria-label={summary(p)}
+                style={{ left: `${left}%`, width: `${right - left}%` }}
+                onMouseEnter={() => setHover(i)}
+                onMouseLeave={clear}
+                onFocus={() => setHover(i)}
+                onBlur={clear}
+              />
+            );
+          })}
+          {hover !== null && points[hover] && (
+            <div
+              className="d-tip"
+              role="tooltip"
+              style={{
+                left: `${pctX(hover)}%`,
+                transform: `translateX(${pctX(hover) < 20 ? "0" : pctX(hover) > 80 ? "-100%" : "-50%"})`,
+              }}
+            >
+              <b>{points[hover].label}</b>
+              <span><i style={{ background: "var(--chart-inbound)" }} />Inbound: {calls(points[hover].inbound)}</span>
+              <span><i style={{ background: "var(--chart-outbound)" }} />Outbound: {calls(points[hover].outbound)}</span>
+              <span><i style={{ background: "var(--chart-ai)" }} />Handled by AI: {aiText(points[hover])}</span>
+            </div>
           )}
-        </svg>
-        {/* HTML dots: SVG circles would stretch under the non-uniform viewBox scaling. */}
-        {shown.flatMap((s) => s.xy.map(([x, y], i) => (
-          <span
-            key={`${s.key}-${i}`}
-            className="d-dot"
-            style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, background: s.color }}
-          />
-        )))}
-        {aiXy.map(([x, y, i]) => (
-          <span
-            key={`ai-${i}`}
-            className="d-dot ai"
-            style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` }}
-          />
-        ))}
-        {points.map((p, i) => {
-          const left = Math.max(0, pctX(i) - colW / 2);
-          const right = Math.min(100, pctX(i) + colW / 2);
-          const clear = () => setHover((cur) => (cur === i ? null : cur));
-          return (
-            <span
-              key={`hover-${i}`}
-              className="d-hover"
-              tabIndex={0}
-              aria-label={summary(p)}
-              style={{ left: `${left}%`, width: `${right - left}%` }}
-              onMouseEnter={() => setHover(i)}
-              onMouseLeave={clear}
-              onFocus={() => setHover(i)}
-              onBlur={clear}
-            />
-          );
-        })}
-        {hover !== null && points[hover] && (
-          <div
-            className="d-tip"
-            role="tooltip"
-            style={{
-              left: `${pctX(hover)}%`,
-              transform: `translateX(${pctX(hover) < 20 ? "0" : pctX(hover) > 80 ? "-100%" : "-50%"})`,
-            }}
-          >
-            <b>{points[hover].label}</b>
-            <span><i style={{ background: "var(--chart-inbound)" }} />Inbound: {calls(points[hover].inbound)}</span>
-            <span><i style={{ background: "var(--chart-outbound)" }} />Outbound: {calls(points[hover].outbound)}</span>
-            <span><i style={{ background: "var(--green)" }} />Handled by AI: {aiText(points[hover])}</span>
-          </div>
-        )}
+        </div>
+        <div className="d-xaxis" aria-hidden="true">
+          {xTicks.map((i) => <span key={i} style={{ left: `${pctX(i)}%` }}>{points[i].label}</span>)}
+        </div>
       </div>
       <div className="d-legend">
-        {shown.map((s) => <span key={s.key}><i style={{ background: s.color }} />{s.label}</span>)}
-        <span><i style={{ background: "var(--green)" }} />Handled by AI (%)</span>
-      </div>
-      <div className="d-ticks">
-        {ticks.map((i) => <span key={i}>{points[i].label}</span>)}
+        {series.map((s) => <span key={s.key}><i className={s.dash ? "dashed" : undefined} style={{ ["--c" as string]: s.color }} />{s.label}</span>)}
+        <span><i className="dotted" style={{ ["--c" as string]: "var(--chart-ai)" }} />Handled by AI</span>
       </div>
     </>
   );
