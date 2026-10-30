@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from libs.config_sdk.calling_codes import CALLING_CODES
+from libs.config_sdk.callflow import MAX_NODES as MAX_CALL_FLOW_NODES
 from libs.config_sdk.dial_targets import is_dial_number, is_transfer_destination
 from libs.telephony_sdk.did_format import is_routable_did, normalize_did
 
@@ -18,13 +19,15 @@ MAX_WORKFLOW_EDGES = 120
 MAX_WORKFLOW_BYTES = 256_000
 
 
-def _check_graph_bounds(graph: dict[str, Any] | None) -> dict[str, Any] | None:
+def _check_graph_bounds(
+    graph: dict[str, Any] | None, max_nodes: int = MAX_WORKFLOW_NODES
+) -> dict[str, Any] | None:
     if graph is None:
         return None
     nodes = graph.get("nodes")
     edges = graph.get("edges")
-    if isinstance(nodes, list) and len(nodes) > MAX_WORKFLOW_NODES:
-        raise ValueError(f"workflow has too many nodes (max {MAX_WORKFLOW_NODES})")
+    if isinstance(nodes, list) and len(nodes) > max_nodes:
+        raise ValueError(f"workflow has too many nodes (max {max_nodes})")
     if isinstance(edges, list) and len(edges) > MAX_WORKFLOW_EDGES:
         raise ValueError(f"workflow has too many edges (max {MAX_WORKFLOW_EDGES})")
     # Cheap size check before CPU-bound parse_graph / graph_warnings.
@@ -294,7 +297,7 @@ class CallFlowCreate(BaseModel):
     @field_validator("graph")
     @classmethod
     def _graph_bounds(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        return _check_graph_bounds(value)
+        return _check_graph_bounds(value, MAX_CALL_FLOW_NODES)
 
 
 class CallFlowUpdate(BaseModel):
@@ -312,7 +315,7 @@ class CallFlowDraft(BaseModel):
     @field_validator("graph")
     @classmethod
     def _graph_bounds(cls, value: dict[str, Any]) -> dict[str, Any]:
-        checked = _check_graph_bounds(value)
+        checked = _check_graph_bounds(value, MAX_CALL_FLOW_NODES)
         assert checked is not None
         return checked
 
@@ -324,7 +327,7 @@ class CallFlowPublish(BaseModel):
     @field_validator("graph")
     @classmethod
     def _graph_bounds(cls, value: dict[str, Any]) -> dict[str, Any]:
-        checked = _check_graph_bounds(value)
+        checked = _check_graph_bounds(value, MAX_CALL_FLOW_NODES)
         assert checked is not None
         return checked
 

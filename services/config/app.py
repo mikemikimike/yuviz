@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -244,6 +245,14 @@ async def not_found_handler(request: Request, exc: LookupError) -> JSONResponse:
 async def _secret_encryption_unavailable(_request, exc: SecretEncryptionUnavailable):
     # Misconfiguration, but the message says what to set, so surface it.
     return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    # FastAPI's 422 shape minus `input`/`ctx`: echoing the submitted value
+    # sends whole graphs (up to 256 KB) and secrets back to the caller.
+    detail = [{k: e[k] for k in ("type", "loc", "msg") if k in e} for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 
 @app.exception_handler(ValueError)
