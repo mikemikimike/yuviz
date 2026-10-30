@@ -6,6 +6,7 @@ route mirrors Access-Control-Allow-Origin itself, and only for PUBLIC_DEMO_ORIGI
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 
@@ -25,18 +26,37 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/public", tags=["public"])
 
 
+def _client_key(host: str) -> str:
+    """An IPv6 host owns its whole /64, so per-address keys would not limit it."""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
+
 class PublicDemoThrottle:
-    """Per-IP hourly cap on demo passes, keyed on request.client.host."""
+    """Hourly caps on demo passes: one for the whole process, one per client (IPv6 by /64)."""
+
+    _ALL = "all"
 
     def __init__(self) -> None:
-        limit = int(os.environ.get("PUBLIC_DEMO_PER_IP_PER_HOUR") or 3)
-        self.hour = FixedWindowCounter(limit=limit, window_seconds=3600)
+        self.total = FixedWindowCounter(limit=int(os.environ.get("PUBLIC_DEMO_PER_HOUR") or 60), window_seconds=3600)
+        self.per_client = FixedWindowCounter(
+            limit=int(os.environ.get("PUBLIC_DEMO_PER_IP_PER_HOUR") or 3), window_seconds=3600)
 
     def allow(self, client_host: str) -> tuple[bool, int]:
-        over, retry_after = self.hour.over_limit(client_host)
-        if over:
-            return False, retry_after
-        self.hour.increment(client_host)
+        key = _client_key(client_host)
+        for counter, k in ((self.total, self._ALL), (self.per_client, key)):
+            over, retry_after = counter.over_limit(k)
+            if over:
+                return False, retry_after
+        self.total.increment(self._ALL)
+        self.per_client.increment(key)
         return True, 0
 
 

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Modal } from "@/components/Modal";
-import { openTestCallSocket } from "@/lib/webcallSocket";
+import { mintTestCredential, openTestCallSocket } from "@/lib/webcallSocket";
 
 const WEBCALL_URL = process.env.NEXT_PUBLIC_WEBCALL_URL || "ws://localhost:8300";
 const SAMPLE_RATE = 16000;
@@ -83,7 +83,11 @@ export function TestAgentPanel({
     recordingRef.current = false;
     agentSpeakingRef.current = false;
     stopAgentPlayback();
-    wsRef.current?.close();
+    if (wsRef.current) {
+      // A closing socket must not report "ended" over whatever state follows.
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+    }
     wsRef.current = null;
     workletRef.current?.disconnect();
     workletRef.current = null;
@@ -170,6 +174,7 @@ export function TestAgentPanel({
     setState("connecting");
     setErrorMsg(null);
     try {
+      const credential = await mintTestCredential(tenantSlug, agentSlug);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
       streamRef.current = stream;
 
@@ -188,7 +193,7 @@ export function TestAgentPanel({
       // Deliberately not connected to ctx.destination — we don't want the
       // caller's own mic echoed back to them.
 
-      const ws = await openTestCallSocket(WEBCALL_URL, tenantSlug, agentSlug);
+      const ws = openTestCallSocket(WEBCALL_URL, tenantSlug, agentSlug, credential);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
@@ -323,6 +328,7 @@ export function TestAgentPanel({
         }
       };
     } catch (e) {
+      teardown();
       setState("error");
       setErrorMsg(e instanceof Error ? e.message : "Could not access the microphone.");
     }

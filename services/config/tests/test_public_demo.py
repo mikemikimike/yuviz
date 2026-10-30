@@ -29,13 +29,14 @@ async def demo_agents(test_tenant, scoped):
 
 @pytest.fixture
 def demo_env(monkeypatch, test_tenant):
-    def configure(agent_slug: str | None = "demo-voice", origins: str = SITE, per_hour: str = "3"):
+    def configure(agent_slug: str | None = "demo-voice", origins: str = SITE, per_hour: str = "3", total: str = "60"):
         if agent_slug is None:
             monkeypatch.delenv("PUBLIC_DEMO_AGENT", raising=False)
         else:
             monkeypatch.setenv("PUBLIC_DEMO_AGENT", f"{test_tenant['slug']}/{agent_slug}")
         monkeypatch.setenv("PUBLIC_DEMO_ORIGINS", origins)
         monkeypatch.setenv("PUBLIC_DEMO_PER_IP_PER_HOUR", per_hour)
+        monkeypatch.setenv("PUBLIC_DEMO_PER_HOUR", total)
         monkeypatch.setattr(app.state, "public_demo_throttle", PublicDemoThrottle())
     configure()
     return configure
@@ -109,3 +110,43 @@ async def test_credential_opens_only_the_demo_agent_once(demo_agents, demo_env, 
     assert grant.agent_id == str(demo_agents["voice"]["id"])
     assert grant.agent_id != str(demo_agents["other"]["id"])
     assert await redeem_test_credential(redis, credential, channel="voice", consume=True) is None
+
+
+def test_ipv6_clients_in_one_slash_64_share_a_cap(monkeypatch):
+    monkeypatch.setenv("PUBLIC_DEMO_PER_IP_PER_HOUR", "2")
+    throttle = PublicDemoThrottle()
+
+    assert throttle.allow("2001:db8:1:2::1")[0]
+    assert throttle.allow("2001:db8:1:2:ffff::9")[0]
+    assert not throttle.allow("2001:db8:1:2:abcd::5")[0]
+    assert throttle.allow("2001:db8:1:3::1")[0]
+
+
+def test_ipv4_mapped_address_counts_as_its_ipv4_client(monkeypatch):
+    monkeypatch.setenv("PUBLIC_DEMO_PER_IP_PER_HOUR", "1")
+    throttle = PublicDemoThrottle()
+
+    assert throttle.allow("203.0.113.7")[0]
+    assert not throttle.allow("::ffff:203.0.113.7")[0]
+
+
+def test_process_wide_cap_refuses_new_clients(monkeypatch):
+    monkeypatch.setenv("PUBLIC_DEMO_PER_IP_PER_HOUR", "3")
+    monkeypatch.setenv("PUBLIC_DEMO_PER_HOUR", "2")
+    throttle = PublicDemoThrottle()
+
+    assert throttle.allow("198.51.100.1")[0]
+    assert throttle.allow("198.51.100.2")[0]
+    allowed, retry_after = throttle.allow("198.51.100.3")
+    assert not allowed and retry_after > 0
+
+
+def test_a_refused_client_does_not_use_up_the_process_cap(monkeypatch):
+    monkeypatch.setenv("PUBLIC_DEMO_PER_IP_PER_HOUR", "1")
+    monkeypatch.setenv("PUBLIC_DEMO_PER_HOUR", "2")
+    throttle = PublicDemoThrottle()
+
+    assert throttle.allow("198.51.100.1")[0]
+    for _ in range(5):
+        assert not throttle.allow("198.51.100.1")[0]
+    assert throttle.allow("198.51.100.2")[0]
