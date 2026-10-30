@@ -80,7 +80,7 @@ async def ensure_tenant() -> str:
 
 
 async def copy_provider(
-    tenant_id: str, source_tenant: str, source_id: str, name: str, voice: str | None = None,
+    tenant_id: str, source_tenant: str, source_id: str, role: str, name: str, voice: str | None = None,
 ) -> str:
     from services.config import db, provider_configs
 
@@ -94,6 +94,8 @@ async def copy_provider(
     if source is None:
         raise SystemExit(f"provider config {source_id} not found in workspace {source_tenant}")
     source = dict(source)
+    if source["role"] != role:
+        raise SystemExit(f"provider config {source_id} is a {source['role']} config, not {role}")
     extra = source["extra"]
     if isinstance(extra, str):
         import json
@@ -105,14 +107,15 @@ async def copy_provider(
     )
     async with tenant_conn(pool) as conn:
         existing = await conn.fetchval(
-            "SELECT id FROM provider_configs WHERE tenant_id = $1 AND name = $2 AND deleted_at IS NULL", tenant_id, name)
+            "SELECT id FROM provider_configs WHERE tenant_id = $1 AND name = $2 AND role = $3 AND deleted_at IS NULL",
+            tenant_id, name, role)
     if existing:
         await provider_configs.update_provider_config(
             existing, allow_pointer_schemes=False, user_email="seed_website_demo", **fields)
         print(f"  provider updated: {name} ({source['role']}/{source['engine']})")
         return str(existing)
     created = await provider_configs.create_provider_config(
-        tenant_id=tenant_id, name=name, role=source["role"], allow_pointer_schemes=False,
+        tenant_id=tenant_id, name=name, role=role, allow_pointer_schemes=False,
         user_email="seed_website_demo", **fields)
     print(f"  provider created: {name} ({source['role']}/{source['engine']})")
     return str(created["id"])
@@ -152,9 +155,9 @@ async def main() -> None:
     set_target_tenant(tenant_id)
     if args.source_tenant == TENANT_SLUG:
         raise SystemExit(f"--source-tenant must be the platform workspace, not {TENANT_SLUG}")
-    stt = await copy_provider(tenant_id, args.source_tenant, args.stt, "Demo speech-to-text")
-    llm = await copy_provider(tenant_id, args.source_tenant, args.llm, "Demo language model")
-    tts = await copy_provider(tenant_id, args.source_tenant, args.tts, "Demo voice", voice=args.voice)
+    stt = await copy_provider(tenant_id, args.source_tenant, args.stt, "stt", "Demo speech-to-text")
+    llm = await copy_provider(tenant_id, args.source_tenant, args.llm, "llm", "Demo language model")
+    tts = await copy_provider(tenant_id, args.source_tenant, args.tts, "tts", "Demo voice", voice=args.voice)
     await upsert_agent(tenant_id, stt, llm, tts)
     print("Done.")
 

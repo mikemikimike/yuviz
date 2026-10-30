@@ -105,7 +105,13 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
   const colW = points.length === 1 ? 100 : 100 / (points.length - 1);
   const pctX = (i: number) => (xAt(i) / w) * 100;
   const every = Math.max(1, Math.ceil(points.length / 6));
-  const xTicks = points.map((_, i) => i).filter((i) => i % every === 0 || i === points.length - 1);
+  const xTicks = points.map((_, i) => i).filter((i) => i % every === 0);
+  const last = points.length - 1;
+  // The last label is right-aligned, so a tick less than one step before it would overlap.
+  if (xTicks[xTicks.length - 1] !== last) {
+    if (last - xTicks[xTicks.length - 1] < every && xTicks.length > 1) xTicks.pop();
+    xTicks.push(last);
+  }
   return (
     <>
       <div className="d-plot">
@@ -125,15 +131,10 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
               <polyline points={pts(aiXy)} fill="none" stroke="var(--chart-ai)" strokeWidth="2" strokeDasharray="1 4"
                 strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
             )}
-            {points.length === 1 && (
-              <>
-                {series.map((s) => (
-                  <circle key={`dot-${s.key}`} cx={s.xy[0][0]} cy={s.xy[0][1]} r="2" fill={s.color} vectorEffect="non-scaling-stroke" />
-                ))}
-                <circle cx={aiXy[0][0]} cy={aiXy[0][1]} r="2" fill="var(--chart-ai)" vectorEffect="non-scaling-stroke" />
-              </>
-            )}
           </svg>
+          {points.length === 1 && [...series.map((s) => [s.key, s.color, s.xy[0]] as const), ["ai", "var(--chart-ai)", aiXy[0]] as const].map(([key, color, [x, y]]) => (
+            <span key={`single-${key}`} className="d-dot" style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, background: color }} />
+          ))}
           {hover !== null && series.map((s) => (
             <span key={s.key} className="d-dot" style={{ left: `${(s.xy[hover][0] / w) * 100}%`, top: `${(s.xy[hover][1] / h) * 100}%`, background: s.color }} />
           ))}
