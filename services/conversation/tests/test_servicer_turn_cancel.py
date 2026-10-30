@@ -320,3 +320,89 @@ async def test_audio_behind_a_dtmf_flood_survives_the_deferral():
     )
 
     assert audios == [b"", b"", b"\x03\x03"]
+
+
+def _audio(tag: bytes):
+    return pb.GatewayMessage(audio_chunk=pb.AudioChunk(session_id="s1", payload=tag, trace_id="tr"))
+
+
+async def test_cancel_releases_a_stalled_turn_and_the_barge_in_speech_is_processed():
+    """A turn stalled on the LLM must be cancelled by CancelGeneration (not run to its timeout), and
+    the caller's barge-in speech must be transcribed right away."""
+    turns = []
+    closed = asyncio.Event()
+
+    async def turn(session_id, audio, duration_ms, energy_db):
+        turns.append(len(turns))
+        if len(turns) == 1:
+            try:
+                await asyncio.Event().wait()   # stalled LLM, would only end at its 30 s timeout
+            finally:
+                closed.set()
+            yield HandlerResponse()
+            return
+        yield HandlerResponse(stt_text="hello are you there")
+
+    servicer, handler = _servicer(turn)
+    handler.on_audio = AsyncMock(return_value=HandlerResponse())
+
+    async def stream():
+        yield _open()
+        yield _speech_ended()
+        await asyncio.sleep(0.05)
+        yield _cancel()
+        yield _audio(b"\x01\x02")
+        yield _speech_ended()
+        await asyncio.Event().wait()
+
+    names = await _run_stream(servicer, stream(), lambda n: "stt_result" in n, timeout=1.0)
+
+    assert "cancel_ack" in names
+    assert "stt_result" in names, names          # barge-in answered, not 30 s later
+    assert closed.is_set()                        # the stalled turn was actually cancelled
+    handler.on_audio.assert_awaited_once()        # barge-in frames reached the handler
+
+
+async def test_cancel_with_nothing_queued_behind_it_still_ends_turn_and_next_turn_runs():
+    async def turn(session_id, audio, duration_ms, energy_db):
+        yield HandlerResponse(stt_text="first")
+        await asyncio.sleep(10)
+        yield HandlerResponse(tts_payloads=[b"\x00\x01"])
+
+    servicer, _ = _servicer(turn)
+
+    async def stream():
+        yield _open()
+        yield _speech_ended()
+        await asyncio.sleep(0.05)
+        yield _cancel()
+        yield _cancel()   # duplicate cancel must not wedge the stream
+        yield _speech_ended()
+        await asyncio.Event().wait()
+
+    names = await _run_stream(servicer, stream(), lambda n: n.count("stt_result") >= 2, timeout=1.0)
+    assert names.count("cancel_ack") == 2
+    assert names.count("stt_result") >= 2
+
+
+async def _run_stream(servicer, stream, until, timeout=1.0):
+    names: list[str] = []
+    done = asyncio.Event()
+
+    async def consume():
+        async for out in servicer.Converse(stream, AsyncMock()):
+            names.append(out.WhichOneof("payload"))
+            if until(names):
+                done.set()
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(done.wait(), timeout)
+    except asyncio.TimeoutError:
+        pass
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    return names

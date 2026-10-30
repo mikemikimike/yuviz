@@ -484,14 +484,17 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 await session.cancel()
                                 cancelled = True
                                 # Ack now so C++ leaves BargeIn without waiting for
-                                # the 500 ms barge_in_window; don't break — let the
-                                # generator exhaust to release pipeline resources.
+                                # the 500 ms barge_in_window.
                                 yield pb.ServiceMessage(
                                     cancel_ack=pb.CancelAck(
                                         session_id=sid,
                                         trace_id=pending.cancel_generation.trace_id,
                                     )
                                 )
+                                # Release the turn now (below) instead of waiting for a stalled
+                                # LLM/tool: the messages still queued are the barge-in speech and
+                                # belong to the outer loop.
+                                break
                             elif pcase == "playback_finished":
                                 pf = pending.playback_finished
                                 log.info(
@@ -535,6 +538,13 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     "Unexpected %s during speech pipeline session=%s",
                                     pcase, sid,
                                 )
+
+                        if cancelled:
+                            # The turn is abandoned: close it so the pipeline records the interrupted
+                            # turn and its LLM/tool wait is cancelled, then read the barge-in speech.
+                            await turn_stream.aclose()
+                            await turn.aclose()
+                            break
 
                         if response is None:
                             continue  # woken by a message, already handled above
