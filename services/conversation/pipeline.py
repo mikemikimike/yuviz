@@ -96,7 +96,7 @@ class _SessionState:
     # (pending_heard: turn number, ledger, whether the row is already interrupted). One entry per turn of the
     # reply the gateway is still playing: a refused-transfer apology adds a second to its main reply's.
     heard_bytes:                     int | None = None
-    pending_heard:                   "list[tuple[int, list[tuple[int, str]], bool]]" = field(default_factory=list)
+    pending_heard:                   "list[tuple[int, list[tuple[int, str, list[int]]], bool]]" = field(default_factory=list)
     # A report already counted this cut as a barge-in, so a cancelled apology recorded after it must not.
     cut_counted:                     bool = False
     # Multilingual agents only; None = single-language (fixed language).
@@ -114,9 +114,10 @@ class _TurnProgress:
     reply_tokens:   list[str] = field(default_factory=list)
     # Directive-free pieces of the reply whose audio was handed to the caller, each ending in a space.
     spoken:         list[str] = field(default_factory=list)
-    # The same audio as a byte ledger: (cumulative end byte, piece text), "" for a filler, whose audio
-    # shifts the offsets. Lets a barge-in report of bytes played be turned back into text.
-    sent:           list[tuple[int, str]] = field(default_factory=list)
+    # The same audio as a byte ledger: (cumulative end byte, piece text, byte at which each of its words ends),
+    # "" for a filler or any audio whose text is not stored, which still shifts the offsets. The word ends are
+    # empty when the voice gave no timings. Lets a barge-in report of bytes played be turned back into text.
+    sent:           list[tuple[int, str, list[int]]] = field(default_factory=list)
     sent_bytes:     int = 0
     # Remote tool calls only: the fabricated-booking guard reads this, and a local call must not satisfy it.
     tool_calls:     list[dict[str, str]] = field(default_factory=list)
@@ -125,17 +126,25 @@ class _TurnProgress:
     transcript_tool_calls: list[dict[str, str]] = field(default_factory=list)
     recorded:       bool = False
 
-    def mark_sent(self, piece: str, nbytes: int) -> None:
+    def mark_sent(self, piece: str, audio: bytes) -> None:
         """The servicer sent the first chunk of *piece* (a filler passes "")."""
-        self.sent_bytes += nbytes
-        self.sent.append((self.sent_bytes, piece))
+        self.sent_bytes += len(audio)
+        self.sent.append((self.sent_bytes, piece, getattr(audio, "word_ends", [])))
         if piece:
             self.spoken.append(piece)
 
-    def mark_sent_more(self, nbytes: int) -> None:
+    def mark_sent_more(self, audio: bytes) -> None:
         """The servicer sent a further chunk of the piece last marked."""
-        self.sent_bytes += nbytes
-        self.sent[-1] = (self.sent_bytes, self.sent[-1][1])
+        self.sent_bytes += len(audio)
+        self.sent[-1] = (self.sent_bytes, *self.sent[-1][1:])
+
+
+def _sent_response(progress: _TurnProgress, chunk: bytes, piece: str, *, first: bool) -> HandlerResponse:
+    """Audio of one piece that the ledger must count once sent. *piece* is "" for text that is not stored."""
+    return HandlerResponse(
+        tts_payloads=[chunk],
+        on_sent=partial(progress.mark_sent, piece, chunk) if first else partial(progress.mark_sent_more, chunk),
+    )
 
 
 # Split after ! or ?, and after . unless it follows a title abbreviation or middle initial.
@@ -336,18 +345,23 @@ def _spoken_reply(raw_tokens: list[str], unspoken: list[str]) -> str:
     return " ".join(text.split())
 
 
-def _heard_reply(sent: list[tuple[int, str]], played_bytes: int) -> str:
+def _heard_reply(sent: list[tuple[int, str, list[int]]], played_bytes: int) -> str:
     """The reply text for the first *played_bytes* of audio sent. A piece runs from its first chunk to the
-    next piece's; the one the cut falls inside keeps the share of its words that was played."""
+    next piece's; the one the cut falls inside keeps the words whose audio ended by the cut when the voice
+    timed them, else the share of its words that was played."""
     heard: list[str] = []
     start = 0
-    for end, piece in sent:
+    for end, piece, word_ends in sent:
         if played_bytes >= end:
             heard.append(piece)
         else:
             if played_bytes > start:
                 words = piece.split()
-                heard.append(" ".join(words[:len(words) * (played_bytes - start) // (end - start)]))
+                if len(word_ends) == len(words):
+                    kept = sum(word_end <= played_bytes - start for word_end in word_ends)
+                else:
+                    kept = len(words) * (played_bytes - start) // (end - start)
+                heard.append(" ".join(words[:kept]))
             break
         start = end
     return _join_sentences(heard)
@@ -1087,15 +1101,15 @@ class PipelineConversationHandler:
             spoken = self._spoken_language(session_id)
             max_duration_goodbye = t("max_duration_goodbye", spoken)
             async for chunk in self._synthesize_sentence_stream(max_duration_goodbye, session_id):
+                yield _sent_response(progress, chunk, max_duration_goodbye, first=not got_audio)
                 got_audio = True
-                yield HandlerResponse(tts_payloads=[chunk])
             got_fallback_audio = False
             fallback_goodbye = t("fallback_goodbye", spoken)
             if not got_audio:
                 # Some TTS must be sent or EndCall is dropped.
                 async for chunk in self._synthesize_sentence_stream(fallback_goodbye, session_id):
+                    yield _sent_response(progress, chunk, fallback_goodbye, first=not got_fallback_audio)
                     got_fallback_audio = True
-                    yield HandlerResponse(tts_payloads=[chunk])
             if not got_audio and not got_fallback_audio:
                 log.warning(
                     "Max-duration goodbye produced no audio — ending call without a goodbye session=%s",
@@ -1105,7 +1119,7 @@ class PipelineConversationHandler:
                 max_duration_goodbye if got_audio else fallback_goodbye if got_fallback_audio else ""
             )
             if self._transcripts is not None:
-                self._transcripts.record_turn(
+                turn_number = self._transcripts.record_turn(
                     session_id, stt_result.text, stt_result.confidence,
                     spoken_goodbye, False,
                     latency=TurnLatency(
@@ -1115,6 +1129,7 @@ class PipelineConversationHandler:
                     tool_calls=progress.tool_calls,
                 )
                 progress.recorded = True
+                self._await_heard(session_id, turn_number, progress, False)
             yield HandlerResponse(
                 end_call=True,
                 end_call_grace_period_ms=self._goodbye_grace_period_ms,
@@ -1174,9 +1189,23 @@ class PipelineConversationHandler:
                 await items.put(exc)
 
         producer = asyncio.create_task(_produce())
+        cancel_wait = asyncio.ensure_future(cancel_event.wait())
         try:
             while True:
-                item = await items.get()
+                if items.empty():
+                    # Race the queue against the cancel so a model stalled before its first token ends with it.
+                    getter = asyncio.ensure_future(items.get())
+                    try:
+                        await asyncio.wait({getter, cancel_wait}, return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        if not getter.done():
+                            getter.cancel()
+                    if not getter.done() or getter.cancelled():
+                        break
+                    item = getter.result()
+                else:
+                    # Already queued: take it without a suspension, as before the race existed.
+                    item = items.get_nowait()
                 if item is _STREAM_END:
                     break
                 if isinstance(item, Exception):
@@ -1198,8 +1227,8 @@ class PipelineConversationHandler:
                     yield HandlerResponse(
                         tts_payloads=[tts_audio], filler=is_filler,
                         on_sent=(
-                            partial(progress.mark_sent, spoken_piece, len(tts_audio))
-                            if spoken_piece or is_filler else partial(progress.mark_sent_more, len(tts_audio))
+                            partial(progress.mark_sent, spoken_piece, tts_audio)
+                            if spoken_piece or is_filler else partial(progress.mark_sent_more, tts_audio)
                         ),
                     )
                 if cancel_event.is_set():
@@ -1209,6 +1238,7 @@ class PipelineConversationHandler:
             # at this turn itself. The callback reads its outcome so nothing is logged as never retrieved.
             producer.cancel()
             producer.add_done_callback(lambda task: task.cancelled() or task.exception())
+            cancel_wait.cancel()
         # Read after the stream: the guard may have removed a marker yielded mid-stream.
         end_call = any(isinstance(d, EndCallDirective) for d in directives)
 
@@ -1341,16 +1371,17 @@ class PipelineConversationHandler:
             got_farewell_audio = False
             if self._farewell_message:
                 # Plays even if the model spoke anyway.
+                # Not stored in the reply, but it plays after it, so the ledger counts its bytes.
                 async for chunk in self._synthesize_sentence_stream(self._farewell_message, session_id):
+                    yield _sent_response(progress, chunk, "", first=not got_farewell_audio)
                     got_farewell_audio = True
-                    yield HandlerResponse(tts_payloads=[chunk])
             got_goodbye_audio = False
             if not any_audio and not got_farewell_audio:
                 # The servicer needs some audio to key EndCall off.
                 goodbye = t("fallback_goodbye", self._spoken_language(session_id))
                 async for chunk in self._synthesize_sentence_stream(goodbye, session_id):
+                    yield _sent_response(progress, chunk, "", first=not got_goodbye_audio)
                     got_goodbye_audio = True
-                    yield HandlerResponse(tts_payloads=[chunk])
             if any_audio or got_farewell_audio or got_goodbye_audio:
                 yield HandlerResponse(
                     end_call=True,
@@ -1373,8 +1404,8 @@ class PipelineConversationHandler:
                 # The servicer holds the TransferRequest until this has played.
                 got_announcement_audio = False
                 async for chunk in self._synthesize_sentence_stream(announcement, session_id):
+                    yield _sent_response(progress, chunk, "", first=not got_announcement_audio)
                     got_announcement_audio = True
-                    yield HandlerResponse(tts_payloads=[chunk])
                 if not got_announcement_audio:
                     log.warning("Transfer announcement produced no audio — transferring unannounced session=%s", session_id)
             yield HandlerResponse(transfer_request=transfer_request)
@@ -1409,7 +1440,7 @@ class PipelineConversationHandler:
         # One cut is one barge-in, however many rows it touches.
         counted = any(was_interrupted for _, _, was_interrupted in entries)
         for turn_number, sent, was_interrupted in entries:
-            sent_text = _join_sentences([piece for _, piece in sent])
+            sent_text = _join_sentences([piece for _, piece, _ in sent])
             heard_text = _heard_reply(sent, played_bytes)
             # A reply that had finished streaming was recorded as not cut; the caller did cut it if bytes were unplayed.
             newly_interrupted = not was_interrupted and played_bytes < sent[-1][0]
@@ -1549,7 +1580,7 @@ class PipelineConversationHandler:
 
         directives: list[Directive] = []
         full_response: list[str] = []
-        progress = _TurnProgress(sent=[(sent_offset, "")] if sent_offset else [], sent_bytes=sent_offset)
+        progress = _TurnProgress(sent=[(sent_offset, "", [])] if sent_offset else [], sent_bytes=sent_offset)
         self._reset_heard(session_id, keep_pending=bool(sent_offset))
         any_audio = False
         try:
@@ -1567,9 +1598,9 @@ class PipelineConversationHandler:
                         yield HandlerResponse(
                             tts_payloads=[tts_audio],
                             on_sent=(
-                                partial(progress.mark_sent, spoken_piece, len(tts_audio))
+                                partial(progress.mark_sent, spoken_piece, tts_audio)
                                 if spoken_piece or isinstance(chunk, _FillerText)
-                                else partial(progress.mark_sent_more, len(tts_audio))
+                                else partial(progress.mark_sent_more, tts_audio)
                             ),
                         )
                     if cancel_event.is_set():
@@ -1584,13 +1615,7 @@ class PipelineConversationHandler:
                 first_chunk = True
                 async for chunk in self._synthesize_sentence_stream(assistant_text, session_id):
                     # The apology is one piece, however many chunks it takes.
-                    yield HandlerResponse(
-                        tts_payloads=[chunk],
-                        on_sent=(
-                            partial(progress.mark_sent, assistant_text, len(chunk)) if first_chunk
-                            else partial(progress.mark_sent_more, len(chunk))
-                        ),
-                    )
+                    yield _sent_response(progress, chunk, assistant_text, first=first_chunk)
                     first_chunk = False
         except (GeneratorExit, asyncio.CancelledError):
             # Caller hung up during the apology: nothing after this point runs, so persist what was spoken.

@@ -4355,7 +4355,7 @@ async def test_hang_up_during_the_fallback_apology_stores_the_fallback_text_the_
 
 # ── _heard_reply: the sent ledger turned back into what the caller heard ──────────────────────────
 
-_LEDGER = [(100, "Hello there."), (300, "How can I help you today?")]
+_LEDGER = [(100, "Hello there.", []), (300, "How can I help you today?", [])]
 
 
 def test_heard_reply_keeps_whole_pieces_the_played_bytes_cover():
@@ -4371,7 +4371,7 @@ def test_heard_reply_cuts_the_piece_in_progress_by_word_share():
 
 
 def test_heard_reply_skips_filler_audio_when_counting_offsets():
-    ledger = [(100, ""), (300, "How can I help you today?")]
+    ledger = [(100, "", []), (300, "How can I help you today?", [])]
     assert _heard_reply(ledger, 100) == ""
     assert _heard_reply(ledger, 200) == "How can I"
 
@@ -4386,13 +4386,125 @@ def test_heard_reply_with_bytes_past_the_end_is_the_whole_reply():
 
 def test_turn_progress_counts_further_chunks_of_a_piece_into_that_piece():
     progress = _TurnProgress()
-    progress.mark_sent("", 100)               # filler
-    progress.mark_sent("One two three four.", 100)
-    progress.mark_sent_more(100)
-    progress.mark_sent("Next.", 50)
-    assert progress.sent == [(100, ""), (300, "One two three four."), (350, "Next.")]
+    progress.mark_sent("", b"\x00" * 100)               # filler
+    progress.mark_sent("One two three four.", b"\x00" * 100)
+    progress.mark_sent_more(b"\x00" * 100)
+    progress.mark_sent("Next.", b"\x00" * 50)
+    assert progress.sent == [(100, "", []), (300, "One two three four.", []), (350, "Next.", [])]
     assert progress.spoken == ["One two three four.", "Next."]
     assert _heard_reply(progress.sent, 200) == "One two"
+
+
+def test_heard_reply_cuts_a_timed_piece_at_the_last_word_that_ended_by_the_cut():
+    # Words end at 30, 90, 150 of 160 bytes: a skewed voice the word share would misjudge (2 of 3 words at 100).
+    ledger = [(100, "Hello there.", []), (260, "Words are uneven.", [30, 90, 150])]
+    assert _heard_reply(ledger, 100 + 89) == "Hello there. Words"
+    assert _heard_reply(ledger, 100 + 90) == "Hello there. Words are"
+    assert _heard_reply(ledger, 100 + 29) == "Hello there."
+
+
+def test_heard_reply_falls_back_to_the_word_share_when_the_timings_do_not_match_the_text():
+    ledger = [(100, "One two three four.", [10, 20])]
+    assert _heard_reply(ledger, 50) == "One two"
+
+
+@pytest.mark.asyncio
+async def test_the_ledger_counts_the_scripted_audio_that_plays_after_the_reply(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "500")
+    transcripts = MagicMock()
+    tts = _make_tts(b"\x22" * 640)
+    handler = _make_handler(
+        _make_stt("get me a human"), _make_llm(["Sure, one moment. ", '[[TRANSFER type="cold" destination="1001" reason="x"]]']),
+        tts, system_prompt="You are Alex.", transfer_type="cold", transfer_destination="1001",
+        transfer_announcement="Please hold while I transfer your call.", transcripts=transcripts,
+    )
+
+    await _turn_responses(handler, cut_after_first_audio=False)
+
+    [(_turn, sent, _cut)] = handler._sessions["s1"].pending_heard
+    # The announcement is not part of the stored reply, but its bytes sit in the ledger after the reply's.
+    assert sent == [(640, "Sure, one moment.", []), (1280, "", [])]
+
+
+async def _announced_transfer_turn(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "500")
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("get me a human"), _make_llm(["Sure, one moment. ", '[[TRANSFER type="cold" destination="1001" reason="x"]]']),
+        _make_tts(b"\x22" * 640), system_prompt="You are Alex.", transfer_type="cold", transfer_destination="1001",
+        transfer_announcement="Please hold while I transfer your call.", transcripts=transcripts,
+    )
+    await _turn_responses(handler, cut_after_first_audio=False)   # reply 640 bytes, announcement 640 more
+    return handler, transcripts
+
+
+@pytest.mark.asyncio
+async def test_a_barge_in_during_the_announcement_marks_the_turn_interrupted_once_and_keeps_the_reply_text(monkeypatch):
+    handler, transcripts = await _announced_transfer_turn(monkeypatch)
+
+    handler.on_playback_interrupted("s1", 960)   # the reply played in full, the announcement half
+
+    transcripts.correct_turn_reply.assert_called_once()
+    args = transcripts.correct_turn_reply.call_args
+    assert args.args[2] == "Sure, one moment."   # the announcement is marked "", so never stored
+    assert args.kwargs == {"newly_interrupted": True, "count_barge_in": True}
+
+
+@pytest.mark.asyncio
+async def test_a_report_covering_the_announcement_changes_nothing(monkeypatch):
+    handler, transcripts = await _announced_transfer_turn(monkeypatch)
+
+    handler.on_playback_interrupted("s1", 1280)
+
+    transcripts.correct_turn_reply.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_error_queued_as_the_call_is_cancelled_is_still_delivered(caplog):
+    handler = _make_handler(_make_stt("hello"), _make_llm(["unused"]), _make_tts(), transcripts=MagicMock())
+
+    async def failing_turn(*args, **kwargs):
+        await handler.on_cancel("s1", hanging_up=True)   # the half-close lands with the failure
+        raise RuntimeError("tts exploded")
+        yield
+
+    handler._llm_to_tts = failing_turn
+    with caplog.at_level("ERROR", logger=pipeline_module.log.name):
+        [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert "LLM/TTS pipeline failed" in caplog.text
+
+
+async def _max_duration_goodbye_cut(played_bytes, *, report_twice=False):
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("are you still there"), _make_spy_llm(["unused"])[0], _make_tts(b"\x00" * 640),
+        max_call_duration_s=60, transcripts=transcripts,
+    )
+    handler._call_started_at -= 61
+    async for response in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        if response.on_sent:
+            response.on_sent()
+    handler.on_playback_interrupted("s1", played_bytes)
+    return transcripts
+
+
+@pytest.mark.asyncio
+async def test_a_barge_in_part_way_through_the_max_duration_goodbye_corrects_the_row_once():
+    transcripts = await _max_duration_goodbye_cut(320)
+
+    transcripts.correct_turn_reply.assert_called_once()
+    args = transcripts.correct_turn_reply.call_args
+    assert args.kwargs == {"newly_interrupted": True, "count_barge_in": True}
+    # Half of the 14 words: 320 of the 640 bytes sent.
+    assert args.args[2] == "We're at the time limit for this"
+
+
+@pytest.mark.asyncio
+async def test_a_report_covering_the_whole_max_duration_goodbye_changes_nothing():
+    transcripts = await _max_duration_goodbye_cut(640)
+
+    transcripts.correct_turn_reply.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

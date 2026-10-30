@@ -239,7 +239,7 @@ class ConversationSession:
             return HandlerResponse()
 
         room = MAX_UTTERANCE_BYTES - len(self._audio_buffer)
-        if 0 < room < len(payload):  # logged once, by the chunk that crosses the cap
+        if 0 < room <= len(payload):  # logged once, by the chunk that reaches the cap
             log.warning(
                 "Utterance audio over cap, dropping excess: buffered=%d cap=%d session=%s",
                 len(self._audio_buffer), MAX_UTTERANCE_BYTES, self._ctx.session_id,
