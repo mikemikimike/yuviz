@@ -13,6 +13,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from services.config import platform_ai as _platform_ai
+
 _REPO = Path(__file__).resolve().parents[1]
 _EXAMPLE = _REPO / ".env.example"
 
@@ -46,6 +48,8 @@ _DYNAMIC_READS = {
     ("services/conversation/language.py", "name"): set(),
     # env:NAME secret refs: the name comes from a provider config, not code.
     ("libs/config_sdk/secret_resolver.py", "key"): set(),
+    # Platform-managed AI: each catalogue option names the root .env key it runs on.
+    ("services/config/platform_ai.py", "option.key_env or ''"): {o.key_env for o in _platform_ai.OPTIONS.values() if o.key_env},
     # Bodies of the knowledge service's env helpers (envparse.env_int/env_float/..., limits/resilience config readers) and
     # the parse child's thread-pool loop; their callers pass literal names and are listed in docs/knowledge-env-vars.md.
     ("services/knowledge/chunker.py", "name"): set(),
