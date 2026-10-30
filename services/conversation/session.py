@@ -58,6 +58,7 @@ class HandlerResponse:
     end_call_grace_period_ms: 0 = gateway default. response_text accompanies, never replaces, tts_payloads.
     filler: the tts_payloads are a "one moment" filler, not the reply, so they never count as the caller
     having heard an answer or a goodbye.
+    end_call_without_audio: the max-duration cap only: EndCall goes out even when no audio played this turn.
     """
     stt_text:       str         = ""
     stt_confidence: float       = 0.0
@@ -69,6 +70,8 @@ class HandlerResponse:
     filler:         bool        = False
     # The servicer calls this once it sends the tts_payloads, so a handler records what the caller was sent.
     on_sent:        Callable[[], None] | None = None
+
+    end_call_without_audio: bool = False
 
 
 class IConversationHandler(Protocol):

@@ -59,6 +59,12 @@ def _cancel_id(cancel: "pb.CancelGeneration") -> int | None:
     return cancel.cancel_id if cancel.HasField("cancel_id") else None
 
 
+def _is_reply_audio(response) -> bool:
+    """True when the response carries non-empty reply audio; a filler replays from cache even while
+    TTS is down, and a zero-byte payload is silence, so neither is the goodbye."""
+    return not response.filler and any(response.tts_payloads)
+
+
 def _consume_pending_transfer(tr, interrupted: bool, sid: str):
     """Return the held TransferRequest message to send at playback end, or None to drop it.
 
@@ -464,6 +470,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     cancelled             = False
                     stt_sent              = False
                     end_call_requested    = False
+                    end_call_without_audio = False
                     end_call_grace_period = 0
                     turn_transfer         = None
 
@@ -551,6 +558,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         if not cancelled:
                             if response.end_call:
                                 end_call_requested    = True
+                                end_call_without_audio = response.end_call_without_audio
                                 end_call_grace_period = response.end_call_grace_period_ms
                             if response.transfer_request:
                                 tr = response.transfer_request
@@ -584,9 +592,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             # Stream TTS chunks as each sentence is synthesized —
                             # advances C++ FSM Thinking→Synthesizing→Speaking so
                             # barge-in detection works during playback.
-                            if response.tts_payloads:
-                                # A filler replays from cache even while TTS is down, so it is not the goodbye.
-                                audio_sent = audio_sent or not response.filler
+                            if any(response.tts_payloads):
+                                audio_sent = audio_sent or _is_reply_audio(response)
                                 if not tts_started_sent:
                                     yield pb.ServiceMessage(
                                         tts_started=pb.TtsStarted(session_id=sid)
@@ -657,6 +664,19 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             end_call=pb.EndCall(
                                 session_id=sid,
                                 reason="agent_ended_call",
+                                grace_period_ms=end_call_grace_period,
+                            )
+                        )
+                    elif end_call_requested and end_call_without_audio and not cancelled:
+                        # The max-duration cap fires even when nothing played; the gateway enters the end-call
+                        # grace period, where the caller can still cancel by speaking.
+                        log.warning(
+                            "Converse: max-duration EndCall with no audio session=%s", sid,
+                        )
+                        yield pb.ServiceMessage(
+                            end_call=pb.EndCall(
+                                session_id=sid,
+                                reason="max_duration_no_audio",
                                 grace_period_ms=end_call_grace_period,
                             )
                         )

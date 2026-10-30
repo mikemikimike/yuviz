@@ -3,6 +3,7 @@ add_executable(gateway_tests
     ringbuffer_test.cpp
     call_fsm_test.cpp
     cancelled_reply_gate_test.cpp
+    call_session_end_call_test.cpp
     vad_test.cpp
     silero_vad_test.cpp
     playback_queue_test.cpp

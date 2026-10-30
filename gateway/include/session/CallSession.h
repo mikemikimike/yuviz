@@ -67,6 +67,8 @@ public:
 
     [[nodiscard]] const std::string& session_id() const noexcept;
     [[nodiscard]] CallFsmState       fsm_state()  const noexcept;
+    // Control-thread state; read only once the session's queue has drained (tests).
+    [[nodiscard]] bool               end_call_pending() const noexcept;
     [[nodiscard]] bool               is_terminal() const noexcept;
     [[nodiscard]] MediaSession&      media_session() noexcept { return *media_; }
 

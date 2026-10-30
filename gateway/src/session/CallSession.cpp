@@ -10,6 +10,10 @@ namespace voiceai {
 
 namespace {
 
+// EndCall reason the Conversation Service sends when the max-duration cap ends a
+// turn that played no audio; there is no playback to wait for.
+constexpr const char* kMaxDurationNoAudioReason = "max_duration_no_audio";
+
 TimerType to_timer_type(FsmTimerType t) noexcept {
     switch (t) {
     case FsmTimerType::ConnectionTimeout: return TimerType::ConnectionTimeout;
@@ -157,6 +161,10 @@ const std::string& CallSession::session_id() const noexcept {
 
 CallFsmState CallSession::fsm_state() const noexcept {
     return fsm_ ? fsm_->state() : CallFsmState::Closed;
+}
+
+bool CallSession::end_call_pending() const noexcept {
+    return pending_end_call_;
 }
 
 bool CallSession::is_terminal() const noexcept {
@@ -425,10 +433,18 @@ void CallSession::wire_transport_callbacks() {
         post([this] { if (fsm_) fsm_->on_cancel_complete(); });
     };
 
-    // Applied once the goodbye TTS finishes playing (on_playback_finished).
+    // Applied once the goodbye TTS finishes playing (on_playback_finished), except
+    // kMaxDurationNoAudioReason, which has nothing to play and applies at once.
     cbs.on_end_call = [this](const std::string& /*session_id*/, std::string reason,
                              uint32_t grace_period_ms) {
         log_.info("EndCall received reason={} grace_period_ms={}", reason, grace_period_ms);
+        if (reason == kMaxDurationNoAudioReason) {
+            post([this, grace_period_ms] {
+                if (fsm_) fsm_->on_end_call_without_playback(
+                    std::chrono::milliseconds{grace_period_ms});
+            });
+            return;
+        }
         post([this, grace_period_ms] {
             pending_end_call_       = true;
             pending_goodbye_timeout_ = std::chrono::milliseconds{grace_period_ms};
