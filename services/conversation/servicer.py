@@ -27,7 +27,8 @@ import grpc.aio
 from .event_bus import EventBus, TransferRequested
 from .rejection import RejectedCallHangup
 from .session import (
-    AgentUnavailable, ConversationSession, IConversationHandler, RoutingStatus, SessionContext,
+    AgentUnavailable, ConversationSession, IConversationHandler, MAX_UTTERANCE_BYTES,
+    RoutingStatus, SessionContext,
 )
 from .transcript_builder import TranscriptBuilder
 
@@ -346,6 +347,10 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         # not again by each later turn (which would discard the next utterance's audio as
         # "trailing frames").
         held: collections.deque[pb.GatewayMessage] = collections.deque()
+        # Audio bytes held for the utterance being collected behind the last deferred
+        # speech_ended; capped like session.push_audio so a flood can't pile up in memory
+        # while a slow turn runs.
+        held_audio_bytes = 0
         turn_stream: AsyncGenerator | None = None
 
         async def _turn_responses(turn: AsyncIterator) -> AsyncGenerator:
@@ -478,7 +483,15 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 backlog.appendleft(None)  # so outer loop exits
                                 break
                             pcase = pending.WhichOneof("payload")
+                            if not held:
+                                held_audio_bytes = 0
                             if held and pcase != "cancel_generation":
+                                if pcase == "audio_chunk":
+                                    if held_audio_bytes >= MAX_UTTERANCE_BYTES:
+                                        continue  # over the utterance cap: dropped, as push_audio would
+                                    held_audio_bytes += len(pending.audio_chunk.payload)
+                                elif pcase == "speech_ended":
+                                    held_audio_bytes = 0  # the next utterance starts
                                 held.append(pending)
                             elif pcase == "cancel_generation":
                                 await session.cancel()
