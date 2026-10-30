@@ -17,6 +17,7 @@ import {
   enableExecuteApi,
   generateSystemPrompt,
   listProviders,
+  recommendedAiOptions,
   listTenants,
   updateAgent,
 } from "@/lib/api";
@@ -83,6 +84,17 @@ export default function NewAgentPage() {
   const [sttId, setSttId] = useState<string | null>(null);
   const [llmId, setLlmId] = useState<string | null>(null);
   const [ttsId, setTtsId] = useState<string | null>(null);
+  // Read by the provider-loading effect, which runs per account, not per edit.
+  const sttIdRef = useRef(sttId);
+  const llmIdRef = useRef(llmId);
+  const ttsIdRef = useRef(ttsId);
+  const languagesRef = useRef(languages);
+  useEffect(() => {
+    sttIdRef.current = sttId;
+    llmIdRef.current = llmId;
+    ttsIdRef.current = ttsId;
+    languagesRef.current = languages;
+  }, [sttId, llmId, ttsId, languages]);
 
   // Step 3 — Limits
   const [maxCallDuration, setMaxCallDuration] = useState<number | "">("");
@@ -234,9 +246,27 @@ export default function NewAgentPage() {
           if (accountDefault && ofRole.some((p) => p.id === accountDefault)) return accountDefault;
           return ofRole.length === 1 ? ofRole[0].id : null;
         };
-        setSttId((prev) => pick("stt", prev, tenant.default_stt_config_id));
-        setLlmId((prev) => pick("llm", prev, tenant.default_llm_config_id));
-        setTtsId((prev) => pick("tts", prev, tenant.default_tts_config_id));
+        const picked = {
+          stt: pick("stt", sttIdRef.current, tenant.default_stt_config_id),
+          llm: pick("llm", llmIdRef.current, tenant.default_llm_config_id),
+          tts: pick("tts", ttsIdRef.current, tenant.default_tts_config_id),
+        };
+        setSttId(picked.stt);
+        setLlmId(picked.llm);
+        setTtsId(picked.tts);
+        // Nothing to pick yet: start from the platform's recommended models for the chosen languages.
+        const missing = (["stt", "llm", "tts"] as const).filter((r) => !picked[r]);
+        if (missing.length === 0) return;
+        recommendedAiOptions(tenant.id, languagesRef.current, [...missing])
+          .then((rows) => {
+            setProviders((prev) => [...prev, ...rows.filter((r) => !prev.some((p) => p.id === r.id))]);
+            for (const row of rows) {
+              if (row.role === "stt") setSttId((prev) => prev ?? row.id);
+              if (row.role === "llm") setLlmId((prev) => prev ?? row.id);
+              if (row.role === "tts") setTtsId((prev) => prev ?? row.id);
+            }
+          })
+          .catch(() => {});
       })
       .catch(() => {});
     const loadKnowledge = () => {

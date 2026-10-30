@@ -30,7 +30,7 @@ from . import tenants as tenants_service
 from .routers import (
     agent_tool_policies, agents, audit_log, auth, call_flows, calls, carriers,
     invites as invites_router,
-    live_calls, local_models, phone_numbers, provider_configs, telephony_configs, tenants, tool_catalog,
+    live_calls, local_models, phone_numbers, platform_ai, provider_configs, telephony_configs, tenants, tool_catalog,
     tool_provider_configs, users,
 )
 
@@ -215,6 +215,8 @@ app.include_router(call_flows.tenant_scoped_router)
 app.include_router(call_flows.router)
 app.include_router(provider_configs.tenant_scoped_router)
 app.include_router(provider_configs.router)
+app.include_router(platform_ai.settings_router)
+app.include_router(platform_ai.tenant_scoped_router)
 app.include_router(phone_numbers.tenant_scoped_router)
 app.include_router(phone_numbers.router)
 app.include_router(carriers.tenant_scoped_router)

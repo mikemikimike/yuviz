@@ -3,7 +3,8 @@
 // In-browser test call beside the agent editor (engine: lib/useWebCall).
 
 import { useEffect, useRef, useState } from "react";
-import { Headphones, MessageSquare, Mic, MicOff, Phone, type LucideIcon } from "lucide-react";
+import { Headphones, MessageSquare, Mic, MicOff, Phone, Send, type LucideIcon } from "lucide-react";
+import { ApiError, ChatTestSession, sendChatTest, startChatTest } from "@/lib/api";
 import { useWebCall } from "@/lib/useWebCall";
 
 const STATUS_TEXT: Record<string, string> = {
@@ -21,12 +22,14 @@ export type Mode = "browser" | "phone" | "chat";
 export const MODES: { key: Mode; label: string; icon: LucideIcon; soon?: string }[] = [
   { key: "browser", label: "Browser", icon: Headphones },
   { key: "phone", label: "Phone", icon: Phone, soon: "Get a real call from your agent on your own phone." },
-  { key: "chat", label: "Chat", icon: MessageSquare, soon: "Type messages to your agent and read its replies." },
+  { key: "chat", label: "Chat", icon: MessageSquare },
 ];
 
-export function AgentTestPanel({ tenantSlug, agentSlug, savePending, blockedReason = null }: {
+export function AgentTestPanel({ tenantSlug, agentSlug, agentId, agentName, savePending, blockedReason = null }: {
   tenantSlug: string;
   agentSlug: string;
+  agentId: string;
+  agentName: string;
   /** A test must run the latest edits, so starting waits for autosave. */
   savePending: boolean;
   /** Why unsaved edits can't be saved yet (held on a live agent, or a required field is empty). */
@@ -34,8 +37,10 @@ export function AgentTestPanel({ tenantSlug, agentSlug, savePending, blockedReas
 }) {
   const call = useWebCall(tenantSlug, agentSlug);
   const [mode, setMode] = useState<Mode>("browser");
+  const [chatStatus, setChatStatus] = useState<"idle" | "live" | "ended">("idle");
   const logRef = useRef<HTMLDivElement | null>(null);
-  const live = call.state !== "idle" && call.state !== "ended" && call.state !== "error";
+  const live = (call.state !== "idle" && call.state !== "ended" && call.state !== "error") || chatStatus === "live";
+  const ended = !live && (mode === "chat" ? chatStatus === "ended" : call.state === "ended");
   const listening = ["ready", "talking", "thinking", "speaking"].includes(call.state);
   const soon = MODES.find((m) => m.key === mode)?.soon;
   const startedAt = useRef<number | null>(null);
@@ -71,8 +76,9 @@ export function AgentTestPanel({ tenantSlug, agentSlug, savePending, blockedReas
   return (
     <div className="card ed-test">
       <div className="ed-test-hdr">
-        <b>Test your agent</b>
-        {live && <span className="badge green">On a call</span>}
+        <b className="ed-test-name" title={agentName}>{agentName || "Test your agent"}</b>
+        {live && <span className="badge green ed-test-live"><i aria-hidden="true" /> Live</span>}
+        {ended && <span className="badge gray ed-test-live ended"><i aria-hidden="true" /> End</span>}
       </div>
 
       <div className="ed-test-modes" role="tablist" aria-label="How to test">
@@ -89,7 +95,10 @@ export function AgentTestPanel({ tenantSlug, agentSlug, savePending, blockedReas
         ))}
       </div>
 
-      {soon ? (
+      {mode === "chat" ? (
+        <ChatTest tenantSlug={tenantSlug} agentId={agentId} savePending={savePending} blockedReason={blockedReason}
+          onStatus={setChatStatus} />
+      ) : soon ? (
         <div className="ed-test-coming">
           <span className="badge gray">Coming soon</span>
           <div>{soon}</div>
@@ -148,5 +157,124 @@ export function AgentTestPanel({ tenantSlug, agentSlug, savePending, blockedReas
         </>
       )}
     </div>
+  );
+}
+
+// Typed test: the agent's instructions and thinking model answer each message; no voice, tools or documents.
+function ChatTest({ tenantSlug, agentId, savePending, blockedReason, onStatus }: {
+  tenantSlug: string;
+  agentId: string;
+  savePending: boolean;
+  blockedReason: string | null;
+  onStatus: (status: "idle" | "live" | "ended") => void;
+}) {
+  const [session, setSession] = useState<ChatTestSession | null>(null);
+  const [messages, setMessages] = useState<{ role: "user" | "agent"; text: string }[]>([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [ended, setEnded] = useState(false);
+  const logRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages.length, busy]);
+
+  useEffect(() => {
+    onStatus(session ? "live" : ended ? "ended" : "idle");
+  }, [session, ended, onStatus]);
+  useEffect(() => () => onStatus("idle"), [onStatus]);
+
+  const end = () => {
+    setSession(null);
+    setEnded(true);
+    setDraft("");
+  };
+
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const s = await startChatTest(tenantSlug, agentId);
+      setEnded(false);
+      setSession(s);
+      setMessages(s.greeting ? [{ role: "agent", text: s.greeting }] : []);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof ApiError && e.status === 429 ? "Too many tests just now. Try again in a minute." : e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!session || !text || busy) return;
+    setDraft("");
+    setMessages((m) => [...m, { role: "user", text }]);
+    setBusy(true);
+    setError(null);
+    try {
+      const { reply } = await sendChatTest(tenantSlug, agentId, { credential: session.credential, session_id: session.session_id, message: text });
+      setMessages((m) => [...m, { role: "agent", text: reply }]);
+    } catch (e) {
+      const status = e instanceof ApiError ? e.status : 0;
+      if (status === 404) {
+        setSession(null);
+        setEnded(true);
+        setError("This chat expired. Start a new one.");
+      } else {
+        setError(
+          status === 429 ? "This chat has reached its message limit. Start a new one."
+            : status === 502 ? "The agent's thinking model didn't answer. Check it in Settings, then try again."
+            : e instanceof ApiError ? e.detail : String(e),
+        );
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="ed-test-log" ref={logRef}>
+        {messages.length === 0 ? (
+          <div className="ed-test-empty">
+            <MessageSquare size={26} />
+            Type to your agent to check its answers. Replies use its instructions and thinking model.
+          </div>
+        ) : (
+          messages.map((m, i) => <div key={i} className={`ed-bubble${m.role === "user" ? " me" : ""}`}>{m.text}</div>)
+        )}
+        {busy && session && <div className="ed-bubble ed-typing" aria-label="Agent is typing"><span /><span /><span /></div>}
+        {ended && messages.length > 0 && <div className="ed-test-ended">Conversation ended</div>}
+      </div>
+      {error && <div className="error-banner">{error}</div>}
+      {!session ? (
+        <button className="btn btn-primary btn-sm ed-test-btn" onClick={start} disabled={busy || savePending || !!blockedReason}>
+          {blockedReason ?? (savePending ? "Saving your changes…" : busy ? "Starting…" : ended ? "Start a new chat" : "Start chat")}
+        </button>
+      ) : (
+        <>
+          <form className="ed-chat-input" onSubmit={(e) => { e.preventDefault(); void send(); }}>
+            <input
+              className="form-input"
+              value={draft}
+              maxLength={1000}
+              placeholder="Type a message…"
+              aria-label="Message to the agent"
+              onChange={(e) => setDraft(e.target.value)}
+              disabled={busy}
+              autoFocus
+            />
+            <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !draft.trim()} aria-label="Send">
+              <Send size={14} />
+            </button>
+          </form>
+          <button className="btn btn-danger btn-sm ed-test-btn" onClick={end}>End conversation</button>
+        </>
+      )}
+      <div className="ed-test-hint">Chat checks what the agent says. Voice, tools and documents are tested with a call.</div>
+    </>
   );
 }
