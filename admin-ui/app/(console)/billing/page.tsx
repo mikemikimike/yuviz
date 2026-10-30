@@ -283,7 +283,7 @@ export default function BillingPage() {
                   {fmtInt(cycle?.minutes ?? 0)} voice minutes at the rate below. This platform stores no plan, price or
                   invoice — the figure is arithmetic on call records, not a bill.
                 </div>
-                <div style={{ height: 1, background: "rgba(233,229,220,.12)", margin: "16px 0" }} />
+                <div style={{ height: 1, background: "rgba(240,242,252,.12)", margin: "16px 0" }} />
                 <label style={{ fontSize: ".7rem", fontWeight: 600, color: "var(--sidebar-text-dim)", display: "block", marginBottom: 6 }}>
                   Rate per voice minute (₹)
                 </label>
@@ -299,7 +299,7 @@ export default function BillingPage() {
                     const next = Number(e.target.value);
                     saveRate(Number.isFinite(next) ? Math.max(0, next) : 0);
                   }}
-                  style={{ background: "rgba(233,229,220,.06)", borderColor: "rgba(233,229,220,.18)", color: "var(--sidebar-text)" }}
+                  style={{ background: "rgba(240,242,252,.06)", borderColor: "rgba(240,242,252,.18)", color: "var(--sidebar-text)" }}
                 />
                 <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
                   <CycleRow label="Voice minutes" value={fmtRupees(voiceCost)} />

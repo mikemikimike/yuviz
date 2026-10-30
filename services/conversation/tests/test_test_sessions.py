@@ -144,20 +144,16 @@ async def test_credential_for_a_missing_agent_is_refused(credential_redis, legac
     assert legacy_calls == []
 
 
-async def test_no_credential_inactive_and_missing_agent_reach_the_same_legacy_path(
-    credential_redis, legacy_calls,
-):
-    inactive = await _resolve(_ctx(), credential_redis, _config("inactive"))
-    missing = await _resolve(_ctx(slug="nope"), credential_redis, _config("inactive"))
-
-    assert inactive == missing == LEGACY
-    assert legacy_calls == ["sup", "nope"]
+@pytest.mark.parametrize("status", ["active", "inactive"])
+async def test_test_session_without_credential_is_refused(status, credential_redis, legacy_calls):
+    with pytest.raises(AgentUnavailable):
+        await _resolve(_ctx(), credential_redis, _config(status))
+    assert legacy_calls == []
 
 
-async def test_no_credential_active_agent_resolves_as_today(credential_redis, legacy_calls):
-    runtime_config, _bundle = await _resolve(_ctx(), credential_redis, _config("active"))
-
-    assert runtime_config.agent.slug == "sup"
+async def test_test_session_without_credential_for_a_missing_agent_is_refused(credential_redis, legacy_calls):
+    with pytest.raises(AgentUnavailable):
+        await _resolve(_ctx(slug="nope"), credential_redis, _config("active"))
     assert legacy_calls == []
 
 

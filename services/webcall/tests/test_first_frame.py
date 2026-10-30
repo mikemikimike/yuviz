@@ -173,16 +173,28 @@ def test_first_frame_timeout_after_real_5s_closes_1008(conv, no_browser_loop, ca
     _assert_sentinel_unlogged(caplog)
 
 
-@pytest.mark.parametrize("frame", [CRED_FRAME, TRUNCATED_FRAME], ids=["valid-json", "malformed-json"])
-def test_credential_frame_without_test_flag_behaves_as_before(conv, caplog, frame):
+def test_credential_is_required_without_the_test_flag(conv, caplog):
     caplog.set_level(logging.DEBUG)
-    ws = FakeWs(PLAIN_PATH, [frame])
+    ws = FakeWs(PLAIN_PATH, [CRED_FRAME])
     _run(ws)
 
     opens = conv.session_opens()
     assert len(opens) == 1
-    assert opens[0].test_credential == ""
+    assert opens[0].test_credential == SENTINEL
     assert ws.closed_with is None
-    # the frame went down the ordinary control path and was not written as audio
-    assert [w.WhichOneof("payload") for w in conv.writes] == ["session_open"]
+    _assert_sentinel_unlogged(caplog)
+
+
+@pytest.mark.parametrize("frame", [
+    json.dumps({"type": "speech_ended"}),
+    TRUNCATED_FRAME,
+    b"\x00\x01",
+], ids=["control-frame", "malformed-json", "audio"])
+def test_connection_without_credential_closes_1008_without_session_open(conv, no_browser_loop, caplog, frame):
+    caplog.set_level(logging.DEBUG)
+    ws = FakeWs(PLAIN_PATH, [frame])
+    _run(ws)
+
+    assert ws.closed_with is not None and ws.closed_with[0] == 1008
+    assert conv.writes == []
     _assert_sentinel_unlogged(caplog)
