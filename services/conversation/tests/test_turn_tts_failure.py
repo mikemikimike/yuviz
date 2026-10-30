@@ -267,3 +267,65 @@ async def test_a_failed_prewarm_filler_is_not_a_failed_reply_sentence():
 
     assert chunks == []
     assert handler._session("s1").unspoken_sentences == []
+
+
+def _tts_silent_on(marker: str) -> MagicMock:
+    """Returns no audio, without raising, for text containing marker (macOS `say` on a leading '-')."""
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        if marker in text:
+            return
+        yield b"\x00" * 320
+
+    tts.synthesize_stream = _stream
+    return tts
+
+
+async def test_a_sentence_whose_tts_returned_no_audio_without_raising_is_not_stored_as_spoken():
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("weather"), _make_llm(["-5 degrees outside today.", " Anything else?"]),
+        _tts_silent_on("-5 degrees"), transcripts=transcripts,
+    )
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+
+    assert _reply_recorded(transcripts) == "Anything else?"
+    assert handler._get_history("s1")[-1].content == "Anything else?"
+
+
+async def test_empty_audio_chunks_do_not_count_as_audio():
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        yield b""
+        yield b""
+
+    tts.synthesize_stream = _stream
+    handler = _make_handler(_make_stt("hi"), _make_llm(["Hello."]), tts)
+
+    chunks = [c async for c in handler._synthesize_sentence_stream("Hello.", "s1", in_reply=True)]
+
+    assert chunks == []
+    assert handler._session("s1").unspoken_sentences == ["Hello."]
+
+
+async def test_a_reply_that_is_entirely_silent_is_not_added_to_history(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "60000")
+    handler = _make_handler(_make_stt("hi"), _make_llm(["-5 degrees."]), _tts_silent_on("-5"))
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert not any(r.tts_payloads or r.response_text for r in responses)
+    assert [m.role for m in handler._get_history("s1")] == ["system"]
+
+
+async def test_a_silent_cached_phrase_is_not_cached_and_is_not_a_reply_sentence():
+    handler = _make_handler(_make_stt("hi"), _make_llm(["Hello."]), _tts_silent_on("Let me check"))
+
+    chunks = [c async for c in handler._synthesize_sentence_stream("Let me check that.", "s1", cache=True)]
+
+    assert chunks == []
+    assert handler._session("s1").unspoken_sentences == []

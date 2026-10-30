@@ -1983,11 +1983,17 @@ class PipelineConversationHandler:
                 except Exception:
                     log.warning("TTS pin failed session=%s", session_id, exc_info=True)
             async for chunk in tts.synthesize_stream(text, self._sample_rate, **kwargs):
+                if not chunk:
+                    continue    # empty audio is not speech; counting it would store an unspoken sentence
                 got_audio = True
                 if cache:
                     collected.append(chunk)
                 yield chunk
-            complete = True
+            complete = got_audio    # an empty result is a failed attempt, never cached for replay
+            if not got_audio:
+                log.warning("TTS returned no audio chars=%d session=%s", len(text), session_id)
+                if in_reply:
+                    self._session(session_id).unspoken_sentences.append(sentence)
         except Exception:
             log.exception("TTS streaming failed chars=%d session=%s", len(text), session_id)
             if in_reply and not got_audio:
