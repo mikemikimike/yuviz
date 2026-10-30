@@ -40,11 +40,18 @@ PROTOCOL_VERSION = "1.0"
 
 # One refusal text for a live session_id, whichever tenant holds it.
 _SESSION_IN_USE = "session_id already in use"
+_INVALID_SESSION_ID = "invalid session_id"
+_MAX_SESSION_ID_LEN = 128
 # Fixed peer-facing texts: exception strings can carry hosts, ports and DSNs, so they stay in the server log.
 _INTERNAL_MESSAGE = "internal error"
 _REJECTED_MESSAGE = "call rejected"
 
 # UNSPECIFIED is a non-gateway client: webcall, vobiz, tests.
+def _valid_session_id(sid: str) -> bool:
+    """1..128 printable characters, not all whitespace (str.isprintable() rejects NUL and other controls)."""
+    return 0 < len(sid) <= _MAX_SESSION_ID_LEN and sid.isprintable() and bool(sid.strip())
+
+
 _ROUTING_STATUS = {
     pb.ROUTING_STATUS_UNSPECIFIED: RoutingStatus.UNSPECIFIED,
     pb.ROUTING_STATUS_ROUTED:      RoutingStatus.ROUTED,
@@ -141,6 +148,15 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                 grpc.StatusCode.UNIMPLEMENTED,
                 f"Unsupported protocol_version={client_ver!r}; server speaks 1.x",
             )
+            return
+
+        # Refuse an unusable id before anything is keyed by it: an empty id would be one platform-wide
+        # id, NUL/control characters break the call-row write and forge log lines, a huge id is
+        # stored and repeated in every log line. The id is never echoed back or logged.
+        if not _valid_session_id(open_req.session_id):
+            log.warning("Converse: invalid session_id refused (len=%d) tenant=%s",
+                        len(open_req.session_id), open_req.tenant_id)
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, _INVALID_SESSION_ID)
             return
 
         # Per-session state downstream (transcript bookkeeping, STT stream, call row) is keyed by the
