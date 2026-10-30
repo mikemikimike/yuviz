@@ -118,6 +118,10 @@ services:
       # Mailpit offers no TLS; set SMTP_STARTTLS=true for any real provider.
       SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+      PUBLIC_DEMO_AGENT: ${PUBLIC_DEMO_AGENT:-}
+      PUBLIC_DEMO_ORIGINS: ${PUBLIC_DEMO_ORIGINS:-}
+      PUBLIC_DEMO_PER_IP_PER_HOUR: ${PUBLIC_DEMO_PER_IP_PER_HOUR:-}
+      PUBLIC_DEMO_PER_HOUR: ${PUBLIC_DEMO_PER_HOUR:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${CONFIG_PORT:-8000}:8000"
     volumes:

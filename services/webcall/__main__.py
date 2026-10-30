@@ -193,7 +193,7 @@ async def _grpc_to_browser(
 
 
 async def _read_test_credential(ws: ServerConnection) -> str | None:
-    """Waits for the first frame of a test=1 connection, which must be
+    """Waits for the first frame of every connection, which must be
     {"type":"test_credential","credential":"..."}. Returns None for anything
     else. The frame is never logged — it carries the credential, or is
     something that was meant to."""
@@ -221,16 +221,15 @@ async def _handle_connection(ws: ServerConnection) -> None:
         await ws.close(code=1008, reason="missing tenant/agent query params")
         return
 
-    test_credential = ""
-    if params.get("test") == "1":
-        try:
-            credential = await _read_test_credential(ws)
-        except websockets.exceptions.ConnectionClosed:
-            return
-        if credential is None:
-            await ws.close(code=1008, reason="expected test_credential first frame")
-            return
-        test_credential = credential
+    # Every browser session must present a minted, agent-scoped credential: without
+    # one, any reachable client could talk to any tenant's live agent.
+    try:
+        test_credential = await _read_test_credential(ws)
+    except websockets.exceptions.ConnectionClosed:
+        return
+    if test_credential is None:
+        await ws.close(code=1008, reason="expected test_credential first frame")
+        return
 
     # Default to Envoy so calls load-balance across ConvSvc instances, like the Gateway.
     conv_target = os.environ.get("CONVERSATION_SVC_TARGET", "localhost:10000")

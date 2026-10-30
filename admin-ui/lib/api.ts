@@ -362,6 +362,11 @@ export interface AgentUpdate {
 export const listAgents = (tenantSlug: string) => request<Agent[]>(`/tenants/${tenantSlug}/agents`);
 export const getAgent = (tenantSlug: string, agentSlug: string) =>
   request<Agent>(`/tenants/${tenantSlug}/agents/${agentSlug}`);
+export const createTestSession = (tenantSlug: string, agentId: string) =>
+  request<{ credential: string; expires_in: number }>(`/tenants/${tenantSlug}/agents/${agentId}/test-sessions`, {
+    method: "POST",
+    body: JSON.stringify({ channel: "voice" }),
+  });
 export const createAgent = (tenantSlug: string, body: AgentCreate) =>
   request<Agent>(`/tenants/${tenantSlug}/agents`, { method: "POST", body: JSON.stringify(body) });
 export const updateAgent = (tenantSlug: string, agentId: string, body: AgentUpdate) =>
