@@ -83,6 +83,7 @@ function friendlyLanguageError(detail: string): string {
 }
 
 const OWN = "__own__";
+const article = (word: string) => (/^[AEIOU]/i.test(word) ? "an" : "a");
 // Saaras v3 output modes; the server accepts these values only.
 const SARVAM_STT_MODES = [
   { value: "transcribe", label: "Transcribe", hint: "Words as spoken, in each language's own script." },
@@ -592,20 +593,29 @@ export function AgentVoiceSettings({
     if (voiceProvider === OWN || !voiceOption) {
       const list = ownEngine ? inHouseVoices(ownEngine, all ? languages : [lang]) : [];
       const sameEngine = current?.engine === ownEngine;
+      // A voice set up earlier with the workspace's own cloud key: still in use, shown until replaced.
+      const legacy = current && !managedOptionId(current) && !IN_HOUSE_TTS[current.engine] ? current : null;
       picker = !ownEngine ? (
         <div className="form-hint" style={{ marginTop: 0 }}>Pick a voice service above.</div>
       ) : list.length === 0 ? (
         <div className="voice-missing"><AlertCircle size={13} /><span>{IN_HOUSE_TTS[ownEngine]} has no {label} voices. Pick another model or voice service.</span></div>
       ) : (
+        <>
+        {legacy && (
+          <div className="ai-shared-voice" style={{ marginBottom: 8 }}>
+            <Check size={13} /> Now using {legacy.name}, set up with this workspace&apos;s own key. Pick a voice below to switch.
+          </div>
+        )}
         <VoicePickerWithPreview
           voices={list}
           currentVoiceId={sameEngine ? current?.voice : null}
           currentVoiceLabel={null}
-          placeholder={`Choose a ${label} voice…`}
+          placeholder={`Choose ${article(label)} ${label} voice…`}
           canPreview={(id) => !!sampleOf(ownEngine, id)}
           preview={(id) => fetch(sampleOf(ownEngine, id)!).then((r) => r.blob())}
           onPick={(id, name) => void pickInHouseVoice(lang, ownEngine, id, name)}
         />
+        </>
       );
     } else {
       const lists = (all ? languages : [lang]).map((l) => voicesOf(voiceOption, l));
@@ -623,7 +633,7 @@ export function AgentVoiceSettings({
           voices={list}
           currentVoiceId={sameOption ? current?.voice : null}
           currentVoiceLabel={sameOption ? current?.name : null}
-          placeholder={workspaceVoice ? `Workspace default voice (${workspaceVoice.name})` : `Choose a ${label} voice…`}
+          placeholder={workspaceVoice ? `Workspace default voice (${workspaceVoice.name})` : `Choose ${article(label)} ${label} voice…`}
           canPreview={(id) => voiceOption.engine !== "kokoro" || !!kokoroSample(id)}
           preview={(id) => voiceOption.engine === "kokoro"
             ? fetch(kokoroSample(id)!).then((r) => r.blob())
@@ -639,7 +649,7 @@ export function AgentVoiceSettings({
         {!current && !workspaceVoice && !shared && (
           <div className="voice-missing">
             <AlertCircle size={13} />
-            <span>{isPrimary ? `Voice needed — pick a ${label} voice.` : `Voice needed — the agent can't be saved until ${label} has a voice.`}</span>
+            <span>{isPrimary ? `Voice needed — pick ${article(label)} ${label} voice.` : `Voice needed — the agent can't be saved until ${label} has a voice.`}</span>
           </div>
         )}
       </div>

@@ -99,6 +99,7 @@ class AgentAssistThrottle:
 
     def __init__(self) -> None:
         self.mint = FixedWindowCounter(limit=20, window_seconds=60)
+        self.voice = FixedWindowCounter(limit=30, window_seconds=60)
         self.turn = FixedWindowCounter(limit=60, window_seconds=60)
         self.revise = FixedWindowCounter(limit=20, window_seconds=3600)
 
@@ -117,6 +118,9 @@ class AgentAssistThrottle:
 
     def check_revise(self, tenant_id: str) -> None:
         self._check(self.revise, tenant_id)
+
+    def check_voice(self, tenant_id: str) -> None:
+        self._check(self.voice, tenant_id)
 
 
 def _too_many_requests(detail: str, retry_after: int) -> HTTPException:

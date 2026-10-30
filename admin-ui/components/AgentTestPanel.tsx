@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { Headphones, MessageSquare, Mic, MicOff, Phone, Send, type LucideIcon } from "lucide-react";
 import { ApiError, ChatTestSession, sendChatTest, startChatTest } from "@/lib/api";
 import { useWebCall } from "@/lib/useWebCall";
+import { VoiceInputButton } from "./VoiceInputButton";
 
 const STATUS_TEXT: Record<string, string> = {
   connecting: "Connecting…",
@@ -25,19 +26,32 @@ export const MODES: { key: Mode; label: string; icon: LucideIcon; soon?: string 
   { key: "chat", label: "Chat", icon: MessageSquare },
 ];
 
-export function AgentTestPanel({ tenantSlug, agentSlug, agentId, agentName, savePending, blockedReason = null }: {
+export function AgentTestPanel({
+  tenantSlug, agentSlug, agentId, agentName, savePending, blockedReason = null, voiceReady = true, chatReady = true,
+}: {
   tenantSlug: string;
   agentSlug: string;
   agentId: string;
   agentName: string;
+  /** False when a hearing, thinking or voice model the call needs has no working key. */
+  voiceReady?: boolean;
+  chatReady?: boolean;
   /** A test must run the latest edits, so starting waits for autosave. */
   savePending: boolean;
   /** Why unsaved edits can't be saved yet (held on a live agent, or a required field is empty). */
   blockedReason?: string | null;
 }) {
   const call = useWebCall(tenantSlug, agentSlug);
-  const [mode, setMode] = useState<Mode>("browser");
+  const [mode, setMode] = useState<Mode>("chat");
   const [chatStatus, setChatStatus] = useState<"idle" | "live" | "ended">("idle");
+  const [voiceNotice, setVoiceNotice] = useState(false);
+
+  // No working voice services: say so out loud (a recording, since no voice provider can) and point to chat.
+  const startCall = () => {
+    if (voiceReady) { setVoiceNotice(false); call.start(); return; }
+    setVoiceNotice(true);
+    new Audio("/sounds/voice-test-unavailable.m4a").play().catch(() => {});
+  };
   const logRef = useRef<HTMLDivElement | null>(null);
   const live = (call.state !== "idle" && call.state !== "ended" && call.state !== "error") || chatStatus === "live";
   const ended = !live && (mode === "chat" ? chatStatus === "ended" : call.state === "ended");
@@ -107,7 +121,18 @@ export function AgentTestPanel({ tenantSlug, agentSlug, agentId, agentName, save
       ) : (
         <>
           <div className="ed-test-log" ref={logRef}>
-            {call.transcript.length === 0 ? (
+            {voiceNotice && !live ? (
+              <div className="ed-test-empty ed-test-unavailable">
+                <Headphones size={26} />
+                Voice services for this agent aren&apos;t set up yet, so a voice test can&apos;t run.
+                {chatReady ? " Use chat to test what the agent says." : " Set up its hearing, thinking and voice models in Settings."}
+                {chatReady && (
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => { setVoiceNotice(false); setMode("chat"); }}>
+                    <MessageSquare size={13} /> Use chat
+                  </button>
+                )}
+              </div>
+            ) : call.transcript.length === 0 ? (
               <div className="ed-test-empty">
                 <Headphones size={26} />
                 Talk to your agent from this browser. Changes are saved before every test.
@@ -134,7 +159,7 @@ export function AgentTestPanel({ tenantSlug, agentSlug, agentId, agentName, save
           {call.errorMsg && <div className="error-banner">{call.errorMsg}</div>}
 
           {!live ? (
-            <button className="btn btn-primary btn-sm ed-test-btn" onClick={call.start} disabled={savePending || !!blockedReason}>
+            <button className="btn btn-primary btn-sm ed-test-btn" onClick={startCall} disabled={savePending || !!blockedReason}>
               {blockedReason ?? (savePending ? "Saving your changes…" : "Start test call")}
             </button>
           ) : (
@@ -266,6 +291,13 @@ function ChatTest({ tenantSlug, agentId, savePending, blockedReason, onStatus }:
               onChange={(e) => setDraft(e.target.value)}
               disabled={busy}
               autoFocus
+            />
+            <VoiceInputButton
+              tenantSlug={tenantSlug}
+              agentId={agentId}
+              disabled={busy}
+              onText={(text) => setDraft((d) => (d.trim() ? `${d.trim()} ${text}` : text))}
+              onError={setError}
             />
             <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !draft.trim()} aria-label="Send">
               <Send size={14} />

@@ -27,6 +27,7 @@ import {
   AgentVoiceSettings, agentLocalModels, isLanguageError, multilingualPayload, notReadyModels,
 } from "@/components/AgentVoiceSettings";
 import { useLocalModels } from "@/lib/useLocalModels";
+import { PromptReview } from "@/components/PromptReview";
 import { OTHER, languageLabel, languagesWithoutVoice } from "@/lib/engineCatalog";
 import { buildSystemPrompt } from "@/lib/systemPromptBuilder";
 import { templateByKey } from "@/lib/agentTemplates";
@@ -118,6 +119,7 @@ export default function NewAgentPage() {
   // Step 5 — Review
   const [greeting, setGreeting] = useState(template?.greeting ?? "Hello! How can I help you today?");
   const [systemPrompt, setSystemPrompt] = useState("");
+  const [promptReview, setPromptReview] = useState<{ before: string; after: string } | null>(null);
   const [promptEdited, setPromptEdited] = useState(false);
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
@@ -339,9 +341,12 @@ export default function NewAgentPage() {
         fallback_response: fallbackResponse,
         llm_config_id: llmId,
       });
-       
-    setSystemPrompt(system_prompt);
-      setPromptEdited(true);
+      // Text already in the box (typed or generated before) is reviewed, not silently replaced.
+      if (systemPrompt.trim() && promptEdited) setPromptReview({ before: systemPrompt, after: system_prompt });
+      else {
+        setSystemPrompt(system_prompt);
+        setPromptEdited(true);
+      }
     } catch (e) {
       setGenerateError(e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -772,6 +777,16 @@ export default function NewAgentPage() {
                   setPromptEdited(true);
                 }}
               />
+              {promptReview && (
+                <PromptReview
+                  key={promptReview.after}
+                  before={promptReview.before}
+                  after={promptReview.after}
+                  title="Review the generated instructions"
+                  onDiscard={() => setPromptReview(null)}
+                  onAccept={(prompt) => { setSystemPrompt(prompt); setPromptEdited(true); setPromptReview(null); }}
+                />
+              )}
               {promptEdited && (
                 <div className="form-hint">
                   You edited this, so it no longer updates from earlier steps.{" "}

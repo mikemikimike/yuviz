@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import {
   Agent, AgentUpdate, ApiError, Call, LanguageMode, PhoneNumber, ProviderConfig, createAgent, deleteAgent, getAgent,
-  getCurrentUser, getLiveCalls, listCalls, listPhoneNumbers, listProviders, listTenants, rewritePrompt,
+  getCurrentUser, getLiveCalls, listCalls, listPhoneNumbers, listProviders, listTenants, managedOptionId, rewritePrompt,
   undoPrompt, updateAgent,
 } from "@/lib/api";
 import { KnowledgeBasePanel } from "@/components/KnowledgeBasePanel";
@@ -24,6 +24,8 @@ import {
 } from "@/components/AgentVoiceSettings";
 import { useAiCatalog } from "@/lib/useAiCatalog";
 import { AgentTestPanel } from "@/components/AgentTestPanel";
+import { PromptReview } from "@/components/PromptReview";
+import { VoiceInputButton } from "@/components/VoiceInputButton";
 import { MAX_LANGUAGES, keptGreetings, languageLabel, languagesWithoutVoice } from "@/lib/engineCatalog";
 import { deriveLanguageDraft } from "@/lib/agentDraft";
 import { useLocalModels } from "@/lib/useLocalModels";
@@ -119,6 +121,8 @@ export default function AgentDetailPage() {
   const [rewriteError, setRewriteError] = useState<string | null>(null);
   // Prompt before the last "Ask AI" rewrite, for a one-step local undo.
   const [beforeRewrite, setBeforeRewrite] = useState<string | null>(null);
+  // An AI rewrite waiting for review; the instructions don't change until it is accepted.
+  const [review, setReview] = useState<{ before: string; after: string } | null>(null);
 
   const [menuOpen, setMenuOpen] = useState(false);
   const { triggerRef: menuTriggerRef, menuRef, onMenuKey } = useMenuKeys(menuOpen, () => setMenuOpen(false));
@@ -141,6 +145,13 @@ export default function AgentDetailPage() {
   );
   const localModels = useLocalModels(selectedModels);
   const { catalog: aiCatalog } = useAiCatalog(agent?.tenant_id);
+  // A platform model whose key isn't in the platform .env can't run; a workspace's own provider is taken as set up.
+  const providerReady = (id: string | null | undefined) => {
+    const p = providers.find((x) => x.id === id);
+    if (!p) return false;
+    const option = aiCatalog?.options.find((o) => o.id === managedOptionId(p));
+    return option ? option.available : true;
+  };
   const modelsNotReady = notReadyModels(selectedModels, localModels);
 
   useEffect(() => {
@@ -305,9 +316,7 @@ export default function AgentDetailPage() {
     try {
       const current = form.system_prompt ?? "";
       const { after } = await rewritePrompt(tenantSlug, agent.id, { prompt: current, instruction: askText.trim() });
-      setBeforeRewrite(current);
-      setForm((f) => ({ ...f, system_prompt: after }));
-      setAskText("");
+      setReview({ before: current, after });
     } catch (e) {
       const detail = e instanceof ApiError ? e.detail : "";
       setRewriteError(
@@ -619,13 +628,35 @@ export default function AgentDetailPage() {
                     placeholder={'Ask AI: "Make it more polite, also speak Hindi"'}
                     onChange={(e) => setAskText(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleAskAi()}
-                    disabled={rewriting}
+                    disabled={rewriting || !!review}
                   />
-                  <button className="btn btn-primary btn-sm" onClick={handleAskAi} disabled={rewriting || !askText.trim()}>
+                  <VoiceInputButton
+                    tenantSlug={tenantSlug}
+                    agentId={agent.id}
+                    disabled={rewriting || !!review}
+                    onText={(text) => setAskText((t) => (t.trim() ? `${t.trim()} ${text}` : text))}
+                    onError={setRewriteError}
+                  />
+                  <button className="btn btn-primary btn-sm" onClick={handleAskAi} disabled={rewriting || !askText.trim() || !!review}>
                     {rewriting ? "Rewriting…" : "Rewrite"}
                   </button>
                 </div>
                 {rewriteError && <div className="error-banner">{rewriteError}</div>}
+                {review && (
+                  <PromptReview
+                    key={review.after}
+                    before={review.before}
+                    after={review.after}
+                    title={`Rewrite: “${askText.trim() || "AI suggestion"}”`}
+                    onDiscard={() => setReview(null)}
+                    onAccept={(prompt) => {
+                      setBeforeRewrite(review.before);
+                      setForm((f) => ({ ...f, system_prompt: prompt }));
+                      setReview(null);
+                      setAskText("");
+                    }}
+                  />
+                )}
 
                 <div className="form-group">
                   <label className="form-label">Opening line</label>
@@ -654,6 +685,8 @@ export default function AgentDetailPage() {
                     placeholder={"Who you are: You are the friendly receptionist for Acme Dental.\nWhat you do: Book, move or cancel appointments.\nWhen you don't know: Offer to take a message.\nNever: Give medical advice."}
                     onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
                     onBlur={saveHeld}
+                    readOnly={!!review}
+                    title={review ? "Accept or discard the rewrite above first" : undefined}
                   />
                   <div className="form-hint">
                     Say who the agent is, what it helps with, and what it must never do. Changes also update its conversation steps.
@@ -987,6 +1020,9 @@ export default function AgentDetailPage() {
             agentSlug={agentSlug}
             agentId={agent.id}
             agentName={form.name?.trim() || agent.name}
+            voiceReady={!aiCatalog || (providerReady(form.stt_config_id) && providerReady(form.llm_config_id)
+              && providerReady(form.tts_config_id ?? defaultTtsId))}
+            chatReady={!aiCatalog || providerReady(form.llm_config_id)}
             savePending={saving || (canSave && !held)}
             blockedReason={
               modelsNotReady.some((m) => m.status === "downloading") ? "Wait for the model download to finish to test"

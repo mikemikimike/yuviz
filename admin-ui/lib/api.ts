@@ -260,6 +260,26 @@ export const previewVoice = async (providerId: string, text: string, voiceId?: s
   return res.blob();
 };
 
+// A short recorded clip transcribed by the agent's own hearing model (console voice typing).
+export const transcribeVoiceInput = async (tenantSlug: string, agentId: string, clip: Blob): Promise<string> => {
+  const token = getToken();
+  const res = await fetch(`${BASE_URL}/tenants/${tenantSlug}/agents/${agentId}/voice-input`, {
+    method: "POST",
+    headers: { "Content-Type": clip.type || "audio/webm", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: clip,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      detail = ((await res.json())?.detail as string) || detail;
+    } catch {
+      // not JSON — keep statusText
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return ((await res.json()) as { text: string }).text;
+};
+
 // A typed test conversation with an agent; each turn runs the agent's instructions on its model.
 export interface ChatTestSession { credential: string; session_id: string; greeting: string; expires_in: number }
 

@@ -49,7 +49,9 @@ export function workAppCards(providers: OAuthProvider[], connections: OAuthConne
     if (catalog?.presetKey) {
       const rows = apis.filter((a) => a.preset_key === catalog.presetKey);
       return { id: entry.key, label: entry.label, description: entry.description, icon: catalog.icon, category: catalog.category,
-        connected: rows.length > 0, reconnect: false, available: !!preset && !catalog.comingSoon,
+        connected: rows.length > 0, reconnect: false,
+        // A preset that signs in to a provider can't be turned on until the platform has that provider's login.
+        available: !!preset && !catalog.comingSoon && (!preset.provider || providers.some((p) => p.key === preset.provider)),
         comingSoon: catalog.comingSoon, preset, count: rows.length };
     }
     const provider = providers.find((p) => p.key === entry.key);
