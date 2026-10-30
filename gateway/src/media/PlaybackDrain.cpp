@@ -54,8 +54,10 @@ void PlaybackDrain::loop() noexcept {
                 std::this_thread::sleep_until(next_playout - kLead);
 
             // Empty payload = end-of-response marker; nothing to send.
-            if (!frame->payload.empty() && connection_.is_open())
+            if (!frame->payload.empty() && connection_.is_open()) {
                 connection_.send_binary(frame->payload.data(), frame->payload.size());
+                sent_bytes_.fetch_add(frame->payload.size(), std::memory_order_release);
+            }
 
             next_playout += std::chrono::microseconds{
                 static_cast<int64_t>(frame->duration_ms() * 1000.0)};

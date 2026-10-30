@@ -2,8 +2,8 @@
  "slug": "transcript-turn-accuracy",
  "base": "a841bf1c8fd60f13ab8b5d8672c2db7971a0187e",
  "base_branch": "redesign",
- "stage": "ship",
- "status": "gate_ship",
+ "stage": "done",
+ "status": "shipped",
  "started_at": "2026-10-29T00:37:34Z",
  "stages": {
   "security_design": {
@@ -275,5 +275,7 @@
  },
  "lessons": [
   "none: 05-review-backend.md is GREEN with only two minor findings (pipeline.py:1309 nested apology aclose, pipeline.py:1133 merge risk); no blocking, high or critical items, so .sdlc/lessons.md is unchanged."
- ]
+ ],
+ "pr": "https://github.com/yuviz-ai/yuviz/pull/232",
+ "ci": "green"
 }

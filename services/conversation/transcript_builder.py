@@ -205,11 +205,12 @@ class TranscriptBuilder:
         *,
         tool_calls:        list[dict[str, str]] | None = None,
         count_barge_in:    bool | None = None,
-    ) -> None:
+    ) -> int | None:
         """count_barge_in=None counts a barge-in exactly when the turn was interrupted; a turn cut
-        short by hang-up passes False. tool_calls carries only name and status, never arguments."""
+        short by hang-up passes False. tool_calls carries only name and status, never arguments.
+        Returns the turn number, or None when there is no pool to write to."""
         if self._pool is None:
-            return
+            return None
         # Before the turn number is taken: a NUL would fail the insert and leave a gap.
         caller_text = _strip_nul(caller_text)
         ai_response = _strip_nul(ai_response)
@@ -224,6 +225,25 @@ class TranscriptBuilder:
         self._spawn(session_id, self._record_turn(
             session_id, self._tenant_slugs.get(session_id), turn_number, caller_text,
             caller_confidence, ai_response, interrupted, latency or TurnLatency(), tool_calls_json,
+        ))
+        return turn_number
+
+    def correct_turn_reply(
+        self, session_id: str, turn_number: int, text: str, *,
+        newly_interrupted: bool = False, count_barge_in: bool = True,
+    ) -> None:
+        """Replace a recorded turn's ai_response, e.g. with the part the caller actually heard.
+        newly_interrupted: the turn was recorded as complete but the caller cut it off; it is marked
+        interrupted, and counted as the barge-in it is unless count_barge_in is False (the same cut already
+        counted for another turn). Queued behind the turn's INSERT. A no-op once the call
+        has ended."""
+        tenant_slug = self._tenant_slugs.get(session_id)
+        if self._pool is None or tenant_slug is None:
+            return
+        if newly_interrupted and count_barge_in:
+            self._barge_in_counts[session_id] = self._barge_in_counts.get(session_id, 0) + 1
+        self._spawn(session_id, self._correct_turn_reply(
+            session_id, tenant_slug, turn_number, _strip_nul(text), newly_interrupted,
         ))
 
     def record_summary(self, session_id: str, summary: str) -> None:
@@ -437,6 +457,24 @@ class TranscriptBuilder:
         except Exception:
             log.exception(
                 "TranscriptBuilder: record_turn failed session=%s turn=%d", session_id, turn_number,
+            )
+
+    async def _correct_turn_reply(
+        self, session_id: str, tenant_slug: str, turn_number: int, text: str, newly_interrupted: bool,
+    ) -> None:
+        try:
+            async with tenant_conn(
+                self._pool, explicit_tenant=tenant_slug, reason="conversation-session-write",
+            ) as conn:
+                await conn.execute(
+                    "UPDATE transcript_entries SET ai_response = $3, interrupted = interrupted OR $5 "
+                    "WHERE session_id = $1 AND turn_number = $2 "
+                    "AND EXISTS (SELECT 1 FROM calls WHERE session_id = $1 AND tenant_id = $4)",
+                    session_id, turn_number, text, tenant_slug, newly_interrupted,
+                )
+        except Exception:
+            log.exception(
+                "TranscriptBuilder: correct_turn_reply failed session=%s turn=%d", session_id, turn_number,
             )
 
     async def _end_call(

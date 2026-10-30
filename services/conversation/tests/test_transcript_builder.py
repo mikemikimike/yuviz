@@ -5,6 +5,7 @@ import json
 import os
 import uuid
 from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
@@ -365,9 +366,16 @@ async def test_reconcile_sweeps_leave_no_open_transaction_between_iterations():
         await builder.reconcile_stale_calls()
         await builder.reconcile_dead_nodes(stale_after_seconds=45)
         await builder.reconcile_inactive_calls(inactive_after_seconds=45)
-        idle_in_txn = await pool.fetch(
-            "SELECT pid, query FROM pg_stat_activity WHERE state = 'idle in transaction'",
-        )
+        # Only this pool's backends: other suites on the same server may legitimately hold transactions.
+        conns = await asyncio.gather(*(pool.acquire() for _ in range(pool.get_size())))
+        try:
+            pids = [await conn.fetchval("SELECT pg_backend_pid()") for conn in conns]
+            idle_in_txn = await conns[0].fetch(
+                "SELECT pid, query FROM pg_stat_activity WHERE state = 'idle in transaction' AND pid = ANY($1)",
+                pids,
+            )
+        finally:
+            await asyncio.gather(*(pool.release(conn) for conn in conns))
         assert idle_in_txn == []
 
     await builder.close()
@@ -429,6 +437,82 @@ async def test_record_live_stage_serializes_per_session_a_later_call_is_never_ov
 
     await pool.execute("DELETE FROM calls WHERE session_id = $1", session_id)
     await builder.close()
+
+
+# ── correct_turn_reply: the heard text replaces a turn's sent-based reply ──
+
+async def test_correct_turn_reply_updates_the_row_after_its_insert_on_the_same_chain():
+    builder = await TranscriptBuilder.connect(os.environ["POSTGRES_DSN"])
+    pool = builder._pool
+    session_id = f"test-correct-reply-{uuid.uuid4().hex[:8]}"
+    builder.begin_call(session_id, "default", "call-1")
+
+    turn_number = builder.record_turn(session_id, "hello", 0.9, "Sentence one.", True)
+    builder.correct_turn_reply(session_id, turn_number, "Sentence")
+    await builder._chains[session_id]
+
+    assert turn_number == 1
+    assert await pool.fetchval(
+        "SELECT ai_response FROM transcript_entries WHERE session_id = $1 AND turn_number = $2",
+        session_id, turn_number,
+    ) == "Sentence"
+
+    await pool.execute("DELETE FROM transcript_entries WHERE session_id = $1", session_id)
+    await pool.execute("DELETE FROM calls WHERE session_id = $1", session_id)
+    await builder.close()
+
+
+async def test_correct_turn_reply_update_is_scoped_to_the_calls_tenant(monkeypatch):
+    # RLS is inert under the superuser DSN, so assert the statement carries its own tenant predicate.
+    conn = AsyncMock()
+
+    @asynccontextmanager
+    async def fake_tenant_conn(pool, *, explicit_tenant, reason):
+        assert explicit_tenant == "acme"
+        yield conn
+
+    monkeypatch.setattr(transcript_builder, "tenant_conn", fake_tenant_conn)
+    builder = TranscriptBuilder(pool=object())
+    builder._tenant_slugs["s1"] = "acme"
+
+    builder.correct_turn_reply("s1", 3, "Sentence\x00", newly_interrupted=True)
+    await builder._chains["s1"]
+
+    sql, *args = conn.execute.call_args.args
+    assert "FROM calls WHERE session_id = $1 AND tenant_id = $4" in sql
+    assert "interrupted = interrupted OR $5" in sql
+    assert args == ["s1", 3, "Sentence", "acme", True]   # NUL stripped
+    assert builder._barge_in_counts["s1"] == 1
+
+
+async def test_correct_turn_reply_writes_nothing_after_end_call():
+    builder = await TranscriptBuilder.connect(os.environ["POSTGRES_DSN"])
+    pool = builder._pool
+    session_id = f"test-correct-reply-ended-{uuid.uuid4().hex[:8]}"
+    builder.begin_call(session_id, "default", "call-1")
+    turn_number = builder.record_turn(session_id, "hello", 0.9, "Sentence one.", True)
+    builder.end_call(session_id, "stream_ended", score_sentiment=False)
+    chain = builder._chains[session_id]
+
+    builder.correct_turn_reply(session_id, turn_number, "too late")
+
+    assert builder._chains[session_id] is chain   # nothing was queued behind the end
+    await chain
+    assert await pool.fetchval(
+        "SELECT ai_response FROM transcript_entries WHERE session_id = $1", session_id,
+    ) == "Sentence one."
+
+    await pool.execute("DELETE FROM transcript_entries WHERE session_id = $1", session_id)
+    await pool.execute("DELETE FROM calls WHERE session_id = $1", session_id)
+    await builder.close()
+
+
+async def test_record_turn_returns_none_and_correction_is_a_noop_without_a_pool():
+    builder = TranscriptBuilder(pool=None)
+
+    assert builder.record_turn("s", "hello", 0.9, "hi", False) is None
+    builder.correct_turn_reply("s", 1, "hi")
+    assert builder._chains == {}
 
 
 # ── sentiment scoring at end_call ─────────────────────────────────────────

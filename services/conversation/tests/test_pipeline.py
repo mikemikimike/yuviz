@@ -41,6 +41,8 @@ from ..pipeline import (
     _FALLBACK_GOODBYE,
     _TOOL_CALL_FILLER_MIN_GAP_S,
     _TRANSFER_FAILED_FALLBACK,
+    _TurnProgress,
+    _heard_reply,
 )
 
 _TOOL_CALL_FILLERS = {t for t, _ in _TOOL_FILLERS}
@@ -4149,3 +4151,45 @@ async def test_hang_up_during_the_fallback_apology_stores_the_fallback_text_the_
 
     transcripts.record_turn.assert_called_once()
     assert transcripts.record_turn.call_args.args[3].strip() == _TRANSFER_FAILED_FALLBACK
+
+
+# ── _heard_reply: the sent ledger turned back into what the caller heard ──────────────────────────
+
+_LEDGER = [(100, "Hello there."), (300, "How can I help you today?")]
+
+
+def test_heard_reply_keeps_whole_pieces_the_played_bytes_cover():
+    assert _heard_reply(_LEDGER, 100) == "Hello there."
+    assert _heard_reply(_LEDGER, 300) == "Hello there. How can I help you today?"
+
+
+def test_heard_reply_cuts_the_piece_in_progress_by_word_share():
+    # 100 of the second piece's 200 bytes: half of its six words.
+    assert _heard_reply(_LEDGER, 200) == "Hello there. How can I"
+    # A cut before the piece's first word is due drops it, so no empty piece or stray space is left.
+    assert _heard_reply(_LEDGER, 120) == "Hello there."
+
+
+def test_heard_reply_skips_filler_audio_when_counting_offsets():
+    ledger = [(100, ""), (300, "How can I help you today?")]
+    assert _heard_reply(ledger, 100) == ""
+    assert _heard_reply(ledger, 200) == "How can I"
+
+
+def test_heard_reply_with_no_bytes_played_is_empty():
+    assert _heard_reply(_LEDGER, 0) == ""
+
+
+def test_heard_reply_with_bytes_past_the_end_is_the_whole_reply():
+    assert _heard_reply(_LEDGER, 10_000) == "Hello there. How can I help you today?"
+
+
+def test_turn_progress_counts_further_chunks_of_a_piece_into_that_piece():
+    progress = _TurnProgress()
+    progress.mark_sent("", 100)               # filler
+    progress.mark_sent("One two three four.", 100)
+    progress.mark_sent_more(100)
+    progress.mark_sent("Next.", 50)
+    assert progress.sent == [(100, ""), (300, "One two three four."), (350, "Next.")]
+    assert progress.spoken == ["One two three four.", "Next."]
+    assert _heard_reply(progress.sent, 200) == "One two"

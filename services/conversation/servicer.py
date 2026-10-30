@@ -499,7 +499,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     "Converse: playback_finished interrupted=%s (in-pipeline) session=%s",
                                     pf.interrupted, sid,
                                 )
-                                session.on_playback_finished(pf.interrupted)
+                                session.on_playback_finished(
+                                    pf.interrupted, pf.played_bytes if pf.HasField("played_bytes") else None,
+                                )
                                 if pending_transfer is not None:
                                     tr, pending_transfer = pending_transfer, None
                                     out = _consume_pending_transfer(tr, pf.interrupted, sid)
@@ -695,7 +697,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     pf = msg.playback_finished
                     log.info("Converse: playback_finished interrupted=%s session=%s",
                              pf.interrupted, sid)
-                    session.on_playback_finished(pf.interrupted)
+                    session.on_playback_finished(
+                        pf.interrupted, pf.played_bytes if pf.HasField("played_bytes") else None,
+                    )
                     if pending_transfer is not None:
                         tr, pending_transfer = pending_transfer, None
                         out = _consume_pending_transfer(tr, pf.interrupted, sid)

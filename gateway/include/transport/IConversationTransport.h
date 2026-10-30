@@ -3,7 +3,9 @@
 #include "common/AudioFrame.h"
 #include "session/SessionContext.h"
 
+#include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 
 namespace voiceai {
@@ -64,9 +66,11 @@ public:
     // Barge-in.
     virtual void cancel_generation(const std::string& session_id) = 0;
 
-    // interrupted=true when cancelled by barge-in.
+    // interrupted=true when cancelled by barge-in; played_bytes is then the
+    // reply audio already sent to the call (nullopt when unknown).
     virtual void send_playback_finished(const std::string& session_id,
-                                        bool interrupted) = 0;
+                                        bool interrupted,
+                                        std::optional<uint64_t> played_bytes = std::nullopt) = 0;
 
     // Sent once per utterance, after all its AudioChunks.
     virtual void send_speech_ended(const std::string& session_id,

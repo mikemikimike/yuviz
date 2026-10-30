@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from functools import partial
 from datetime import datetime, timezone
@@ -90,6 +91,14 @@ class _SessionState:
     confirmed_booking_slot:          str | None = None
     # Sentences of this turn's reply whose TTS produced no audio, so the transcript and history leave them out.
     unspoken_sentences:              list[str] = field(default_factory=list)
+    # A barge-in's PlaybackFinished reports how many bytes of the reply the caller was sent. It can land
+    # before a cancelled turn is recorded (heard_bytes) or after any recorded turn that sent audio
+    # (pending_heard: turn number, ledger, whether the row is already interrupted). One entry per turn of the
+    # reply the gateway is still playing: a refused-transfer apology adds a second to its main reply's.
+    heard_bytes:                     int | None = None
+    pending_heard:                   "list[tuple[int, list[tuple[int, str]], bool]]" = field(default_factory=list)
+    # A report already counted this cut as a barge-in, so a cancelled apology recorded after it must not.
+    cut_counted:                     bool = False
     # Multilingual agents only; None = single-language (fixed language).
     language:                        "LanguageTracker | None" = None
     unchecked_languages_logged:      set = field(default_factory=set)
@@ -105,8 +114,24 @@ class _TurnProgress:
     reply_tokens:   list[str] = field(default_factory=list)
     # Directive-free pieces of the reply whose audio was handed to the caller, each ending in a space.
     spoken:         list[str] = field(default_factory=list)
+    # The same audio as a byte ledger: (cumulative end byte, piece text), "" for a filler, whose audio
+    # shifts the offsets. Lets a barge-in report of bytes played be turned back into text.
+    sent:           list[tuple[int, str]] = field(default_factory=list)
+    sent_bytes:     int = 0
     tool_calls:     list[dict[str, str]] = field(default_factory=list)
     recorded:       bool = False
+
+    def mark_sent(self, piece: str, nbytes: int) -> None:
+        """The servicer sent the first chunk of *piece* (a filler passes "")."""
+        self.sent_bytes += nbytes
+        self.sent.append((self.sent_bytes, piece))
+        if piece:
+            self.spoken.append(piece)
+
+    def mark_sent_more(self, nbytes: int) -> None:
+        """The servicer sent a further chunk of the piece last marked."""
+        self.sent_bytes += nbytes
+        self.sent[-1] = (self.sent_bytes, self.sent[-1][1])
 
 
 # Split after ! or ?, and after . unless it follows a title abbreviation or middle initial.
@@ -282,6 +307,14 @@ def _last_sentence(reply_text: str) -> str:
     return next((p for p in reversed(sentences) if p), "")
 
 
+def _join_sentences(sentences: list[str]) -> str:
+    """Rejoin _SENTENCE_RE pieces: no space after a CJK sentence end, one space after anything else."""
+    joined = ""
+    for sentence in filter(None, sentences):
+        joined += sentence if not joined or joined.endswith(("。", "！", "？")) else " " + sentence
+    return joined
+
+
 def _spoken_reply(raw_tokens: list[str], unspoken: list[str]) -> str:
     """The reply text minus directives and the sentences whose TTS produced no audio."""
     text = DirectiveParser.parse("".join(raw_tokens)).clean_text.strip()
@@ -293,10 +326,27 @@ def _spoken_reply(raw_tokens: list[str], unspoken: list[str]) -> str:
         sentences = [s.strip() for s in _SENTENCE_RE.split(text)]
         if failed in sentences:
             sentences.remove(failed)
-            text = " ".join(sentences)
+            text = _join_sentences(sentences)
         else:
             text = text.replace(failed, "", 1)
     return " ".join(text.split())
+
+
+def _heard_reply(sent: list[tuple[int, str]], played_bytes: int) -> str:
+    """The reply text for the first *played_bytes* of audio sent. A piece runs from its first chunk to the
+    next piece's; the one the cut falls inside keeps the share of its words that was played."""
+    heard: list[str] = []
+    start = 0
+    for end, piece in sent:
+        if played_bytes >= end:
+            heard.append(piece)
+        else:
+            if played_bytes > start:
+                words = piece.split()
+                heard.append(" ".join(words[:len(words) * (played_bytes - start) // (end - start)]))
+            break
+        start = end
+    return _join_sentences(heard)
 
 
 def _end_call_rejection(reply_text: str, caller_text: str, language: str | None) -> str | None:
@@ -906,7 +956,7 @@ class PipelineConversationHandler:
                     and session_id in self._sessions):
                 self._transcripts.record_turn(
                     session_id, progress.stt_text, progress.stt_confidence,
-                    _spoken_reply(progress.spoken, self._session(session_id).unspoken_sentences), True,
+                    _spoken_reply([_join_sentences(progress.spoken)], self._session(session_id).unspoken_sentences), True,
                     tool_calls=progress.tool_calls, count_barge_in=False,
                 )
             raise
@@ -927,6 +977,7 @@ class PipelineConversationHandler:
         cancel_event = asyncio.Event()
         self._session(session_id).cancelled = cancel_event
         self._session(session_id).unspoken_sentences.clear()
+        self._reset_heard(session_id)
 
         # Free the shared call LLM before this turn's generate — a prior
         # turn's extract/summarize would otherwise queue behind Ollama.
@@ -1130,7 +1181,10 @@ class PipelineConversationHandler:
                     # before sending is not stored as spoken. Pieces still queued are not here either.
                     yield HandlerResponse(
                         tts_payloads=[tts_audio], filler=is_filler,
-                        on_sent=partial(progress.spoken.append, f"{spoken_piece} ") if spoken_piece else None,
+                        on_sent=(
+                            partial(progress.mark_sent, spoken_piece, len(tts_audio))
+                            if spoken_piece or is_filler else partial(progress.mark_sent_more, len(tts_audio))
+                        ),
                     )
                 if cancel_event.is_set():
                     break
@@ -1156,7 +1210,7 @@ class PipelineConversationHandler:
         assistant_text = _spoken_reply(full_response, unspoken)
         cancelled = cancel_event.is_set()
         # A cut-off reply is stored as far as it was spoken, not as far as the model wrote.
-        stored_reply = _spoken_reply(progress.spoken, unspoken) if cancelled else assistant_text
+        stored_reply = self._cancelled_reply(session_id, progress) if cancelled else assistant_text
 
         # Models sometimes claim a booking without calling a tool. Already spoken, so
         # correct the next turn and escalate repeats; a recap of the real slot is allowed.
@@ -1203,7 +1257,7 @@ class PipelineConversationHandler:
                 history.pop()
 
         if self._transcripts is not None:
-            self._transcripts.record_turn(
+            turn_number = self._transcripts.record_turn(
                 session_id, stt_result.text, stt_result.confidence,
                 stored_reply, cancelled,
                 latency=TurnLatency(
@@ -1215,6 +1269,7 @@ class PipelineConversationHandler:
                 count_barge_in=False if self._session(session_id).hanging_up else None,
             )
             progress.recorded = True
+            self._await_heard(session_id, turn_number, progress, cancelled)
 
         # End node hangup; [[END_CALL]] off-graph marks ended_off_graph for disposition.
         ended_on_end_node = self._workflow.pending_end
@@ -1306,8 +1361,13 @@ class PipelineConversationHandler:
         elif refused_reason is not None and not end_call and not cancel_event.is_set():
             # The model's own words ("connecting you") are already spoken by now, so tell it the transfer is not
             # happening and let it correct itself and carry on.
-            async for response in self.on_transfer_failed(session_id, "", refused_reason):
-                yield response
+            # aclosing: a hangup closes this generator, and the apology must see it to persist before end_call.
+            # No TtsStarted precedes the apology, so the gateway counts its played bytes from the reply above.
+            async with aclosing(
+                self.on_transfer_failed(session_id, "", refused_reason, sent_offset=progress.sent_bytes)
+            ) as apology:
+                async for response in apology:
+                    yield response
 
     async def on_cancel(self, session_id: str, *, hanging_up: bool = False) -> None:
         # A hang-up is not a barge-in; record_turn must not count the turn it cuts short as one.
@@ -1316,6 +1376,62 @@ class PipelineConversationHandler:
         # Barge-in before pending_speech is consumed must not replay it next turn.
         self._workflow.pending_speech = None
         self._interrupt_workflow_background_llm()
+
+    def on_playback_interrupted(self, session_id: str, played_bytes: int) -> None:
+        """The gateway reports how many bytes of the barge-in-cut reply it had sent to the call. It can
+        arrive before the cancelled turn is recorded (kept for that record) or after (the row is corrected)."""
+        state = self._sessions.get(session_id)
+        if state is None:
+            return
+        # Also kept for a cut turn still being recorded: during an apology the main reply's entry is pending.
+        state.heard_bytes = played_bytes
+        entries, state.pending_heard = state.pending_heard, []
+        # One cut is one barge-in, however many rows it touches.
+        counted = any(was_interrupted for _, _, was_interrupted in entries)
+        for turn_number, sent, was_interrupted in entries:
+            sent_text = _join_sentences([piece for _, piece in sent])
+            heard_text = _heard_reply(sent, played_bytes)
+            # A reply that had finished streaming was recorded as not cut; the caller did cut it if bytes were unplayed.
+            newly_interrupted = not was_interrupted and played_bytes < sent[-1][0]
+            if (newly_interrupted or heard_text != sent_text) and self._transcripts is not None:
+                self._transcripts.correct_turn_reply(
+                    session_id, turn_number, _spoken_reply([heard_text], state.unspoken_sentences),
+                    newly_interrupted=newly_interrupted, count_barge_in=newly_interrupted and not counted,
+                )
+                counted = counted or newly_interrupted
+                state.cut_counted = counted
+
+    def on_playback_completed(self, session_id: str) -> None:
+        """The reply played to the end, so the recorded row stands."""
+        state = self._sessions.get(session_id)
+        if state is not None:
+            state.pending_heard = []
+
+    def _reset_heard(self, session_id: str, *, keep_pending: bool = False) -> None:
+        # Safe at turn start: the gateway replays barge-in speech only after sending PlaybackFinished.
+        # keep_pending: an apology inside the turn, whose reply the gateway is still playing.
+        state = self._session(session_id)
+        state.heard_bytes = None
+        if not keep_pending:
+            state.pending_heard = []
+            state.cut_counted = False
+
+    def _cancelled_reply(self, session_id: str, progress: _TurnProgress) -> str:
+        """A barge-in-cut reply as far as it was heard if the gateway has reported that, else as far as sent."""
+        state = self._session(session_id)
+        heard = (
+            _join_sentences(progress.spoken) if state.heard_bytes is None
+            else _heard_reply(progress.sent, state.heard_bytes)
+        )
+        return _spoken_reply([heard], state.unspoken_sentences)
+
+    def _await_heard(
+        self, session_id: str, turn_number: int | None, progress: _TurnProgress, cancelled: bool,
+    ) -> None:
+        """After recording a turn that sent audio: let a later barge-in report from the gateway correct the row."""
+        state = self._session(session_id)
+        if turn_number is not None and progress.sent and (not cancelled or state.heard_bytes is None):
+            state.pending_heard.append((turn_number, progress.sent, cancelled))
 
     async def on_dtmf(self, session_id: str, digit: str) -> None:
         pass
@@ -1389,10 +1505,11 @@ class PipelineConversationHandler:
         return decision.request
 
     async def on_transfer_failed(
-        self, session_id: str, destination: str, reason: str,
+        self, session_id: str, destination: str, reason: str, *, sent_offset: int = 0,
     ) -> AsyncGenerator[HandlerResponse, None]:
         """Transfer failed: speak an LLM apology and continue the call. The system-event
-        prompt is ephemeral and never stored in history."""
+        prompt is ephemeral and never stored in history. sent_offset: bytes already sent since the gateway's
+        last TtsStarted, when the apology follows a reply inside the same turn."""
         cancel_event = asyncio.Event()
         self._session(session_id).cancelled = cancel_event
 
@@ -1412,7 +1529,8 @@ class PipelineConversationHandler:
 
         directives: list[Directive] = []
         full_response: list[str] = []
-        spoken: list[str] = []
+        progress = _TurnProgress(sent=[(sent_offset, "")] if sent_offset else [], sent_bytes=sent_offset)
+        self._reset_heard(session_id, keep_pending=bool(sent_offset))
         any_audio = False
         try:
             try:
@@ -1428,7 +1546,11 @@ class PipelineConversationHandler:
                         # Recorded by the servicer once it sends the chunk.
                         yield HandlerResponse(
                             tts_payloads=[tts_audio],
-                            on_sent=partial(spoken.append, f"{spoken_piece} ") if spoken_piece else None,
+                            on_sent=(
+                                partial(progress.mark_sent, spoken_piece, len(tts_audio))
+                                if spoken_piece or isinstance(chunk, _FillerText)
+                                else partial(progress.mark_sent_more, len(tts_audio))
+                            ),
                         )
                     if cancel_event.is_set():
                         break
@@ -1439,17 +1561,24 @@ class PipelineConversationHandler:
 
             if not assistant_text and not any_audio and not cancel_event.is_set():
                 assistant_text = t("transfer_failed_fallback", self._spoken_language(session_id))
-                on_sent = partial(spoken.append, f"{assistant_text} ")
+                first_chunk = True
                 async for chunk in self._synthesize_sentence_stream(assistant_text, session_id):
-                    yield HandlerResponse(tts_payloads=[chunk], on_sent=on_sent)
-                    on_sent = None   # the apology is one piece, however many chunks it takes
+                    # The apology is one piece, however many chunks it takes.
+                    yield HandlerResponse(
+                        tts_payloads=[chunk],
+                        on_sent=(
+                            partial(progress.mark_sent, assistant_text, len(chunk)) if first_chunk
+                            else partial(progress.mark_sent_more, len(chunk))
+                        ),
+                    )
+                    first_chunk = False
         except (GeneratorExit, asyncio.CancelledError):
             # Caller hung up during the apology: nothing after this point runs, so persist what was spoken.
             # Not after end_call: that already dropped this session, and a write would re-create its state.
             if self._transcripts is not None and session_id in self._sessions:
                 self._transcripts.record_turn(
                     session_id, f"[transfer_failed: {reason}]", 1.0,
-                    _spoken_reply(spoken, self._session(session_id).unspoken_sentences), True,
+                    _spoken_reply([_join_sentences(progress.spoken)], self._session(session_id).unspoken_sentences), True,
                     count_barge_in=False,
                 )
             raise
@@ -1461,12 +1590,15 @@ class PipelineConversationHandler:
 
         if self._transcripts is not None:
             interrupted = cancel_event.is_set()
-            self._transcripts.record_turn(
+            turn_number = self._transcripts.record_turn(
                 session_id, f"[transfer_failed: {reason}]", 1.0,
-                _spoken_reply(spoken, self._session(session_id).unspoken_sentences) if interrupted else assistant_text,
+                self._cancelled_reply(session_id, progress) if interrupted else assistant_text,
                 interrupted,
-                count_barge_in=False if self._session(session_id).hanging_up else None,
+                count_barge_in=(
+                    False if self._session(session_id).hanging_up or self._session(session_id).cut_counted else None
+                ),
             )
+            self._await_heard(session_id, turn_number, progress, interrupted)
 
     def on_transfer_cancelled(self, session_id: str) -> None:
         """Pending transfer dropped before dispatch (barge-in); allow a fresh request."""

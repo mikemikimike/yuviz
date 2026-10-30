@@ -138,6 +138,10 @@ private:
 
     // Ensures on_first_audio_chunk() is posted once per TTS response.
     std::atomic<bool> tts_first_chunk_pending_{false};
+    // Barge-in accounting: drain byte count when the reply's audio began, and
+    // the bytes of it played before the cut (sent in PlaybackFinished).
+    std::atomic<uint64_t>        reply_start_bytes_{0};
+    std::optional<uint64_t>      barge_played_bytes_;
 
     // Set once a transfer hands the customer's SIP leg outside the Gateway, so
     // session close must not hang it up. Written/read on different threads.

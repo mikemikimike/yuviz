@@ -296,9 +296,18 @@ class ConversationSession:
         ):
             self._fsm.on_cancel()
 
-    def on_playback_finished(self, interrupted: bool) -> None:
-        """Called by the servicer when a PlaybackFinished message is received."""
+    def on_playback_finished(self, interrupted: bool, played_bytes: int | None = None) -> None:
+        """Called by the servicer when a PlaybackFinished message is received. played_bytes is the
+        gateway's count of the cut reply's audio it sent; None from a gateway that does not report it."""
         self._fsm.on_playback_finished(interrupted=interrupted)
+        if interrupted:
+            on_interrupted = getattr(self._handler, "on_playback_interrupted", None)
+            if played_bytes is not None and on_interrupted is not None:
+                on_interrupted(self._ctx.session_id, played_bytes)
+        else:
+            on_completed = getattr(self._handler, "on_playback_completed", None)
+            if on_completed is not None:
+                on_completed(self._ctx.session_id)
 
     # ── Transfer notifications from the gateway ────────────────────────────────
 

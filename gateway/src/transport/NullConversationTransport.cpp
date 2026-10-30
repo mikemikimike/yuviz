@@ -55,7 +55,8 @@ void NullConversationTransport::cancel_generation(const std::string& session_id)
 }
 
 void NullConversationTransport::send_playback_finished(const std::string& session_id,
-                                                       bool /*interrupted*/) {
+                                                       bool /*interrupted*/,
+                                                       std::optional<uint64_t> /*played_bytes*/) {
     logger_.debug("NullConversationTransport::send_playback_finished session={}", session_id);
     // Reset so the next turn's first audio frame re-fires stt_result + tts_started.
     turn_signalled_ = false;

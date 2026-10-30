@@ -177,13 +177,15 @@ void GrpcConversationTransport::cancel_generation(const std::string& session_id)
 }
 
 void GrpcConversationTransport::send_playback_finished(const std::string& session_id,
-                                                        bool interrupted) {
+                                                        bool interrupted,
+                                                        std::optional<uint64_t> played_bytes) {
     if (!stream_open_.load(std::memory_order_acquire)) return;
 
     ::voiceai::v1::GatewayMessage msg;
     auto* pf = msg.mutable_playback_finished();
     pf->set_session_id(session_id);
     pf->set_interrupted(interrupted);
+    if (played_bytes) pf->set_played_bytes(*played_bytes);
 
     if (!send_queue_->q.push(std::move(msg)))
         logger_.warn("GrpcTransport: send_queue_ full, dropping playback_finished session={}", session_id);

@@ -4,6 +4,7 @@
 #include "timer/TimerType.h"
 
 #include <stdexcept>
+#include <utility>
 
 namespace voiceai {
 
@@ -234,7 +235,9 @@ void CallSession::wire_fsm_handlers() {
     };
 
     h.on_playback_finished = [this](bool interrupted) {
-        transport_->send_playback_finished(ctx_.obs.session_id, interrupted);
+        transport_->send_playback_finished(
+            ctx_.obs.session_id, interrupted,
+            interrupted ? std::exchange(barge_played_bytes_, std::nullopt) : std::nullopt);
         log_.set_provider_request_id("");
     };
 
@@ -357,6 +360,7 @@ void CallSession::wire_transport_callbacks() {
     };
 
     cbs.on_tts_started = [this] {
+        reply_start_bytes_.store(playback_drain_.sent_bytes(), std::memory_order_relaxed);
         tts_first_chunk_pending_.store(true, std::memory_order_relaxed);
         post([this] { if (fsm_) fsm_->on_text_ready(); });
     };
@@ -492,6 +496,8 @@ void CallSession::wire_media_callbacks() {
                 barge_in_energy_db_  = energy_db;
                 pending_speech_ended_ = false;
                 media_->cancel_playback();
+                barge_played_bytes_ = playback_drain_.sent_bytes() -
+                                      reply_start_bytes_.load(std::memory_order_relaxed);
                 transport_->cancel_generation(ctx_.obs.session_id);
             } else if (s == CallFsmState::Thinking || s == CallFsmState::Synthesizing) {
                 barge_in_capture_    = true;
@@ -501,6 +507,7 @@ void CallSession::wire_media_callbacks() {
                 barge_in_energy_db_  = energy_db;
                 pending_speech_ended_ = false;
                 if (media_->is_playing()) media_->cancel_playback();
+                barge_played_bytes_ = 0;
                 transport_->cancel_generation(ctx_.obs.session_id);
                 fsm_->on_early_barge_in();
             } else {

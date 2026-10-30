@@ -5,6 +5,7 @@ add_executable(gateway_tests
     vad_test.cpp
     silero_vad_test.cpp
     playback_queue_test.cpp
+    playback_drain_test.cpp
     thread_pool_test.cpp
     pending_metadata_test.cpp
     esl_client_test.cpp
