@@ -723,7 +723,9 @@ async def execute_chain(request: ChainExecuteRequest) -> ChainExecuteResponse:
 
     chain_budget_ms = min(request.chain_budget_ms, int(os.environ.get(_MAX_CHAIN_BUDGET_MS_ENV, _DEFAULT_MAX_CHAIN_BUDGET_MS)))
 
-    if not admission.acquire(tenant_id, agent_id):
+    # Queue briefly for a concurrency slot (never past the chain budget) rather than refuse a transient burst.
+    max_wait_s = min(admission.max_wait_ms(), chain_budget_ms) / 1000.0
+    if not await admission.acquire_wait(tenant_id, agent_id, max_wait_s):
         return ChainExecuteResponse(run_id="", chain_status="rate_limited", error="rate_limited")
 
     # Tracked separately from run_id: _claim_run can raise before run_id is set.

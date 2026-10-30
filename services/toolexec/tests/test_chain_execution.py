@@ -169,6 +169,44 @@ async def test_concurrent_cap_plus_one_rate_limited_no_run_row_zero_calls(pool, 
 
 
 @pytest.mark.asyncio
+async def test_burst_over_the_cap_queues_instead_of_rate_limiting(pool, tenant_agent, monkeypatch):
+    """Issue #193: callers over the concurrency cap wait briefly for a slot and then run."""
+    tenant, agent = tenant_agent
+    api = await _register_and_enable(pool, tenant, agent, f"burst_{uuid.uuid4().hex[:8]}", side_effecting=False)
+    monkeypatch.setenv("TOOLEXEC_ADMISSION_MAX_WAIT_MS", "5000")
+
+    async def slow_handler(request):
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(executor, "_step_transport", _mock(slow_handler))
+    n = admission._max_concurrent() * 3
+    responses = await asyncio.gather(*[
+        executor.execute_chain(_request(tenant, agent, api["name"])) for _ in range(n)
+    ])
+    statuses = [r.chain_status for r in responses]
+    assert "rate_limited" not in statuses, statuses
+    assert admission._concurrent[(str(tenant["id"]), str(agent["id"]))] == 0
+
+
+@pytest.mark.asyncio
+async def test_still_rate_limited_when_no_slot_frees_within_the_wait(pool, tenant_agent, monkeypatch):
+    tenant, agent = tenant_agent
+    api = await _register_and_enable(pool, tenant, agent, f"nowait_{uuid.uuid4().hex[:8]}", side_effecting=False)
+    monkeypatch.setenv("TOOLEXEC_ADMISSION_MAX_WAIT_MS", "50")
+    limit = admission._max_concurrent()
+    for _ in range(limit):
+        assert admission.acquire(str(tenant["id"]), str(agent["id"])) is True
+    try:
+        response = await executor.execute_chain(_request(tenant, agent, api["name"]))
+        assert response.chain_status == "rate_limited"
+        assert await pool.fetch("SELECT 1 FROM api_chain_runs WHERE tenant_id = $1", tenant["id"]) == []
+    finally:
+        for _ in range(limit):
+            admission.release(str(tenant["id"]), str(agent["id"]))
+
+
+@pytest.mark.asyncio
 async def test_claim_run_raising_surfaces_the_real_error_and_releases_the_slot(pool, tenant_agent, monkeypatch):
     """If _claim_run raises, the original error propagates and the admission slot is released."""
     tenant, agent = tenant_agent
