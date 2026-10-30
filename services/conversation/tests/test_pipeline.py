@@ -3985,6 +3985,28 @@ async def test_timeout_persists_tool_outcome_folded_during_stream_cancellation()
 
 
 @pytest.mark.asyncio
+async def test_filler_timer_bounds_nested_stream_close():
+    """A stalled nested orchestrator cannot consume the timeout fallback budget."""
+    class _CancellationResistantSource:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            await asyncio.Event().wait()
+
+    stream = pipeline_module._with_filler_timer(
+        _CancellationResistantSource(), 0, arm_first=True,
+    )
+    await anext(stream)
+    started = asyncio.get_running_loop().time()
+    await stream.aclose()
+    assert asyncio.get_running_loop().time() - started < 0.3
+
+
+@pytest.mark.asyncio
 async def test_slow_tool_turn_continues_after_first_filler_output(monkeypatch):
     """Once a filler reaches the caller, the deadline no longer cuts off a tool."""
     from ..tools.llm_adapter import TokenEvent as ToolTokenEvent

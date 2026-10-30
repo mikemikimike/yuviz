@@ -459,12 +459,10 @@ async def _with_filler_timer(source: AsyncGenerator, delay_s: float, *, arm_firs
                 await pending
             except BaseException:
                 pass
-        aclose = getattr(it, "aclose", None)
-        if aclose is not None:
-            try:
-                await aclose()
-            except Exception:
-                pass
+        # Closing the nested tool orchestrator can itself wait for a
+        # cancellation-resistant executor. Keep that cleanup bounded so a
+        # timed-out filler cannot consume the fallback's response budget.
+        await _close_stream_bounded(it)
 # Items the model/voice producer may run ahead of the consumer: enough to keep it busy, small enough that a
 # caller's interruption does not leave seconds of unsent audio synthesized.
 _TURN_QUEUE_MAX = 16
