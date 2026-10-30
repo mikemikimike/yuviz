@@ -249,8 +249,10 @@ class ToolCallOrchestrator:
                     ):
                         guard.tainted = True
                         self._call_taint[call_key] = True
+                    # Always reported, so a cancelled call is stored as failed like a remote one; the turn is
+                    # cancelled, so the pipeline speaks no bridging line for it and nothing re-resolves.
+                    yield LocalToolCompletedEvent(tool_name=event.tool_name, status=result.status.value)
                     if not (result.status == ToolStatus.FAILED and result.error == "cancelled"):
-                        yield LocalToolCompletedEvent(tool_name=event.tool_name)
                         # Re-resolve: a local tool may have moved the workflow node.
                         local, policies_by_name, schemas, local_schemas = await resolve()
                 elif (

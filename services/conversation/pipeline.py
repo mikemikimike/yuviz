@@ -118,7 +118,11 @@ class _TurnProgress:
     # shifts the offsets. Lets a barge-in report of bytes played be turned back into text.
     sent:           list[tuple[int, str]] = field(default_factory=list)
     sent_bytes:     int = 0
+    # Remote tool calls only: the fabricated-booking guard reads this, and a local call must not satisfy it.
     tool_calls:     list[dict[str, str]] = field(default_factory=list)
+    # Every call of the turn, local and remote in call order, for the transcript. Remote entries are the
+    # same dicts as in tool_calls, so a status update lands in both. Name and status only, never args or results.
+    transcript_tool_calls: list[dict[str, str]] = field(default_factory=list)
     recorded:       bool = False
 
     def mark_sent(self, piece: str, nbytes: int) -> None:
@@ -957,7 +961,7 @@ class PipelineConversationHandler:
                 self._transcripts.record_turn(
                     session_id, progress.stt_text, progress.stt_confidence,
                     _spoken_reply([_join_sentences(progress.spoken)], self._session(session_id).unspoken_sentences), True,
-                    tool_calls=progress.tool_calls, count_barge_in=False,
+                    tool_calls=progress.transcript_tool_calls, count_barge_in=False,
                 )
             raise
         finally:
@@ -1148,7 +1152,7 @@ class PipelineConversationHandler:
                 async for item in self._llm_to_tts(
                     messages_for_llm, cancel_event, session_id, directives, tool_calls_made,
                     store=history, caller_text=stt_result.text, first_turn_filler=first_turn_filler,
-                    turn_context=turn_context,
+                    turn_context=turn_context, transcript_tool_calls=progress.transcript_tool_calls,
                 ):
                     await items.put(item)
                 await items.put(_STREAM_END)
@@ -1265,7 +1269,7 @@ class PipelineConversationHandler:
                     stt_engine=type(self._stt).__name__, llm_engine=type(self._llm).__name__,
                     tts_engine=type(self._tts).__name__,
                 ),
-                tool_calls=tool_calls_made,
+                tool_calls=progress.transcript_tool_calls,
                 count_barge_in=False if self._session(session_id).hanging_up else None,
             )
             progress.recorded = True
@@ -1765,11 +1769,15 @@ class PipelineConversationHandler:
         store: list[ChatMessage] | None = None,
         carry_taint: bool = False,
         turn_context: ChatMessage | None = None,
+        transcript_tool_calls: list[dict[str, str]] | None = None,
     ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
         """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech.
         turn_context (pre-retrieved passages) rides on every LLM call of the turn with the reply-language line,
         folded into the caller's turn and never stored, and starts the turn tainted: it is retrieved, tenant-uploaded
-        text, so a write is held for the caller's yes as after a search_knowledge lookup."""
+        text, so a write is held for the caller's yes as after a search_knowledge lookup.
+        tool_calls_made takes remote calls only; transcript_tool_calls takes local ones too."""
+        if transcript_tool_calls is None:
+            transcript_tool_calls = []
         trailing = _merge_turn_notes(turn_context, self._reply_directive(session_id))
         if self._tool_orchestrator is None:
             async for event in LLMAdapter(self._llm).generate(with_directive(history, trailing)):
@@ -1790,7 +1798,9 @@ class PipelineConversationHandler:
         ):
             if isinstance(event, ToolCallStartedEvent):
                 if not event.filler_only:
-                    tool_calls_made.append({"name": event.tool_name, "status": "started"})
+                    call = {"name": event.tool_name, "status": "started"}
+                    tool_calls_made.append(call)
+                    transcript_tool_calls.append(call)
                 yield event
                 continue
             if isinstance(event, ToolCallFinishedEvent):
@@ -1800,6 +1810,7 @@ class PipelineConversationHandler:
                         break
                 continue
             if isinstance(event, LocalToolCompletedEvent):
+                transcript_tool_calls.append({"name": event.tool_name, "status": event.status})
                 yield event
                 continue
             if isinstance(event, DeterministicSpokenEvent):
@@ -1824,6 +1835,7 @@ class PipelineConversationHandler:
         caller_text:  str = "",
         first_turn_filler: bool = False,
         turn_context: ChatMessage | None = None,
+        transcript_tool_calls: list[dict[str, str]] | None = None,
     ) -> AsyncGenerator[tuple[str, bytes, bool, str], None]:
         """Stream LLM tokens and synthesize per sentence, yielding (raw_token, tts_bytes, end_call, spoken_piece).
         spoken_piece is the directive-free text of a sentence, clause, transition or fallback, on its first audio
@@ -1844,6 +1856,7 @@ class PipelineConversationHandler:
             async for item in _with_filler_timer(
                 self._token_stream(
                     history, session_id, cancel_event, tool_calls_made, store, carry_taint, turn_context,
+                    transcript_tool_calls,
                 ),
                 _filler_delay_s(), arm_first=first_turn_filler,
             ):

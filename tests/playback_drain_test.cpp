@@ -73,4 +73,54 @@ TEST(PlaybackDrainTest, SentBytesCountsAudioAndSkipsEndMarkers) {
     EXPECT_EQ(drain.sent_bytes(), conn.wire_bytes.load());
 }
 
+// 16 kHz mono S16LE = 32000 bytes/s.
+TEST(PlaybackDrainTest, PlayedBytesAtSubtractsLeadStillAheadOfClock) {
+    // 100 ms ahead = 3200 bytes not yet played.
+    EXPECT_EQ(PlaybackDrain::played_bytes_at(10'000, 100'000'000, 32'000), 6'800u);
+}
+
+TEST(PlaybackDrainTest, PlayedBytesAtEqualsSentOnceLeadHasElapsed) {
+    EXPECT_EQ(PlaybackDrain::played_bytes_at(10'000, 0, 32'000), 10'000u);
+    EXPECT_EQ(PlaybackDrain::played_bytes_at(10'000, -5'000'000, 32'000), 10'000u);
+}
+
+TEST(PlaybackDrainTest, PlayedBytesAtClampsToZeroWhenAheadExceedsSent) {
+    EXPECT_EQ(PlaybackDrain::played_bytes_at(640, 100'000'000, 32'000), 0u);
+    EXPECT_EQ(PlaybackDrain::played_bytes_at(0, 100'000'000, 32'000), 0u);
+}
+
+TEST(PlaybackDrainTest, PlayedBytesTracksInjectedClockAfterSend) {
+    StubMetrics   metrics;
+    Logger        logger = Logger::make_null();
+    PlaybackQueue queue{"s1", 10, metrics, logger};
+    StubConnection conn;
+
+    using TimePoint = std::chrono::steady_clock::time_point;
+    const TimePoint t0 = std::chrono::steady_clock::now();
+    std::atomic<int64_t> clock_ns{t0.time_since_epoch().count()};
+    PlaybackDrain drain{queue, conn, logger, [&clock_ns] {
+        return TimePoint{std::chrono::steady_clock::duration{clock_ns.load()}};
+    }};
+    const auto advance_to = [&](std::chrono::milliseconds ms) {
+        clock_ns.store((t0 + ms).time_since_epoch().count());
+    };
+
+    drain.start();
+    queue.push(make_frame(640));  // 20 ms each at 16 kHz mono S16LE
+    queue.push(make_frame(640));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    while (drain.sent_bytes() < 1280 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    ASSERT_EQ(drain.sent_bytes(), 1280u);
+
+    // The clock has not moved: both frames (40 ms) are still ahead of it.
+    EXPECT_EQ(drain.played_bytes(), 0u);
+    advance_to(std::chrono::milliseconds{30});  // 10 ms (320 bytes) still ahead
+    EXPECT_EQ(drain.played_bytes(), 960u);
+    advance_to(std::chrono::milliseconds{40});
+    EXPECT_EQ(drain.played_bytes(), 1280u);
+    drain.stop();
+}
+
 } // namespace

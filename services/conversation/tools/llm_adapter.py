@@ -71,8 +71,9 @@ class DeterministicSpokenEvent(TurnEvent):
 
 @dataclass(frozen=True)
 class LocalToolCompletedEvent(TurnEvent):
-    """Local tool finished; pipeline absorbs it (bridging speech comes later)."""
+    """Local tool finished; pipeline absorbs it (bridging speech comes later). `status` is the ToolStatus value."""
     tool_name: str
+    status:    str
 
 
 @runtime_checkable

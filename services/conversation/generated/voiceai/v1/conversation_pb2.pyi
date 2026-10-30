@@ -122,12 +122,14 @@ class AudioChunk(_message.Message):
     def __init__(self, session_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., sequence_num: _Optional[int] = ..., timestamp_us: _Optional[int] = ..., payload: _Optional[bytes] = ...) -> None: ...
 
 class CancelGeneration(_message.Message):
-    __slots__ = ("session_id", "trace_id")
+    __slots__ = ("session_id", "trace_id", "cancel_id")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     TRACE_ID_FIELD_NUMBER: _ClassVar[int]
+    CANCEL_ID_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     trace_id: str
-    def __init__(self, session_id: _Optional[str] = ..., trace_id: _Optional[str] = ...) -> None: ...
+    cancel_id: int
+    def __init__(self, session_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., cancel_id: _Optional[int] = ...) -> None: ...
 
 class PlaybackFinished(_message.Message):
     __slots__ = ("session_id", "trace_id", "interrupted", "played_bytes")
@@ -270,12 +272,14 @@ class TtsChunk(_message.Message):
     def __init__(self, session_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., sequence_num: _Optional[int] = ..., codec: _Optional[_Union[AudioCodec, str]] = ..., sample_rate: _Optional[int] = ..., payload: _Optional[bytes] = ..., is_final: _Optional[bool] = ...) -> None: ...
 
 class CancelAck(_message.Message):
-    __slots__ = ("session_id", "trace_id")
+    __slots__ = ("session_id", "trace_id", "cancel_id")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     TRACE_ID_FIELD_NUMBER: _ClassVar[int]
+    CANCEL_ID_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     trace_id: str
-    def __init__(self, session_id: _Optional[str] = ..., trace_id: _Optional[str] = ...) -> None: ...
+    cancel_id: int
+    def __init__(self, session_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., cancel_id: _Optional[int] = ...) -> None: ...
 
 class ServiceError(_message.Message):
     __slots__ = ("session_id", "code", "message", "fatal")

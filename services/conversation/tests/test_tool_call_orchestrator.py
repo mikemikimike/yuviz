@@ -472,9 +472,10 @@ async def test_a_local_tool_executes_without_touching_policy_or_provider():
 
     assert calls == [{}]
     assert TokenEvent(text="Thanks!") in events
-    assert LocalToolCompletedEvent(tool_name="caller_verified") in events
+    assert LocalToolCompletedEvent(tool_name="caller_verified", status="success") in events
     assert not any(isinstance(e, ToolCallStartedEvent) for e in events)
-    # Local tools are not stored as tool calls: counting one would satisfy the fabricated-booking guard.
+    # A local call reports through LocalToolCompletedEvent alone: a Started event would count as a tool call made
+    # and satisfy the fabricated-booking guard.
     assert not any(isinstance(e, ToolCallFinishedEvent) for e in events)
     assert json.loads(history[-1].content)["data"]["status"] == "done"
 
@@ -664,7 +665,7 @@ async def test_a_local_tool_that_raises_soft_fails_instead_of_crashing_the_turn(
         )
     ]
 
-    assert LocalToolCompletedEvent(tool_name="caller_verified") in events
+    assert LocalToolCompletedEvent(tool_name="caller_verified", status="failed") in events
     assert TokenEvent(text="Still here.") in events
     assert json.loads(history[-1].content)["status"] == "error"
     assert json.loads(history[-1].content)["error"]["code"] == "local_tool_failed"
@@ -717,7 +718,8 @@ async def test_cancel_event_stops_waiting_on_an_in_flight_local_tool():
     cancel_event.set()
     events = await asyncio.wait_for(task, timeout=1.0)
 
-    assert events == []
+    # Reported as failed so the transcript stores the call; no re-resolve follows a cancelled one.
+    assert events == [LocalToolCompletedEvent(tool_name="caller_verified", status="failed")]
     assert json.loads(history[-1].content)["error"]["code"] == "cancelled"
     assert llm.call_count == 1
 
@@ -848,7 +850,7 @@ async def test_local_tool_lookup_uses_definition_name_not_dict_key():
     ]
 
     assert calls == [{}]
-    assert LocalToolCompletedEvent(tool_name="caller_verified") in events
+    assert LocalToolCompletedEvent(tool_name="caller_verified", status="success") in events
     assert TokenEvent(text="Thanks!") in events
 
 

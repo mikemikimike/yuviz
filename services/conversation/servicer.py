@@ -54,6 +54,11 @@ _ROUTING_STATUS = {
 }
 
 
+def _cancel_id(cancel: "pb.CancelGeneration") -> int | None:
+    """The gateway's cancel id to echo in CancelAck, or None when it sent none."""
+    return cancel.cancel_id if cancel.HasField("cancel_id") else None
+
+
 def _consume_pending_transfer(tr, interrupted: bool, sid: str):
     """Return the held TransferRequest message to send at playback end, or None to drop it.
 
@@ -491,6 +496,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     cancel_ack=pb.CancelAck(
                                         session_id=sid,
                                         trace_id=pending.cancel_generation.trace_id,
+                                        cancel_id=_cancel_id(pending.cancel_generation),
                                     )
                                 )
                             elif pcase == "playback_finished":
@@ -690,6 +696,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         cancel_ack=pb.CancelAck(
                             session_id=sid,
                             trace_id=msg.cancel_generation.trace_id,
+                            cancel_id=_cancel_id(msg.cancel_generation),
                         )
                     )
 

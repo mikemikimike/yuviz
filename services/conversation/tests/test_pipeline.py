@@ -2989,7 +2989,7 @@ async def test_local_tool_completed_event_does_not_crash_the_pipeline():
     llm = _make_llm(["unused"])
     tts = _make_tts(b"\x00" * 640)
     orchestrator = _FakeToolOrchestrator([
-        LocalToolCompletedEvent(tool_name="caller_verified"),
+        LocalToolCompletedEvent(tool_name="caller_verified", status="success"),
         ToolTokenEvent(text="Thanks, moving on."),
     ])
     handler = _make_handler(stt, llm, tts, system_prompt="You are a scheduler.", tool_orchestrator=orchestrator)
@@ -3578,7 +3578,7 @@ async def test_no_fallback_after_a_transition_line_then_an_empty_round():
             async for e in super().run_turn(*args, **kwargs):
                 yield e
 
-    orchestrator = _Transitioning([LocalToolCompletedEvent(tool_name="go_next")])
+    orchestrator = _Transitioning([LocalToolCompletedEvent(tool_name="go_next", status="success")])
     handler = _make_handler(
         _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
         system_prompt="You are Alex.", tool_orchestrator=orchestrator,
@@ -3622,7 +3622,7 @@ async def test_no_error_fallback_when_the_turn_moves_to_an_end_or_transfer_node(
             async for e in super().run_turn(*args, **kwargs):
                 yield e
 
-    orchestrator = _Moving([LocalToolCompletedEvent(tool_name="go_next")])
+    orchestrator = _Moving([LocalToolCompletedEvent(tool_name="go_next", status="success")])
     handler = _make_handler(
         _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
         system_prompt="You are Alex.", tool_orchestrator=orchestrator,
@@ -3940,6 +3940,142 @@ async def test_a_turn_cut_short_after_a_tool_call_stores_the_call_without_its_ar
     assert _CARD_NUMBER not in json.dumps(tool_calls) and _CARD_PIN not in json.dumps(tool_calls)
     # A hang-up is not the caller interrupting.
     assert transcripts.record_turn.call_args.kwargs["count_barge_in"] is False
+
+
+class _LocalThenRemote:
+    """Orchestrator that runs a local tool, then a remote one, then speaks a reply."""
+
+    def __init__(self, reply: str = "Done."):
+        self._reply = reply
+
+    async def run_turn(self, *args, **kwargs):
+        from ..tools.llm_adapter import (
+            LocalToolCompletedEvent, TokenEvent as ToolTokenEvent, ToolCallFinishedEvent, ToolCallStartedEvent,
+        )
+        yield ToolCallStartedEvent(tool_name="caller_verified", filler_only=True)
+        yield LocalToolCompletedEvent(tool_name="caller_verified", status="success")
+        yield ToolCallStartedEvent(tool_name="pay_order")
+        yield ToolCallFinishedEvent(tool_name="pay_order", status="failed")
+        yield LocalToolCompletedEvent(tool_name="go_next", status="failed")
+        yield ToolTokenEvent(text=self._reply)
+
+
+@pytest.mark.asyncio
+async def test_local_and_remote_tool_calls_are_stored_in_call_order_with_name_and_status_only():
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt(f"pay with card {_CARD_NUMBER} pin {_CARD_PIN}"), _make_llm(), _make_tts(),
+        tool_orchestrator=_LocalThenRemote(), transcripts=transcripts,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    tool_calls = transcripts.record_turn.call_args.kwargs["tool_calls"]
+    assert tool_calls == [
+        {"name": "caller_verified", "status": "success"},
+        {"name": "pay_order", "status": "failed"},
+        {"name": "go_next", "status": "failed"},
+    ]
+    assert all(set(call) == {"name", "status"} for call in tool_calls)
+
+
+@pytest.mark.asyncio
+async def test_a_local_tool_call_is_stored_when_the_turn_is_cut_short():
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+
+    class _LocalThenStall:
+        async def run_turn(self, *args, **kwargs):
+            yield LocalToolCompletedEvent(tool_name="caller_verified", status="success")
+            await asyncio.sleep(30)
+
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(), _make_tts(), tool_orchestrator=_LocalThenStall(), transcripts=transcripts,
+    )
+
+    stream = handler.on_speech_ended("s1", _silence(), 200, -20.0)
+    await stream.__anext__()                               # the transcript
+    pending = asyncio.ensure_future(stream.__anext__())
+    await asyncio.sleep(0.05)
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await stream.aclose()
+
+    assert transcripts.record_turn.call_args.kwargs["tool_calls"] == [{"name": "caller_verified", "status": "success"}]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_local_tool_call_is_stored_as_failed_but_not_counted_as_made():
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+
+    cancel_event = asyncio.Event()
+    cancel_event.set()
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(), _make_tts(),
+        tool_orchestrator=_FakeToolOrchestrator([LocalToolCompletedEvent(tool_name="caller_verified", status="failed")]),
+    )
+    tool_calls_made: list[dict[str, str]] = []
+    transcript_calls: list[dict[str, str]] = []
+
+    [_ async for _ in handler._token_stream([], "s1", cancel_event, tool_calls_made, None, False, None, transcript_calls)]
+
+    assert transcript_calls == [{"name": "caller_verified", "status": "failed"}]
+    assert tool_calls_made == []
+
+
+@pytest.mark.asyncio
+async def test_a_barge_in_during_a_local_tool_call_stores_the_call_as_failed():
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+
+    class _LocalToolInFlight:
+        """Waits on the turn's own cancel event as the orchestrator does, then reports the call cancelled."""
+
+        async def run_turn(self, *args, cancel_event, **kwargs):
+            await cancel_event.wait()
+            yield LocalToolCompletedEvent(tool_name="caller_verified", status="failed")
+
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(), _make_tts(),
+        tool_orchestrator=_LocalToolInFlight(), transcripts=transcripts,
+    )
+
+    async def _drain():
+        return [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    turn = asyncio.ensure_future(_drain())
+    await asyncio.sleep(0.05)
+    await handler.on_cancel("s1")
+    await asyncio.wait_for(turn, timeout=2.0)
+
+    transcripts.record_turn.assert_called_once()
+    kwargs = transcripts.record_turn.call_args
+    assert kwargs.args[4] is True  # interrupted
+    assert kwargs.kwargs["tool_calls"] == [{"name": "caller_verified", "status": "failed"}]
+
+
+@pytest.mark.asyncio
+async def test_a_local_only_turn_still_trips_the_fabricated_booking_guard():
+    """A local tool call is stored for the transcript but is not a tool call made, as before."""
+    from ..tools.llm_adapter import LocalToolCompletedEvent, TokenEvent as ToolTokenEvent
+
+    transcripts = MagicMock()
+    orchestrator = _FakeToolOrchestrator([
+        LocalToolCompletedEvent(tool_name="caller_verified", status="success"),
+        ToolTokenEvent(text="Booked! Your appointment is confirmed."),
+    ])
+    handler = _make_handler(
+        _make_stt("book me tomorrow at 3"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
+        system_prompt="You are a scheduler.", tool_orchestrator=orchestrator, has_booking_tool=True,
+        transcripts=transcripts,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    history = handler._get_history("s1")
+    assert history[-1].role == "system"
+    assert "did not call any tool" in history[-1].content
+    assert transcripts.record_turn.call_args.kwargs["tool_calls"] == [{"name": "caller_verified", "status": "success"}]
 
 
 @pytest.mark.asyncio
