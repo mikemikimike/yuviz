@@ -15,9 +15,14 @@ from typing import Union
 _TAG_RE  = re.compile(r'\[\[(?P<name>[A-Z_]+)(?P<attrs>[^\]]*)\]\]')
 _ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
 
-# TTS speaks markdown chars literally. Blanket strip (not paired regex) because
-# markers can be split across streamed chunks.
-_MARKDOWN_CHARS_RE = re.compile(r"[*_`#]")
+# TTS speaks markdown chars literally. Not a paired regex because markers can be split across streamed
+# chunks, so each char is judged by its neighbours alone. Kept: an "_" with a letter or digit on both sides
+# (qa_pwn.aiff, john_doe@x.com, ABC_123) and a "#" touching a word (C#, #1, order #42); both are content.
+_MARKDOWN_CHARS_RE = re.compile(
+    r"[*`]"
+    r"|(?<![^\W_])_|_(?![^\W_])"          # "_" unless flanked by alphanumerics on both sides
+    r"|(?<!\w)#+(?!\w)"                   # "#" / "##" heading marker: no word char touching the run
+)
 
 
 def strip_markdown_chars(text: str) -> str:
