@@ -269,6 +269,51 @@ async def test_a_failed_prewarm_filler_is_not_a_failed_reply_sentence():
     assert handler._session("s1").unspoken_sentences == []
 
 
+_SPLIT_REPLIES = [
+    (["Your", " order", "_status", " is", " ready", "."], "Your order_status is ready."),
+    (["Mail", " john", "_", "doe", "@x.com", "."], "Mail john_doe@x.com."),
+    (["Code", " ABC", "_", "123", "."], "Code ABC_123."),
+    (["I", " use", " C", "#", "."], "I use C#."),
+    (["Ticket", " #", "42", "."], "Ticket #42."),
+    (["It", " is", " **", "done", "**", "."], "It is done."),
+]
+
+
+async def test_token_split_underscores_and_hashes_are_spoken_and_stored_the_same():
+    """#180: the live path feeds the parser one LLM token at a time; a token usually starts at the _ or #."""
+    for tokens, expected in _SPLIT_REPLIES:
+        spoken = []
+        tts = MagicMock()
+
+        async def _stream(text, sample_rate, _spoken=spoken):
+            _spoken.append(text)
+            yield b"\x00" * 320
+
+        tts.synthesize_stream = _stream
+        transcripts = MagicMock()
+        handler = _make_handler(_make_stt("hi"), _make_llm(tokens), tts, transcripts=transcripts)
+
+        async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+            pass
+
+        assert spoken[-1] == expected   # earlier entries may be a filler phrase
+        assert _reply_recorded(transcripts) == expected
+
+
+async def test_a_failed_sentence_with_a_split_underscore_is_not_stored():
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("hi"),
+        _make_llm(["Your", " order", "_status", " FAILME", " is", " ready.", " Anything", " else?"]),
+        _tts_failing_on("FAILME"), transcripts=transcripts,
+    )
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+
+    assert _reply_recorded(transcripts) == "Anything else?"
+
+
 def _tts_silent_on(marker: str) -> MagicMock:
     """Returns no audio, without raising, for text containing marker (macOS `say` on a leading '-')."""
     tts = MagicMock()
