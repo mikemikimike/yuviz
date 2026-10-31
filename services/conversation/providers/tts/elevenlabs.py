@@ -16,6 +16,7 @@ import numpy as np
 from libs.config_sdk.languages import normalize_language
 
 from ..interfaces import INSTANCE_LANGUAGE, AlignedAudio
+from services.conversation.providers.http_pool import provider_http_limits
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ class ElevenLabsTTS:
             base_url=base_url.rstrip("/"),
             headers={"xi-api-key": api_key},
             timeout=timeout_s,
+            limits=provider_http_limits(),
         )
         log.info(
             "ElevenLabsTTS voice_id=%s model_id=%s language_code=%s",

@@ -4369,6 +4369,14 @@ def test_turn_progress_counts_further_chunks_of_a_piece_into_that_piece():
     assert _heard_reply(progress.sent, 200) == "One two"
 
 
+def test_turn_progress_records_a_piece_as_voiced_without_markdown():
+    progress = _TurnProgress()
+    progress.mark_sent("Your **order** is ready.", b"\x00" * 100)
+    progress.mark_sent("**", b"\x00" * 10)
+    assert progress.spoken == ["Your order is ready."]
+    assert _heard_reply(progress.sent, 100) == "Your order is ready."
+
+
 def test_heard_reply_cuts_a_timed_piece_at_the_last_word_that_ended_by_the_cut():
     # Words end at 30, 90, 150 of 160 bytes: a skewed voice the word share would misjudge (2 of 3 words at 100).
     ledger = [(100, "Hello there.", []), (260, "Words are uneven.", [30, 90, 150])]

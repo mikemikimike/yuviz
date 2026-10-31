@@ -27,6 +27,7 @@ import websockets
 from libs.config_sdk.languages import normalize_language
 
 from ..interfaces import INSTANCE_LANGUAGE
+from services.conversation.providers.http_pool import provider_http_limits
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +111,7 @@ class SarvamTTS:
             base_url=base_url.rstrip("/"),
             headers={"api-subscription-key": api_key},
             timeout=timeout_s,
+            limits=provider_http_limits(),
         )
         self._api_key = api_key
         self._streaming = streaming
