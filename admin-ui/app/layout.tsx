@@ -12,7 +12,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" data-theme="light" suppressHydrationWarning style={{ backgroundColor: 'var(--background, #f7f4ee)' }}>
+    <html lang="en" data-theme="light" suppressHydrationWarning style={{ backgroundColor: 'var(--background, #f8f7fc)' }}>
       <head>
         {/* Applies the saved theme before first paint so a refresh doesn't flash light mode. */}
         <script

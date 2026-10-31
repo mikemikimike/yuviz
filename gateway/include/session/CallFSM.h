@@ -123,6 +123,11 @@ public:
         bool interrupted,
         bool end_call_pending = false,
         std::chrono::milliseconds goodbye_timeout_override = {}); // Speaking → Listening | WaitingForHangup | BargeIn; Listening → WaitingForHangup
+    // EndCall that has no audio to wait for: straight to WaitingForHangup. Acts
+    // only in Listening, Thinking, Synthesizing and Speaking; in any other state
+    // it logs a WARNING and ignores the EndCall.
+    void on_end_call_without_playback(
+        std::chrono::milliseconds goodbye_timeout_override = {}); // Listening..Speaking → WaitingForHangup
     void on_cancel_complete();                                    // BargeIn    → Listening
     void on_early_barge_in();                                   // Thinking|Synthesizing → BargeIn
     void on_transfer_requested(std::string queue_id,

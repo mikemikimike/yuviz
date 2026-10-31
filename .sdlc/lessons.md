@@ -450,11 +450,9 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
 
 54. [planner][tester][approver] When the suite needs a service the local machine lacks, the task file must say so up front
     (`## Test environment`), and the fan-in must check failures against the base commit before halting. A failure is
-    pre-existing only if the same test node ID fails on the base commit with the same exception type and message. It never
-    covers a test in a module the feature changed, or a setup/fixture error in the service the feature touches: those mean
-    the feature's own tests never ran (lesson 12), so start the service and re-run. The tester lists excused failures under
-    `## Pre-existing on base` in `06-test-report.md` with the base SHA; ship's zero-failure check excludes only that section,
-    and ship step 7 must see those tests pass in CI or report them as not exercised.
+    pre-existing only when the same test node ID fails with the same error on base, and only for tests that exercise no
+    module the diff touches. The tester lists each one under `## Pre-existing on base` in `06-test-report.md` as "not exercised",
+    never as passed, and CI must run them green before ship. A failing test that exercises a module the diff touches is always a blocker.
     *Earned: the PR #214 run halted twice at build on 50 clinic/toolexec fixture errors (no local Postgres socket) that failed
     identically on base.*
 
