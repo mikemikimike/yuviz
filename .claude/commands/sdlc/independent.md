@@ -15,7 +15,7 @@ Run after `/sdlc:test`. Lesson 52: this is the stage that caught what design, co
    - Run the affected service's test suite once, summary only.
    - Write `<dir>/05-review-independent.md`: a verdict line (`GREEN`, `AMBER` or `RED`), then findings with severity `blocking`, `high` or `minor`, each with `file:line`. GREEN with honest minors is a valid outcome.
 2. Blocking or high findings: fix them as `/sdlc:review` step 4 does, run the suite on the combined tree, then re-run this stage on the new diff. Max 2 rounds. If the fixes changed code after `/sdlc:security` passed, say so in `Open`.
-3. Record the stage in `state.json` like every other stage: `stages.independent = {"status": "passed" | "failed", "verdict": "<verdict>", "rounds": <n>, "findings_path": "<dir>/05-review-independent.md"}`. `passed` means no open blocking or high finding.
+3. Record the stage in `state.json` in the shape `/sdlc:run` uses for its stages: `stages.independent = {"status": "passed" | "failed", "verdict": "<verdict>", "rounds": <n>, "findings_path": "<dir>/05-review-independent.md"}`. `passed` means no open blocking or high finding.
 4. Print only:
 
 ```
@@ -23,3 +23,5 @@ Verdict: <verdict> after <n> round(s)
 Fixed: <one line per fixed finding>
 Open: <one line per remaining finding, or None>
 ```
+
+Then: `Run /sdlc:ship.`
