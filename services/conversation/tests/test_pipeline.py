@@ -4065,3 +4065,38 @@ async def test_an_empty_filler_is_synthesized_again_on_the_next_request(empty):
 )
 def test_a_dropped_sentence_is_rejoined_by_the_script_of_its_neighbours(reply, failed, expected):
     assert _spoken_reply([reply], failed) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("move", ["end", "transfer"])
+async def test_cancel_while_the_model_is_stalled_ends_the_turn_and_runs_barge_in_cleanup(move):
+    """#170: a barge-in while the LLM stalls must release the turn at once, and the interrupted
+    goodbye / transfer announcement must be abandoned (not acted on after the next reply) and the
+    cancelled user message must not stay in history."""
+    from libs.config_sdk.workflow import Node
+
+    async def _stalled(messages):
+        await asyncio.sleep(30)
+        yield "never"
+
+    llm = MagicMock()
+    llm.generate = _stalled
+    handler = _make_handler(_make_stt("bye now"), llm, _timed_tts(), system_prompt="You are Alex.")
+    if move == "end":
+        handler._workflow.pending_end = True
+    else:
+        handler._workflow.pending_transfer = Node(
+            id="t", type="transfer", name="Transfer", transfer_destination="+15550100")
+
+    async def _run():
+        return [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    task = asyncio.ensure_future(_run())
+    await asyncio.sleep(0.2)
+    assert not task.done()
+    await handler.on_cancel("s1")
+    await asyncio.wait_for(task, 2)   # not the 30 s model timeout
+
+    assert handler._workflow.pending_end is False
+    assert handler._workflow.pending_transfer is None
+    assert not any(m.role == "user" and m.content == "bye now" for m in handler._get_history("s1"))
