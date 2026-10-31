@@ -12,9 +12,8 @@ def _big_graph(n: int, pad: str = "Hi.") -> dict:
         {"id": f"p{i}", "type": "play", "data": {"prompt": pad}} for i in range(n - 2)
     ] + [HANGUP]
     ids = [x["id"] for x in nodes]
-    # Chain the first steps only: the edge cap (120) is separate from the step cap.
     edges = [{"id": f"e{i}", "source": a, "target": b} for i, (a, b) in enumerate(zip(ids, ids[1:]))]
-    return {"version": 1, "nodes": nodes, "edges": edges[:100]}
+    return {"version": 1, "nodes": nodes, "edges": edges}
 
 
 async def test_draft_accepts_51_and_200_steps(test_tenant, test_admin):
