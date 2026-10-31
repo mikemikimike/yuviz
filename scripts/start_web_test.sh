@@ -96,4 +96,4 @@ verify() {
 }
 
 echo "start_web_test.sh loaded. Functions: start_data, start_ollama, start_config_service, start_knowledge_service, start_conv1, start_conv2, start_webcall, start_admin_ui, verify"
-echo "Then open http://localhost:3000, go to an agent's page, and click 'Test Agent'."
+echo "Then open http://localhost:3000/login, go to an agent's page, and click 'Test Agent'."

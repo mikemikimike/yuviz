@@ -85,11 +85,11 @@ async def _resolve_session_deps(
     ctx: SessionContext, credential_redis, provider_registry: ProviderRegistry,
     config: IConfigProvider, stt, llm, tts,
 ):
-    # A credential, not the direction, is what makes this a test session:
-    # webcall sends direction="test" for every browser session. With a
-    # credential there is never a legacy fallback; without one, today's
-    # path runs unchanged, so inactive and missing agents stay indistinguishable.
-    if ctx.direction == "test" and ctx.test_credential:
+    # Browser test sessions (direction="test") must carry a credential minted for
+    # this tenant/agent; one without is refused rather than run as a live agent.
+    if ctx.direction == "test" and not ctx.test_credential:
+        raise AgentUnavailable()
+    if ctx.direction == "test":
         grant = await redeem_test_credential(
             credential_redis, ctx.test_credential, channel="voice", consume=True,
         )

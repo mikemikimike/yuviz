@@ -258,6 +258,8 @@ _BYPASS_REASONS = {
     # Redis as tenant:{slug} because the Gateway cannot fall back to Postgres for its VAD and timer settings.
     # Nothing read here is returned to a caller.
     "tenants-prewarm",
+    # Website-demo seed: finds its workspace, and reads a config only from the operator-named source workspace.
+    "seed-website-demo", "seed-website-demo-read-source",
     "agents-by-id", "call-flow-by-id", "carriers-by-id", "phone-numbers-by-id", "phone-numbers-did-lookup",
     "provider-configs-by-id", "telephony-configs-by-id", "tool-provider-configs-by-id",
     "calls-platform-read", "audit-log-platform-read",

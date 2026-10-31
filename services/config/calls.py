@@ -153,9 +153,8 @@ async def get_transcript(
 async def get_dashboard_stats(tenant_slug: str, *, hours: int = 24 * 30) -> dict[str, Any]:
     """Headline Dashboard numbers for one tenant over `hours`.
 
-    "success" = ended, not a failed transfer, and either had turns or ended cleanly as a flow-only call;
-    "failed" = ended with no turns and no clean flow ending, or a failed transfer.
-    live_calls ignores the window."""
+    "failed" = a failed-transfer or dropped close_reason (same as the calls page/export); turn_count is
+    not used, since flow-only calls legitimately have 0 turns. live_calls ignores the window."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(
@@ -168,11 +167,11 @@ async def get_dashboard_stats(tenant_slug: str, *, hours: int = 24 * 30) -> dict
             COUNT(*) FILTER (WHERE ended_at IS NULL) AS live_calls,
             COUNT(*) FILTER (
                 WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND ended_at IS NOT NULL
-                  AND COALESCE(close_reason <> ALL($5), TRUE) AND (turn_count > 0 OR flow_clean)
+                  AND (close_reason IS NULL OR close_reason <> ALL($3))
             ) AS success_count,
             COUNT(*) FILTER (
                 WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND ended_at IS NOT NULL
-                  AND ((turn_count = 0 AND NOT flow_clean) OR close_reason = ANY($5))
+                  AND close_reason = ANY($3)
             ) AS failed_count,
             COUNT(*) FILTER (
                 WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND direction = 'inbound'
@@ -242,15 +241,10 @@ async def get_dashboard_stats(tenant_slug: str, *, hours: int = 24 * 30) -> dict
             COUNT(*) FILTER (WHERE started_at >= NOW() - (2 * $2 * INTERVAL '1 hour')
                                AND started_at <  NOW() - ($2 * INTERVAL '1 hour')
                                AND close_reason LIKE 'TRANSFER%') AS prev_escalated_count
-        FROM (
-            SELECT *, COALESCE(
-                close_reason = 'TRANSFER_SUCCESS' OR (disposition = ANY($3) AND close_reason = ANY($4)), FALSE
-            ) AS flow_clean
-            FROM calls WHERE tenant_id = $1
-        ) c
+        FROM calls WHERE tenant_id = $1
         """,
-            tenant_slug, hours, list(_FLOW_CLEAN_DISPOSITIONS), list(_OUTCOME_REASONS["done"]),
-            list(_OUTCOME_REASONS["transfer_failed"]),
+            tenant_slug, hours,
+            [*_OUTCOME_REASONS["transfer_failed"], *_OUTCOME_REASONS["dropped"]],
         )
     d = dict(row)
     d["total_minutes"] = round(d.pop("total_duration_ms") / 60000, 2)
@@ -411,9 +405,6 @@ _OUTCOME_REASONS = {
         "transport_error", "close_timeout", "reconciled_inactive", "reconciled_stale", "reconciled_dead_node",
     ),
 }
-# Flow-only calls record their ending as `callflow:<Hangup.reason>` in calls.disposition; these are the
-# clean ones. `callflow:transfer_refused` is deliberately absent: the caller was refused a human.
-_FLOW_CLEAN_DISPOSITIONS = ("callflow:flow_complete", "callflow:retries_exhausted")
 _OUTCOME_LABELS = {
     "done": "Ended normally", "to_person": "Sent to a person",
     "transfer_failed": "Transfer failed", "dropped": "Call dropped",

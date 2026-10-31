@@ -110,8 +110,8 @@ message SessionOpenRequest {
   // "inbound" | "outbound"; informational today, from the WS metadata frame.
   string direction           = 12;
 
-  // Single-use credential for testing an inactive agent; minted by Config,
-  // redeemed by Conversation. The gateway never sets it.
+  // Single-use credential minted by Config and redeemed by Conversation; required
+  // for every direction="test" (browser) session. The gateway never sets it.
   string test_credential     = 13;
 
   RoutingStatus routing_status = 14;
