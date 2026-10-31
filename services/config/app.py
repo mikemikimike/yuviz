@@ -31,7 +31,7 @@ from . import tenants as tenants_service
 from .routers import (
     agent_tool_policies, agents, audit_log, auth, call_flows, calls, carriers,
     invites as invites_router,
-    live_calls, local_models, phone_numbers, provider_configs, public_demo, telephony_configs, tenants,
+    live_calls, local_models, phone_numbers, platform_ai, provider_configs, public_demo, telephony_configs, tenants,
     tool_catalog, tool_provider_configs, users,
 )
 
@@ -100,6 +100,7 @@ class AgentAssistThrottle:
 
     def __init__(self) -> None:
         self.mint = FixedWindowCounter(limit=20, window_seconds=60)
+        self.voice = FixedWindowCounter(limit=30, window_seconds=60)
         self.turn = FixedWindowCounter(limit=60, window_seconds=60)
         self.revise = FixedWindowCounter(limit=20, window_seconds=3600)
 
@@ -118,6 +119,9 @@ class AgentAssistThrottle:
 
     def check_revise(self, tenant_id: str) -> None:
         self._check(self.revise, tenant_id)
+
+    def check_voice(self, tenant_id: str) -> None:
+        self._check(self.voice, tenant_id)
 
 
 def _too_many_requests(detail: str, retry_after: int) -> HTTPException:
@@ -218,6 +222,8 @@ app.include_router(call_flows.tenant_scoped_router)
 app.include_router(call_flows.router)
 app.include_router(provider_configs.tenant_scoped_router)
 app.include_router(provider_configs.router)
+app.include_router(platform_ai.settings_router)
+app.include_router(platform_ai.tenant_scoped_router)
 app.include_router(phone_numbers.tenant_scoped_router)
 app.include_router(phone_numbers.router)
 app.include_router(carriers.tenant_scoped_router)
