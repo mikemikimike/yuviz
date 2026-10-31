@@ -181,7 +181,8 @@ class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
             async with self._client() as client:
                 open_matches = await self._open_calls_to(client, target)
                 recorded = await self._recorded_calls_to(client, target, created_after) if open_matches == [] else None
-        except (httpx.HTTPError, TelephonyProviderError, KeyError, TypeError, ValueError):
+        except (httpx.HTTPError, TelephonyProviderError, KeyError, TypeError, ValueError) as exc:
+            log.warning("Vobiz reconcile failed reference=%s: %s", reference, type(exc).__name__)
             return ReconcileResult(outcome="indeterminate")
         matches = open_matches or recorded
         if matches is None or len(matches) > 1:
@@ -244,8 +245,10 @@ class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
                 if (_digits(record.get("to_number")), _digits(record.get("from_number"))) == target:
                     matches.append(str(record["call_uuid"]))
             offset += len(records)
-            if not records or offset >= total:
+            if offset >= total:
                 return matches
+            if not records:
+                return None
         return None
 
     def verify_webhook_signature(self, url: str, headers: dict[str, str]) -> bool:

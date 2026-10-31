@@ -77,6 +77,19 @@ async def test_history_beyond_the_page_cap_is_indeterminate():
     assert (await _reconcile(_provider(cdrs))).outcome == "indeterminate"
 
 
+async def test_short_page_before_total_is_indeterminate():
+    cdrs = [_cdr(f"x{i}", to="+919999999999", at=SENT + timedelta(seconds=60 - i)) for i in range(20)]
+    assert (await _reconcile(_provider(cdrs, total=50))).outcome == "indeterminate"
+
+
+async def test_vobiz_error_is_logged_without_numbers(caplog):
+    p = VobizTelephonyProvider({"auth_id": "MA_X", "auth_token": "tok"})
+    p._http_transport = httpx.MockTransport(lambda req: httpx.Response(401))
+    with caplog.at_level("WARNING"):
+        await _reconcile(p)
+    assert "reference=k: TelephonyProviderError" in caplog.text and TO not in caplog.text
+
+
 async def test_send_too_recent_is_indeterminate_without_asking_vobiz():
     seen: list = []
     p = _provider([], seen=seen)
