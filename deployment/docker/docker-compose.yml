@@ -294,6 +294,9 @@ services:
       retries: 60
       # First run downloads whisper + kokoro before it can serve.
       start_period: 300s
+    # serve() shutdown worst case: 5 s gRPC grace + 10 s wait_closed + 25 s transcript drain = 40 s.
+    # Docker's default 10 s would SIGKILL mid-drain and lose end_call writes.
+    stop_grace_period: 60s
 
   webcall:
     <<: *python-service
