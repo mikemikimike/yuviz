@@ -298,6 +298,42 @@ async def test_get_dashboard_stats_counts_and_sums_minutes(test_tenant, scoped, 
         await pool.execute("DELETE FROM calls WHERE session_id = $1", sid)
 
 
+async def test_get_dashboard_stats_flow_only_calls_are_not_failed(test_tenant, scoped, pool):
+    """Issue #204: flow-only calls have turn_count 0 but a clean outcome; only failed/dropped reasons are failures."""
+    cases = [  # (close_reason, turn_count, counts_as_failed)
+        ("caller_hangup", 0, False), ("TRANSFER_SUCCESS", 0, False), (None, 0, False),
+        ("session_destroyed", 0, False), ("stream_ended", 3, False),
+        ("TRANSFER_FAILED", 0, True), ("TRANSFER_FAILED", 4, True), ("TRANSFER_TIMEOUT", 0, True),
+        ("transport_error", 2, True), ("reconciled_stale", 0, True),
+    ]
+    ids = []
+    for reason, turns, _ in cases:
+        sid = f"test-call-{uuid.uuid4().hex[:8]}"
+        ids.append(sid)
+        await pool.execute(
+            "INSERT INTO calls (session_id, tenant_id, direction, turn_count, close_reason, ended_at) "
+            "VALUES ($1, $2, 'inbound', $3, $4, NOW())",
+            sid, test_tenant["slug"], turns, reason,
+        )
+    # An unended call is neither success nor failed.
+    live = f"test-call-{uuid.uuid4().hex[:8]}"
+    ids.append(live)
+    await pool.execute(
+        "INSERT INTO calls (session_id, tenant_id, direction, turn_count) VALUES ($1, $2, 'inbound', 0)",
+        live, test_tenant["slug"],
+    )
+
+    stats = await calls.get_dashboard_stats(test_tenant["slug"], hours=24)
+
+    failed = sum(1 for *_, f in cases if f)
+    assert stats["failed_count"] == failed
+    assert stats["success_count"] == len(cases) - failed
+    assert stats["total_calls"] == len(cases) + 1
+
+    for sid in ids:
+        await pool.execute("DELETE FROM calls WHERE session_id = $1", sid)
+
+
 async def test_get_dashboard_stats_respects_hours_window(test_tenant, scoped, pool):
     session_id = f"test-call-{uuid.uuid4().hex[:8]}"
     await pool.execute(

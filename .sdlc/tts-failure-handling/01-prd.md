@@ -1,0 +1,56 @@
+# PRD: TTS failure handling in the conversation pipeline
+
+Market research skipped: this is codebase-specific failure handling in `services/conversation`, not a feature other products define a convention for.
+
+## Problem
+When text-to-speech produces no audio, the pipeline records what the caller never heard. A provider that returns empty audio without raising is treated as success, so the sentence is stored as spoken (#174). The max-duration goodbye is stored as spoken and no EndCall follows when its TTS fails, so the call never ends (#219). Stored CJK replies are rejoined with spaces after a failed sentence (#220). A TTS failure on an `[[END_CALL]]` reply hangs up silently, and a transfer goes out unannounced (#205 item 7): the existing code already withholds the hangup when every TTS raises, but a zero-byte chunk is counted as audio, so the call still hangs up silently. PR #200 fixed only the raising case for a normal reply.
+
+## Scope
+- In: a sentence whose TTS returns no audio, whether it raises or returns zero bytes, is left out of the stored transcript and model history of the turn, on every reply path that already tracks unspoken sentences (#174 remaining part).
+- In: a fixed phrase (greeting or filler) that synthesizes to no audio is never cached or replayed as a hit, whether the second request overlaps the first or comes later.
+- In: when the max-duration goodbye cannot be spoken, the unspoken goodbye is not stored as spoken and the call still ends, including the gateway hanging up with no audio played (#219).
+- In: after a failed sentence is removed, the remaining sentences are rejoined without inserted spaces for languages that do not use them (Chinese, Japanese), and unchanged for space-delimited languages (#220).
+- In: when the TTS of an `[[END_CALL]]` reply, its farewell, or its fallback goodbye fails (raises or returns zero bytes), the existing withhold-hangup behaviour applies and is logged, not a silent hangup. A transfer whose announcement TTS fails (raising or zero-byte) still goes ahead, with a WARNING logged; it is not withheld (#205 item 7 only).
+- Out: the other #205 items 1-6 (barge-in count, interrupted-row text, handoff agent, caller words in history, Live Calls stage, `tool_calls`). Do not change them or close #205.
+- Out: transcript, session-store and persistence-schema changes (parallel branch `fix/transcript-turn-accuracy`). Stay in the TTS and pipeline path.
+- Out: a spoken or text fallback for a whole-reply failure beyond what #200 already does, and any change to TTS provider selection or voices.
+- Out: fixing providers so they stop returning empty audio. The pipeline must tolerate it.
+- Out: any gateway change beyond how it handles an EndCall that arrives with no playback in the max-duration case.
+
+## Acceptance criteria
+1. Given a TTS provider that yields zero chunks for a sentence without raising, when that sentence is part of a reply, then it is absent from the stored transcript text and the model history.
+2. Given a provider that yields only zero-length chunks without raising, when synthesizing a reply sentence, then it is treated as no audio, and no empty chunk is sent to the caller as audio.
+3. Given a two-sentence reply where the first sentence returns empty audio and the second succeeds, when the turn completes, then the stored reply equals the second sentence only and the caller still gets the second sentence's audio.
+4. Given a reply starting with "-5 degrees outside today." and a provider that returns empty audio for it, when the turn completes, then the sentence is not stored as spoken (the #174 repro).
+5. Given a sentence that fails TTS by raising, when the turn completes, then behavior is unchanged from PR #200: it is not stored and the terminal chunk is still sent.
+6. Given a fixed phrase (greeting or filler) whose first synthesis is in flight and returns empty audio, when a second request for the same phrase is waiting on that in-flight synthesis (`pipeline.py` ~1968-1973), then the waiter does not replay the empty result as a hit but synthesizes the phrase again. A test drives two concurrent requests with a provider that returns empty audio on the first call and real audio on the second, and asserts the second request receives audio; it must fail on base `redesign`.
+7. Given a fixed phrase whose synthesis completes with zero audio (the stream finishes without raising, `phrase_audio.finish` receives an empty list), when the same phrase is requested again after the first request has finished (no overlap), then the empty result was not stored and the phrase is synthesized again, and a provider returning real audio on that second call yields audio. A test calls the phrase twice in sequence for both a greeting and a filler, and it must fail on base `redesign`.
+8. Given a Chinese or Japanese reply with three sentences where the middle one fails TTS, when stored, then the remaining sentences are joined with no space between them (e.g. `我很好。谢谢。`).
+9. Given an English reply where one sentence fails TTS, when stored, then the remaining sentences are still joined with a single space, as today.
+10. Given the existing "No." versus "Account No. 4512" case, when "No." fails TTS, then "Account No. 4512" is not stripped (existing behavior kept).
+11. Given the max call duration is reached and the goodbye TTS returns no audio or raises, when the max-duration turn completes, then the `record_turn` call in the max-duration branch (`pipeline.py` ~1034) still stores the caller's text, and its agent text is `fallback_goodbye` if that played, otherwise empty; it is never `max_duration_goodbye`.
+12. Given the max call duration is reached and both the goodbye and the fallback goodbye produce no audio, when the turn ends, then the servicer sends EndCall, the log states why, and the gateway hangs up within the EndCall grace period with no audio played (a gateway test in `tests/call_fsm_test.cpp` or equivalent, plus a servicer test).
+13. Given an EndCall sent for the max-duration case with no audio, when the gateway handles it, then it does not leave a pending end-call flag that a later turn's playback could consume: after that turn, a subsequent turn's `on_playback_finished` hangs up zero additional times and no stale EndCall state remains.
+14. Given the max call duration is reached and the goodbye plays normally, when the turn ends, then the stored goodbye and EndCall are unchanged from today.
+15. Given a call past the cap whose goodbye TTS fails, when the call has ended, then no later turn repeats the max-duration branch (it ends on the first turn).
+16. Given a reply carrying `[[END_CALL]]` whose reply, farewell and fallback goodbye all produce no audio (every TTS raises, or returns zero bytes), when the turn completes, then the hangup is withheld, `abandon_end()` is called, and a WARNING naming the reason is logged; in particular a zero-byte chunk must not set `any_audio`, `got_farewell_audio` or `got_goodbye_audio` (`pipeline.py` ~1253, ~1260) nor `audio_sent` (`servicer.py` ~580), so the call does not hang up silently. A test asserts the withhold and the log line for both the raising and the zero-byte case.
+17. Given one servicer under test, when a max-duration turn with no audio and an `[[END_CALL]]` turn with no audio are each run, then the max-duration turn sends EndCall and the `[[END_CALL]]` turn sends no EndCall (it still logs the pipeline's existing "End of call withheld" WARNING, `pipeline.py` ~1267-1271). Both are asserted in one test, and it must fail on base `redesign` for the max-duration arm.
+18. Given a reply carrying `[[END_CALL]]` where the reply text fails TTS but the farewell or fallback goodbye plays, when the turn completes, then the caller hears the goodbye and the call ends.
+19. Given a reply carrying `[[END_CALL]]` where the reply audio plays normally, when the turn completes, then the call ends exactly as today.
+20. Given a reply carrying a transfer request whose announcement TTS fails, when the turn completes, then a WARNING is logged and the transfer still proceeds (it is not dropped).
+21. Given a barge-in (`cancel_event` set), when TTS output is empty or fails, then no EndCall or transfer is sent that was not sent before this change.
+22. Given a TTS failure on any path above, when the turn ends, then the terminal empty `TtsChunk` is still sent (the servicer's existing guarantee).
+23. Given the existing tests in `services/conversation/tests/test_pipeline.py`, `test_end_call_guard.py` and `test_workflow_pipeline.py`, and the gateway tests in `tests/call_fsm_test.cpp`, when the suites run, then they pass unmodified unless they asserted the buggy behavior, and each such edit is named in the PR.
+
+## Constraints
+- Sentence-assembly and TTS entry live in `services/conversation/pipeline.py`: `_spoken_reply` (line ~280), the max-duration branch (~1013-1047), the END_CALL and transfer branch (~1248-1284, which already withholds the hangup and calls `abandon_end()` when every TTS raises), and `_synthesize_sentence_stream` with its `unspoken_sentences` tracking (~1942-1997).
+- `services/conversation/servicer.py` sends EndCall only when audio was sent (~639-654) and always sends a terminal empty chunk (~258). The gate exists because the gateway applies EndCall only at playback-finished (`gateway/src/session/CallSession.cpp` ~405-412 sets `pending_end_call_`, consumed at ~527-535 in `on_playback_finished`), so an EndCall with no playback would leak into a later turn. Any change to that gating applies to every EndCall source, so it must be scoped to the max-duration case, with a test (criterion 17). The `[[END_CALL]]` all-fail case (criterion 16) must not widen this gate. Today `HandlerResponse(end_call=True)` at `pipeline.py` ~1043 and ~1263 carries nothing that tells the two sources apart, so the build must add such a distinction.
+- Making the max-duration EndCall work with no audio requires a gateway change (C++, `gateway/src/session/CallSession.cpp`, `CallFSM.cpp`): without it, the servicer sending EndCall cannot end the call. Scope that change to the no-playback max-duration case only; normal goodbye behaviour (criteria 13, 14) must not change.
+- Do not touch transcript or session-store modules (`transcripts`, `session_finalizer.py`, persistence), to avoid conflict with `fix/transcript-turn-accuracy`. If a fix cannot avoid them, report it instead of editing.
+- Language-aware joining must be decided from the script of the joined sentences or the session language code, not a hardcoded provider list. Language handling follows lesson 45 (normalise at the adapter). `services/conversation/i18n/` holds only `en.py` and `hi.py` and has no Chinese or Japanese data, so it is not the source for this decision.
+- Tests follow lesson 12: each new test must be shown to fail on base `redesign`, and none may reconfigure a tuning constant to reach its scenario (lesson 25). The fixed-phrase waiter test must use genuinely overlapping callers (lesson 53).
+- Callers of `_synthesize_sentence_stream` (greeting, fillers, prewarm, transition speech) must still work. Grep every caller before changing its return or empty-audio semantics (lessons 17, 49).
+- Base branch is `redesign`.
+
+## Open questions
+None.
