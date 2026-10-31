@@ -68,6 +68,7 @@ protected:
     float       last_energy_db_{0.0f};
     std::string last_stt_text_;
     bool        last_playback_interrupted_{false};
+    int         playback_finished_count_{0};
     std::string last_transfer_queue_;
     std::string last_close_reason_;
     bool        last_conversation_finalized_{false};
@@ -89,7 +90,10 @@ protected:
         };
         h.on_speech_started = [this](float e) { last_energy_db_ = e; };
         h.on_stt_final = [this](std::string txt, float) { last_stt_text_ = std::move(txt); };
-        h.on_playback_finished = [this](bool i) { last_playback_interrupted_ = i; };
+        h.on_playback_finished = [this](bool i) {
+            last_playback_interrupted_ = i;
+            ++playback_finished_count_;
+        };
         h.on_transfer_requested = [this](std::string q, std::string) {
             last_transfer_queue_ = std::move(q);
         };
@@ -286,6 +290,74 @@ TEST_F(CallFsmTest, WaitingForHangup_TimeoutClosesSession) {
     EXPECT_EQ(fsm.state(), CallFsmState::Closing);
     EXPECT_EQ(last_close_reason_, "goodbye_timeout");
     EXPECT_TRUE(metrics_.has_increment("fsm.goodbye_timeout"));
+}
+
+TEST_F(CallFsmTest, EndCallWithoutPlayback_FromThinking_EntersWaitingForHangup) {
+    auto fsm = make_fsm();
+    fsm.on_session_start();
+    fsm.on_service_ready();
+    fsm.on_speech_started(0.3f);
+    fsm.on_stt_final("hello", 0.9f);
+    ASSERT_EQ(fsm.state(), CallFsmState::Thinking);
+
+    fsm.on_end_call_without_playback(std::chrono::milliseconds{750});
+    EXPECT_EQ(fsm.state(), CallFsmState::WaitingForHangup);
+    EXPECT_EQ(last_timer_duration(FsmTimerType::GoodbyeTimeout), std::chrono::milliseconds{750});
+}
+
+TEST_F(CallFsmTest, EndCallWithoutPlayback_FromSynthesizing_EntersWaitingForHangup) {
+    auto fsm = make_fsm();
+    fsm.on_session_start();
+    fsm.on_service_ready();
+    fsm.on_speech_started(0.3f);
+    fsm.on_stt_final("hello", 0.9f);
+    fsm.on_text_ready();
+    ASSERT_EQ(fsm.state(), CallFsmState::Synthesizing);
+
+    fsm.on_end_call_without_playback();
+    EXPECT_EQ(fsm.state(), CallFsmState::WaitingForHangup);
+}
+
+TEST_F(CallFsmTest, EndCallWithoutPlayback_FromRecognizing_IsNoOp) {
+    // The caller is mid-utterance; the cap fires again next turn.
+    auto fsm = make_fsm();
+    fsm.on_session_start();
+    fsm.on_service_ready();
+    fsm.on_speech_started(0.3f);
+    ASSERT_EQ(fsm.state(), CallFsmState::Recognizing);
+
+    const auto timers_before = scheduled_timers_.size();
+    fsm.on_end_call_without_playback();
+    EXPECT_EQ(fsm.state(), CallFsmState::Recognizing);
+    EXPECT_EQ(scheduled_timers_.size(), timers_before);
+}
+
+TEST_F(CallFsmTest, EndCallWithoutPlayback_FromSpeaking_ThenEmptyFinalFrameChangesNothing) {
+    auto fsm = make_fsm();
+    drive_to_speaking(fsm);
+
+    fsm.on_end_call_without_playback();
+    ASSERT_EQ(fsm.state(), CallFsmState::WaitingForHangup);
+    EXPECT_EQ(playback_finished_count_, 1);
+
+    const auto timers_before = scheduled_timers_.size();
+    fsm.on_playback_finished(false, false);
+    EXPECT_EQ(fsm.state(), CallFsmState::WaitingForHangup);
+    EXPECT_EQ(scheduled_timers_.size(), timers_before);
+
+    fsm.on_timer_fired(FsmTimerType::GoodbyeTimeout);
+    EXPECT_EQ(fsm.state(), CallFsmState::Closing);
+    EXPECT_EQ(last_close_reason_, "goodbye_timeout");
+}
+
+TEST_F(CallFsmTest, EndCallWithoutPlayback_InBargeIn_IsNoOp) {
+    auto fsm = make_fsm();
+    drive_to_speaking(fsm);
+    fsm.on_playback_finished(/*interrupted=*/true);
+    ASSERT_EQ(fsm.state(), CallFsmState::BargeIn);
+
+    fsm.on_end_call_without_playback();
+    EXPECT_EQ(fsm.state(), CallFsmState::BargeIn);
 }
 
 TEST_F(CallFsmTest, EndCallPending_IgnoredWhenInterrupted) {

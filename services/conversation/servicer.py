@@ -27,7 +27,8 @@ import grpc.aio
 from .event_bus import EventBus, TransferRequested
 from .rejection import RejectedCallHangup
 from .session import (
-    AgentUnavailable, ConversationSession, IConversationHandler, RoutingStatus, SessionContext,
+    AgentUnavailable, ConversationSession, IConversationHandler, MAX_UTTERANCE_BYTES,
+    RoutingStatus, SessionContext,
 )
 from .transcript_builder import TranscriptBuilder
 
@@ -60,6 +61,12 @@ _ROUTING_STATUS = {
     pb.ROUTING_STATUS_UNKNOWN:     RoutingStatus.UNKNOWN,
     pb.ROUTING_STATUS_UNAVAILABLE: RoutingStatus.UNAVAILABLE,
 }
+
+
+def _is_reply_audio(response) -> bool:
+    """True when the response carries non-empty reply audio; a filler replays from cache even while
+    TTS is down, and a zero-byte payload is silence, so neither is the goodbye."""
+    return not response.filler and any(response.tts_payloads)
 
 
 def _consume_pending_transfer(tr, interrupted: bool, sid: str):
@@ -363,6 +370,10 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         # not again by each later turn (which would discard the next utterance's audio as
         # "trailing frames").
         held: collections.deque[pb.GatewayMessage] = collections.deque()
+        # Audio bytes held for the utterance being collected behind the last deferred
+        # speech_ended; capped like session.push_audio so a flood can't pile up in memory
+        # while a slow turn runs.
+        held_audio_bytes = 0
         turn_stream: AsyncGenerator | None = None
 
         async def _turn_responses(turn: AsyncIterator) -> AsyncGenerator:
@@ -475,6 +486,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     cancelled             = False
                     stt_sent              = False
                     end_call_requested    = False
+                    end_call_without_audio = False
                     end_call_grace_period = 0
                     turn_transfer         = None
 
@@ -495,7 +507,15 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 backlog.appendleft(None)  # so outer loop exits
                                 break
                             pcase = pending.WhichOneof("payload")
+                            if not held:
+                                held_audio_bytes = 0
                             if held and pcase != "cancel_generation":
+                                if pcase == "audio_chunk":
+                                    if held_audio_bytes >= MAX_UTTERANCE_BYTES:
+                                        continue  # over the utterance cap: dropped, as push_audio would
+                                    held_audio_bytes += len(pending.audio_chunk.payload)
+                                elif pcase == "speech_ended":
+                                    held_audio_bytes = 0  # the next utterance starts
                                 held.append(pending)
                             elif pcase == "cancel_generation":
                                 await session.cancel()
@@ -559,6 +579,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         if not cancelled:
                             if response.end_call:
                                 end_call_requested    = True
+                                end_call_without_audio = response.end_call_without_audio
                                 end_call_grace_period = response.end_call_grace_period_ms
                             if response.transfer_request:
                                 tr = response.transfer_request
@@ -592,9 +613,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             # Stream TTS chunks as each sentence is synthesized —
                             # advances C++ FSM Thinking→Synthesizing→Speaking so
                             # barge-in detection works during playback.
-                            if response.tts_payloads:
-                                # A filler replays from cache even while TTS is down, so it is not the goodbye.
-                                audio_sent = audio_sent or not response.filler
+                            if any(response.tts_payloads):
+                                audio_sent = audio_sent or _is_reply_audio(response)
                                 if not tts_started_sent:
                                     yield pb.ServiceMessage(
                                         tts_started=pb.TtsStarted(session_id=sid)
@@ -662,6 +682,19 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             end_call=pb.EndCall(
                                 session_id=sid,
                                 reason="agent_ended_call",
+                                grace_period_ms=end_call_grace_period,
+                            )
+                        )
+                    elif end_call_requested and end_call_without_audio and not cancelled:
+                        # The max-duration cap fires even when nothing played; the gateway enters the end-call
+                        # grace period, where the caller can still cancel by speaking.
+                        log.warning(
+                            "Converse: max-duration EndCall with no audio session=%s", sid,
+                        )
+                        yield pb.ServiceMessage(
+                            end_call=pb.EndCall(
+                                session_id=sid,
+                                reason="max_duration_no_audio",
                                 grace_period_ms=end_call_grace_period,
                             )
                         )
