@@ -472,6 +472,10 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     end_call_without_audio = False
                     end_call_grace_period = 0
                     turn_transfer         = None
+                    # Audio seen while no utterance is deferred yet: the next utterance's own
+                    # frames if a speech_ended follows, trailing frames of this one if not.
+                    pre_audio: collections.deque[pb.GatewayMessage] = collections.deque()
+                    pre_audio_bytes = 0
 
                     # Keep the inner turn: teardown must aclose() it (not only the wrapper) so the
                     # pipeline's GeneratorExit handler records the interrupted turn.
@@ -487,6 +491,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 # Stream ended during pipeline — stop generating.
                                 await session.cancel()
                                 cancelled = True
+                                pre_audio.clear()
+                                pre_audio_bytes = 0
                                 backlog.appendleft(None)  # so outer loop exits
                                 break
                             pcase = pending.WhichOneof("payload")
@@ -503,6 +509,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             elif pcase == "cancel_generation":
                                 await session.cancel()
                                 cancelled = True
+                                # Frames from before the cancel are not part of the barge-in.
+                                pre_audio.clear()
+                                pre_audio_bytes = 0
                                 # Ack now so C++ leaves BargeIn without waiting for
                                 # the 500 ms barge_in_window; don't break — let the
                                 # generator exhaust to release pipeline resources.
@@ -535,14 +544,20 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                         trace_id=pending.audio_chunk.trace_id,
                                     )
                                 else:
-                                    # Trailing frames of the utterance already being
-                                    # processed — safe to discard.
-                                    log.debug(
-                                        "Discarding trailing audio_chunk in pipeline session=%s", sid,
-                                    )
+                                    # Either trailing frames of this utterance or the start of the
+                                    # next one; only a following speech_ended tells which.
+                                    # Bounded to one utterance so a long turn cannot grow it.
+                                    pre_audio.append(pending)
+                                    pre_audio_bytes += len(pending.audio_chunk.payload)
+                                    while pre_audio_bytes > MAX_UTTERANCE_BYTES and pre_audio:
+                                        pre_audio_bytes -= len(
+                                            pre_audio.popleft().audio_chunk.payload)
                             elif pcase == "speech_ended":
                                 # New utterance while this turn's pipeline still runs —
-                                # leave it for the outer loop.
+                                # leave it for the outer loop, with the audio sent before it.
+                                held.extend(pre_audio)
+                                pre_audio.clear()
+                                pre_audio_bytes = 0
                                 held.append(pending)
                             elif pcase in (
                                 "transfer_initiated", "transfer_completed", "transfer_failed",
