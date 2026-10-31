@@ -43,6 +43,7 @@ PROTOCOL_VERSION = "1.0"
 _SESSION_IN_USE = "session_id already in use"
 _INVALID_SESSION_ID = "invalid session_id"
 _MAX_SESSION_ID_LEN = 128
+_AT_CAPACITY = "conversation service at capacity"
 # Fixed peer-facing texts: exception strings can carry hosts, ports and DSNs, so they stay in the server log.
 _INTERNAL_MESSAGE = "internal error"
 _REJECTED_MESSAGE = "call rejected"
@@ -117,7 +118,13 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         self,
         handler_factory: Callable[[SessionContext], Awaitable[IConversationHandler]],
         transcripts: TranscriptBuilder | None = None,
+        max_sessions: int = 0,
+        on_capacity_change: Callable[[bool], None] | None = None,
     ) -> None:
+        # max_sessions <= 0 means no cap. A new call over the cap is refused with RESOURCE_EXHAUSTED
+        # so the gateway can retry another replica instead of degrading every live call here.
+        self._max_sessions = max_sessions
+        self._on_capacity_change = on_capacity_change
         self._handler_factory = handler_factory
         self._transcripts = transcripts
         self._stream_tasks: set[asyncio.Task] = set()
@@ -181,7 +188,13 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         sid, open_req.tenant_id)
             await context.abort(grpc.StatusCode.ALREADY_EXISTS, _SESSION_IN_USE)
             return
+        if self._max_sessions > 0 and len(self._live_sessions) >= self._max_sessions:
+            log.warning("Converse: at capacity (%d live sessions), refused session=%s",
+                        len(self._live_sessions), sid)
+            await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, _AT_CAPACITY)
+            return
         self._live_sessions.add(sid)
+        self._notify_capacity()
         try:
             async with contextlib.aclosing(self._serve(open_req, request_iterator)) as stream:
                 async for message in stream:
@@ -191,6 +204,11 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             if self._transcripts is not None:
                 self._transcripts.discard_session(sid)
             self._live_sessions.discard(sid)
+            self._notify_capacity()
+
+    def _notify_capacity(self) -> None:
+        if self._on_capacity_change is not None and self._max_sessions > 0:
+            self._on_capacity_change(len(self._live_sessions) >= self._max_sessions)
 
     async def _serve(
         self,
