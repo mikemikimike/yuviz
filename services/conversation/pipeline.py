@@ -277,6 +277,14 @@ def _last_sentence(reply_text: str) -> str:
     return next((p for p in reversed(sentences) if p), "")
 
 
+def _join_sentences(sentences: list[str]) -> str:
+    """Rejoin _SENTENCE_RE pieces: no space after a CJK sentence end, one space after anything else."""
+    joined = ""
+    for sentence in filter(None, sentences):
+        joined += sentence if not joined or joined.endswith(("。", "！", "？")) else " " + sentence
+    return joined
+
+
 def _spoken_reply(raw_tokens: list[str], unspoken: list[str]) -> str:
     """The reply text minus directives and the sentences whose TTS produced no audio."""
     text = DirectiveParser.parse("".join(raw_tokens)).clean_text.strip()
@@ -288,7 +296,7 @@ def _spoken_reply(raw_tokens: list[str], unspoken: list[str]) -> str:
         sentences = [s.strip() for s in _SENTENCE_RE.split(text)]
         if failed in sentences:
             sentences.remove(failed)
-            text = " ".join(sentences)
+            text = _join_sentences(sentences)
         else:
             text = text.replace(failed, "", 1)
     return " ".join(text.split())
@@ -1026,14 +1034,25 @@ class PipelineConversationHandler:
             async for chunk in self._synthesize_sentence_stream(max_duration_goodbye, session_id):
                 got_audio = True
                 yield HandlerResponse(tts_payloads=[chunk])
+            got_fallback_audio = False
+            fallback_goodbye = t("fallback_goodbye", spoken)
             if not got_audio:
                 # Some TTS must be sent or EndCall is dropped.
-                async for chunk in self._synthesize_sentence_stream(t("fallback_goodbye", spoken), session_id):
+                async for chunk in self._synthesize_sentence_stream(fallback_goodbye, session_id):
+                    got_fallback_audio = True
                     yield HandlerResponse(tts_payloads=[chunk])
+            if not got_audio and not got_fallback_audio:
+                log.warning(
+                    "Max-duration goodbye produced no audio — ending call without a goodbye session=%s",
+                    session_id,
+                )
+            spoken_goodbye = (
+                max_duration_goodbye if got_audio else fallback_goodbye if got_fallback_audio else ""
+            )
             if self._transcripts is not None:
                 self._transcripts.record_turn(
                     session_id, stt_result.text, stt_result.confidence,
-                    max_duration_goodbye, False,
+                    spoken_goodbye, False,
                     latency=TurnLatency(
                         stt_ms=stt_ms, stt_engine=type(self._stt).__name__,
                         tts_engine=type(self._tts).__name__,
@@ -1043,6 +1062,7 @@ class PipelineConversationHandler:
             yield HandlerResponse(
                 end_call=True,
                 end_call_grace_period_ms=self._goodbye_grace_period_ms,
+                end_call_without_audio=True,
             )
             return
 
@@ -1279,8 +1299,12 @@ class PipelineConversationHandler:
             self._session(session_id).fabrication_triggered_transfer = False
             if announcement:
                 # The servicer holds the TransferRequest until this has played.
+                got_announcement_audio = False
                 async for chunk in self._synthesize_sentence_stream(announcement, session_id):
+                    got_announcement_audio = True
                     yield HandlerResponse(tts_payloads=[chunk])
+                if not got_announcement_audio:
+                    log.warning("Transfer announcement produced no audio — transferring unannounced session=%s", session_id)
             yield HandlerResponse(transfer_request=transfer_request)
         elif refused_reason is not None and not end_call and not cancel_event.is_set():
             # The model's own words ("connecting you") are already spoken by now, so tell it the transfer is not
@@ -1984,14 +2008,14 @@ class PipelineConversationHandler:
                     log.warning("TTS pin failed session=%s", session_id, exc_info=True)
             async for chunk in tts.synthesize_stream(text, self._sample_rate, **kwargs):
                 if not chunk:
-                    continue    # empty audio is not speech; counting it would store an unspoken sentence
+                    continue
                 got_audio = True
                 if cache:
                     collected.append(chunk)
                 yield chunk
-            complete = got_audio    # an empty result is a failed attempt, never cached for replay
+            complete = True
             if not got_audio:
-                log.warning("TTS returned no audio chars=%d session=%s", len(text), session_id)
+                log.warning("TTS produced no audio chars=%d session=%s", len(text), session_id)
                 if in_reply:
                     self._session(session_id).unspoken_sentences.append(sentence)
         except Exception:

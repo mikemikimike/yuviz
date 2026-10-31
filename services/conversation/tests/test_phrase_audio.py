@@ -72,13 +72,17 @@ def test_the_returned_list_is_a_copy_so_a_caller_cannot_corrupt_the_cache():
 
 def test_the_cache_dies_with_the_tts_instance():
     import gc
+    # Other tests' instances may still await collection; count only this one's entry.
+    gc.collect()
+    others = len(phrase_audio._caches)
     tts = _Tts()
     phrase_audio.store(tts, (None, 16000, "Hi."), [b"\x01"])
     assert len(phrase_audio._caches.get(tts, ())) == 1
+    assert len(phrase_audio._caches) == others + 1
     del tts
     gc.collect()
 
-    assert len(phrase_audio._caches) == 0
+    assert len(phrase_audio._caches) == others
 
 
 def test_a_tts_that_cannot_be_weakly_referenced_is_simply_not_cached():
