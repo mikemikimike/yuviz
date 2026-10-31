@@ -451,3 +451,47 @@ async def test_audio_under_the_cap_is_untouched(monkeypatch):
     )
 
     assert audios[2] == b"\x03" * 1000
+
+
+async def test_cancel_drops_pre_cancel_frames_so_the_barge_in_utterance_is_clean():
+    """Frames buffered before a cancel_generation must not be replayed after the barge-in audio."""
+    audios: list[bytes] = []
+    release = asyncio.Event()
+
+    async def turn(session_id, audio, duration_ms, energy_db):
+        audios.append(audio)
+        if len(audios) == 1:
+            await release.wait()
+        yield HandlerResponse(stt_text=f"turn{len(audios)}")
+
+    servicer, handler = _servicer(turn)
+    handler.on_audio.return_value = HandlerResponse()
+    done = asyncio.Event()
+
+    async def stream():
+        yield _open()
+        yield _speech_ended()
+        await asyncio.sleep(0.05)
+        yield _audio(b"\x09\x09")
+        yield _cancel()
+        yield _audio(b"\x05\x05")
+        yield _speech_ended()
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.Event().wait()
+
+    async def consume():
+        async for _ in servicer.Converse(stream(), AsyncMock()):
+            if len(audios) == 2:
+                done.set()
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(done.wait(), 3)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    assert audios[1] == b"\x05\x05"

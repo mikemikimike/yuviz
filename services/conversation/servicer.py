@@ -491,6 +491,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 # Stream ended during pipeline — stop generating.
                                 await session.cancel()
                                 cancelled = True
+                                pre_audio.clear()
+                                pre_audio_bytes = 0
                                 backlog.appendleft(None)  # so outer loop exits
                                 break
                             pcase = pending.WhichOneof("payload")
@@ -507,6 +509,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             elif pcase == "cancel_generation":
                                 await session.cancel()
                                 cancelled = True
+                                # Frames from before the cancel are not part of the barge-in.
+                                pre_audio.clear()
+                                pre_audio_bytes = 0
                                 # Ack now so C++ leaves BargeIn without waiting for
                                 # the 500 ms barge_in_window; don't break — let the
                                 # generator exhaust to release pipeline resources.
