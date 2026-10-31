@@ -31,6 +31,7 @@ from . import audit, custom_apis, db, graph, oauth, redaction
 from .custom_apis import DependentApiExists, resolve_and_validate_endpoint
 from .schemas import (
     CalendarBookingSetup, HubspotCrmSetup, SalesforceCrmSetup, SheetsLeadCaptureSetup, WhatsAppSetup, ZohoCrmSetup,
+    ZohoDeskSetup,
 )
 
 # Most successful sends one WhatsApp row may make per call session. A flat
@@ -96,6 +97,7 @@ class PresetStep:
     confirmation_template: str | None = None
     session_send_cap: int | None = None
     # "oauth_connection": endpoint_url is a path and the origin is the connection's.
+    # "zoho_desk": a path on Zoho Desk in the connection's data centre.
     endpoint_base_source: str = "literal"
 
 
@@ -298,6 +300,33 @@ def _zoho_steps(setup: ZohoCrmSetup) -> list[PresetStep]:
     )
 
 
+# ── Zoho Desk tickets ─────────────────────────────────────────────────────
+
+_ZOHO_DESK_SCOPES = frozenset({"Desk.tickets.CREATE"})
+
+
+def _zoho_desk_steps(setup: ZohoDeskSetup) -> list[PresetStep]:
+    return [PresetStep(
+        name="zoho_desk_create_ticket",
+        description=(
+            "Raise a support ticket for the caller's issue so the team follows up. "
+            "Use it once the caller has explained the problem; the caller's number is attached automatically."
+        ),
+        method="POST", endpoint_url="/api/v1/tickets", side_effecting=True,
+        endpoint_base_source="zoho_desk",
+        params=(
+            _literal("orgId", setup.org_id, location="header"),
+            _literal("departmentId", setup.department_id),
+            _literal("channel", "Phone"),
+            _caller("subject", "A short summary of the caller's issue, under ten words."),
+            _caller("description", "The caller's issue in their own words, with any details they gave."),
+            _caller("contact_name", "The caller's name, or 'Caller' if they did not give one.", body_path="contact.lastName"),
+            _caller_id("contact_phone", body_path="contact.phone"),
+        ),
+        success_template="I've raised ticket number {{$.ticketNumber}} for you. Our team will follow up soon.",
+    )]
+
+
 # ── WhatsApp confirmation ─────────────────────────────────────────────────
 
 def _template_variables(setup: WhatsAppSetup, body_path: Callable[[int], str]) -> list[PresetParam]:
@@ -412,6 +441,10 @@ PRESETS: dict[str, Preset] = {
     "zoho_crm": Preset(
         key="zoho_crm", title="Zoho CRM contact lookup", setup_model=ZohoCrmSetup,
         provider="zoho", scopes=_CRM_SCOPES["zoho"], steps=_zoho_steps,
+    ),
+    "zoho_desk_ticket": Preset(
+        key="zoho_desk_ticket", title="Zoho Desk tickets", setup_model=ZohoDeskSetup,
+        provider="zoho", scopes=_ZOHO_DESK_SCOPES, steps=_zoho_desk_steps,
     ),
 }
 
@@ -892,10 +925,11 @@ async def apply_preset(
 
             for step in steps:
                 url = step.endpoint_url
-                if step.endpoint_base_source == "oauth_connection":
-                    if api_base is None:
+                if step.endpoint_base_source in ("oauth_connection", "zoho_desk"):
+                    base = oauth.row_api_base(step.endpoint_base_source, api_base)
+                    if base is None:
                         raise PresetConnectorRequired("connector_required")
-                    url = api_base + url
+                    url = base + url
                 await resolve_and_validate_endpoint(url)
 
             secret_ref = None
