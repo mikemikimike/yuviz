@@ -2,6 +2,7 @@ add_executable(gateway_tests
     config_test.cpp
     ringbuffer_test.cpp
     call_fsm_test.cpp
+    call_session_end_call_test.cpp
     vad_test.cpp
     silero_vad_test.cpp
     playback_queue_test.cpp
