@@ -152,7 +152,7 @@ async def preview_provider_voice(
     key never reaches the admin UI."""
     cfg = await _authorize_provider(provider_id, current_user)
     set_target_tenant(cfg["tenant_id"])
-    if cfg.get("extra", {}).get("managed"):
+    if (cfg.get("extra") or {}).get("managed"):
         raise HTTPException(status_code=403, detail="previews of platform-managed voices are not available through this endpoint")
     if body.voice_id is not None and body.voice_id != cfg.get("voice"):
         if cfg["engine"] != "elevenlabs":
