@@ -1,0 +1,265 @@
+{
+ "slug": "tts-failure-handling",
+ "base": "a841bf1c8fd60f13ab8b5d8672c2db7971a0187e",
+ "base_branch": "redesign",
+ "stage": "done",
+ "status": "shipped",
+ "started_at": "2026-10-29T00:37:11Z",
+ "stages": {
+  "security_design": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "opus": 2257
+   },
+   "agents": [
+    "security_design:critic:r1"
+   ],
+   "artifact_written": true,
+   "started_at": "2026-10-29T00:58:02Z",
+   "findings_path": ".sdlc/tts-failure-handling/02-security.md",
+   "controls_verified": 6,
+   "ended_at": "2026-10-29T00:58:02Z"
+  },
+  "prd": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "sonnet": 24974,
+    "opus": 22044
+   },
+   "agents": [
+    "prd:author",
+    "prd:critic:r1",
+    "prd:revise:r1",
+    "prd:critic:r2",
+    "prd:feedback",
+    "prd:critic:r1",
+    "prd:revise:r1",
+    "prd:critic:r2",
+    "prd:feedback",
+    "prd:critic:r1"
+   ],
+   "started_at": "2026-10-29T00:38:26Z",
+   "artifact_written": true,
+   "findings_path": ".sdlc/tts-failure-handling/01-prd.review.md",
+   "controls_verified": 9,
+   "ended_at": "2026-10-29T00:41:06Z"
+  },
+  "_state_writes": {
+   "status": "pending",
+   "rounds": 0,
+   "verdict": null,
+   "out_tokens": {
+    "haiku": 81039
+   },
+   "agents": []
+  },
+  "design": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "AMBER",
+   "out_tokens": {
+    "opus": 45528
+   },
+   "agents": [
+    "design:author",
+    "design:critic:r1",
+    "design:feedback",
+    "design:critic:r1"
+   ],
+   "started_at": "2026-10-29T00:44:44Z",
+   "artifact_written": true,
+   "findings_path": ".sdlc/tts-failure-handling/02-design.review.md",
+   "controls_verified": 9,
+   "ended_at": "2026-10-29T00:45:52Z"
+  },
+  "plan": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "opus": 8779
+   },
+   "agents": [
+    "plan:author",
+    "plan:critic:r1"
+   ],
+   "started_at": "2026-10-29T00:59:34Z",
+   "artifact_written": true,
+   "findings_path": ".sdlc/tts-failure-handling/03-tasks.review.md",
+   "controls_verified": 10,
+   "ended_at": "2026-10-29T01:00:46Z"
+  },
+  "build": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "haiku": 7953,
+    "sonnet": 51007
+   },
+   "agents": [
+    "build:partition",
+    "build:Phase 1: Zero-byte TTS counts as no audio:g1",
+    "build:Phase 1: Zero-byte TTS counts as no audio:g2",
+    "build:Phase 2: Script-aware sentence join:g1",
+    "build:Phase 3: Gateway applies a no-playback EndCall immediately:g1",
+    "build:Phase 3: Gateway applies a no-playback EndCall immediately:g2",
+    "build:Phase 4: Max-duration EndCall without audio:g1",
+    "build:Phase 4: Max-duration EndCall without audio:g2",
+    "build:fanin"
+   ],
+   "started_at": "2026-10-29T01:04:48Z",
+   "ended_at": "2026-10-29T01:13:24Z"
+  },
+  "review": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {},
+   "agents": [
+    "review:backend"
+   ],
+   "started_at": "2026-10-29T01:18:16Z",
+   "ended_at": "2026-10-29T01:18:16Z"
+  },
+  "security_code": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {},
+   "agents": [
+    "security_code:r1"
+   ],
+   "started_at": "2026-10-29T01:18:16Z",
+   "tokens_billed_to": "review",
+   "findings_path": ".sdlc/tts-failure-handling/05-security.md",
+   "controls_verified": 7,
+   "ended_at": "2026-10-29T01:18:16Z"
+  },
+  "test": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "sonnet": 10418
+   },
+   "agents": [
+    "test:r1",
+    "test:fix:r1",
+    "test:r2",
+    "test:r1"
+   ],
+   "started_at": "2026-10-29T01:20:14Z",
+   "result": "1645 passed, 0 failed",
+   "command": "venv/bin/python -m pytest -q services/conversation/tests",
+   "ended_at": "2026-10-29T01:33:51Z"
+  },
+  "independent": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "opus": 9266
+   },
+   "agents": [
+    "independent:r1"
+   ],
+   "started_at": "2026-10-29T01:37:38Z",
+   "findings_path": ".sdlc/tts-failure-handling/05-review-independent.md",
+   "ended_at": "2026-10-29T01:37:38Z"
+  }
+ },
+ "open": [
+  {
+   "stage": "prd",
+   "severity": "minor",
+   "finding": ".sdlc/tts-failure-handling/01-prd.md:33 \u2014 Criterion 13 tests a later turn's on_playback_finished after a max-duration no-audio EndCall, but criteria 12 and 15 require that call to have already ended; restate it as a gateway-level assertion that pending_end_call_ is false afterwards and a later on_playback_finished on the same CallSession triggers zero hangups."
+  },
+  {
+   "stage": "design",
+   "severity": "minor",
+   "finding": "02-design.md Test plan 6 (call_session_end_call_test.cpp) \u2014 The AC13 test fires on_end_call before the empty final on_tts_chunk, but the servicer sends EndCall after the terminal chunk (servicer.py:623-650), so the real wire order is never exercised; fix: run the test in both orders and assert end_call_pending() is false and the state is WaitingForHangup in each."
+  },
+  {
+   "stage": "design",
+   "severity": "minor",
+   "finding": "02-design.md Changes, CallFSM.cpp/CallFSM.h row \u2014 on_end_call_without_playback is a silent no-op in Recognizing, so a caller who speaks before the max_duration_no_audio EndCall arrives drops it without a log and the cap fires again on the next turn, contrary to AC15; fix: accept Recognizing too, or log a WARNING on the no-op path, and pin the chosen behaviour with an FSM test."
+  },
+  {
+   "stage": "plan",
+   "severity": "minor",
+   "finding": ".sdlc/tts-failure-handling/03-tasks.md:11 \u2014 T1's done-when says every new Test plan 1 test must fail on base, but that includes the raising control, which is meant to pass on base (AC5/22), so the check can't be met as written; fix: require 'fail on base' only for the zero-chunk and only-b\"\" cases, and require the raising control to pass on both base and head."
+  },
+  {
+   "stage": "review:backend",
+   "severity": "minor",
+   "finding": "services/conversation/servicer.py:587 \u2014 The servicer's narrowed audio_sent check is covered only by a direct unit test of _is_reply_audio (test_servicer.py:57); because the pipeline now filters out b\"\", no servicer-level test sends tts_payloads=[b\"\"], so reverting line 587 would leave every test green. Fix: run one Converse turn that yields tts_payloads=[b\"\"] with end_call=True and assert no EndCall is sent."
+  },
+  {
+   "stage": "test",
+   "severity": "medium",
+   "finding": "uncovered \u2014 Gateway C++ tests (tests/call_fsm_test.cpp, tests/call_session_end_call_test.cpp both orders and Recognizing case) not executed locally: no cmake, rely on CI"
+  },
+  {
+   "stage": "test",
+   "severity": "medium",
+   "finding": "uncovered \u2014 New WARNING in gateway/src/session/CallFSM.cpp on_end_call_without_playback ignored-state path is compile-unverified and has no log assertion"
+  },
+  {
+   "stage": "independent",
+   "severity": "minor",
+   "finding": "gateway/src/session/CallFSM.cpp:177 \u2014 The approved decision was to log a WARNING in Recognizing and leave behaviour unchanged, but on_end_call_without_playback now moves Recognizing to WaitingForHangup; a caller who is already mid-utterance gets no GoodbyeConfirm chance to cancel. This does serve AC15 and is pinned by EndCallWithoutPlayback_FromRecognizing, so the deviation should be named in the PR."
+  },
+  {
+   "stage": "independent",
+   "severity": "minor",
+   "finding": "gateway/src/session/CallFSM.cpp:186 \u2014 The ignored-state WARNING prints the state as a raw int instead of to_string(state()), unlike every other FSM log line, and no test asserts this log (carried gap still open)."
+  },
+  {
+   "stage": "independent",
+   "severity": "minor",
+   "finding": "services/conversation/servicer.py:659 \u2014 The comment says the gateway hangs up at once, but the gateway actually enters the grace period, and the caller can still cancel it by speaking."
+  },
+  {
+   "stage": "independent",
+   "severity": "minor",
+   "finding": "services/conversation/tests/test_pipeline.py:4076 \u2014 The overlap test never checks that the second request actually waited on the in-flight future, so it would pass without overlap; it is documented as a regression guard that already passes on base, because phrase_audio rejected empty results before this change."
+  },
+  {
+   "stage": "independent",
+   "severity": "minor",
+   "finding": "services/conversation/pipeline.py:280 \u2014 _join_sentences only recognises the CJK punctuation \u3002\uff01\uff1f, so a dropped sentence next to a CJK sentence ending in a closing quote or ellipsis (e.g. \u300d or \u2026) is still rejoined with a space."
+  },
+  {
+   "stage": "independent",
+   "severity": "minor",
+   "finding": "tests/call_session_end_call_test.cpp \u2014 The gateway C++ tests (FSM Recognizing/BargeIn cases and the AC13 run in both orders) were not built or run locally because cmake is missing; CI is the only signal and must be green before the PR."
+  }
+ ],
+ "retro_sources": [],
+ "updated_at": "2026-10-29T01:37:38Z",
+ "gates": {
+  "prd": "approved (pre-approved in request)",
+  "ship": "approved (pre-approved in request: all reviews GREEN, independent passed, no blocking/high open)"
+ },
+ "build_phase_done": "Phase 4: Max-duration EndCall without audio",
+ "verify": {
+  "result": "passed",
+  "command": "./venv/bin/python -m pytest -q -p no:cacheprovider -rfEs tests/ (2 failed, 195 passed, 47 skipped); targeted: ./venv/bin/python -m pytest -q services/conversation/tests/{test_pipeline,test_end_call_guard,test_workflow_pipeline,test_servicer,test_phrase_audio}.py (1 failed, 329 passed)",
+  "failures": [
+   "pre-existing: tests/test_cross_tenant_admin.py::test_tier3_campaigns (asyncpg error, identical on base a841bf1; DB env)",
+   "pre-existing: tests/test_rls_coverage.py::test_wave_b_child_tables_have_rls_force_and_a_policy (identical on base a841bf1)",
+   "pre-existing: services/conversation/tests/test_phrase_audio.py::test_the_cache_dies_with_the_tts_instance (fails identically on base when run with the other conversation test files; passes alone)",
+   "note: 47 skips are environment (no lua interpreter, offline sip sync); models/silero_vad.onnx absent; gateway C++ tests (CallFSM/CallSession, T6-T8) not run by pytest; 03-tasks.md T5 and T6 are still unchecked"
+  ],
+  "changed_lines": 1132,
+  "backend": 14,
+  "admin_ui": 0
+ },
+ "pr": "https://github.com/yuviz-ai/yuviz/pull/228",
+ "ci": "green"
+}
