@@ -690,6 +690,8 @@ CREATE INDEX IF NOT EXISTS idx_campaign_attempts_open
     ON campaign_attempts(campaign_id) WHERE state <> 'resolved' OR outcome = 'answered';
 CREATE INDEX IF NOT EXISTS idx_campaign_attempts_open_tenant
     ON campaign_attempts(tenant_id) WHERE state <> 'resolved' OR outcome = 'answered';
+CREATE INDEX IF NOT EXISTS idx_campaign_attempts_tenant_created
+    ON campaign_attempts(tenant_id, created_at DESC);
 
 -- CPS scope of each dial start: 'sip_trunk:pstn' or 'provider_account:<telephony_configs.id>'.
 ALTER TABLE campaign_attempts ADD COLUMN IF NOT EXISTS cps_scope    TEXT NOT NULL DEFAULT 'sip_trunk:pstn';
