@@ -406,3 +406,38 @@ async def _run_stream(servicer, stream, until, timeout=1.0):
     except asyncio.CancelledError:
         pass
     return names
+
+
+async def test_audio_flood_behind_a_deferred_speech_ended_is_capped(monkeypatch):
+    """Issue #201: a deferred speech_ended makes every later frame queue whole; the held audio
+    of one utterance must stop at the utterance cap instead of growing with the flood."""
+    from services.conversation import servicer as servicer_mod
+
+    monkeypatch.setattr(servicer_mod, "MAX_UTTERANCE_BYTES", 100)
+    audios = await _utterance_audio_per_turn(
+        [_speech_ended()] + [_audio(b"\x07" * 10) for _ in range(500)] + [_speech_ended()],
+    )
+
+    assert audios[:2] == [b"", b""]
+    assert audios[2] == b"\x07" * 100
+
+
+async def test_cap_is_per_utterance_behind_a_deferred_speech_ended(monkeypatch):
+    from services.conversation import servicer as servicer_mod
+
+    monkeypatch.setattr(servicer_mod, "MAX_UTTERANCE_BYTES", 100)
+    audios = await _utterance_audio_per_turn(
+        [_speech_ended()]
+        + [_audio(b"\x01" * 60)] * 3 + [_speech_ended()]
+        + [_audio(b"\x02" * 60)] * 3 + [_speech_ended()],
+    )
+
+    assert audios[2:] == [b"\x01" * 120, b"\x02" * 120]
+
+
+async def test_audio_under_the_cap_is_untouched(monkeypatch):
+    audios = await _utterance_audio_per_turn(
+        [_speech_ended(), _audio(b"\x03" * 1000), _speech_ended()],
+    )
+
+    assert audios[2] == b"\x03" * 1000
