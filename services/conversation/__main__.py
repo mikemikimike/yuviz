@@ -85,11 +85,11 @@ async def _resolve_session_deps(
     ctx: SessionContext, credential_redis, provider_registry: ProviderRegistry,
     config: IConfigProvider, stt, llm, tts,
 ):
-    # A credential, not the direction, is what makes this a test session:
-    # webcall sends direction="test" for every browser session. With a
-    # credential there is never a legacy fallback; without one, today's
-    # path runs unchanged, so inactive and missing agents stay indistinguishable.
-    if ctx.direction == "test" and ctx.test_credential:
+    # Browser test sessions (direction="test") must carry a credential minted for
+    # this tenant/agent; one without is refused rather than run as a live agent.
+    if ctx.direction == "test" and not ctx.test_credential:
+        raise AgentUnavailable()
+    if ctx.direction == "test":
         grant = await redeem_test_credential(
             credential_redis, ctx.test_credential, channel="voice", consume=True,
         )
@@ -250,9 +250,10 @@ async def _run_heartbeat_loop(
 ) -> None:
     """Write this node's heartbeat and run the reconcile sweeps until cancelled.
 
-    After a failed write, retry quickly and hold off reaping peers until REAP_WINDOW_S of good
-    writes: our own gap would otherwise look like theirs, and we would close live calls."""
-    healthy_since = float("-inf")
+    After a failed write, retry quickly. Each sweep waits for one full window of good writes, at
+    startup too: a node booting as Postgres recovers would otherwise reap peers that are still
+    recovering, and calls whose transcript writes failed during the outage would look inactive."""
+    healthy_since: float | None = clock()
     while True:
         if not await _bounded_step("heartbeat", transcripts.heartbeat()):
             healthy_since = None
@@ -260,12 +261,14 @@ async def _run_heartbeat_loop(
             continue
         if healthy_since is None:
             healthy_since = clock()
-        if clock() - healthy_since >= REAP_WINDOW_S:
+        healthy_for = clock() - healthy_since
+        if healthy_for >= REAP_WINDOW_S:
             await _bounded_step(
                 "reconcile_dead_nodes", transcripts.reconcile_dead_nodes(stale_after_seconds=REAP_WINDOW_S))
-        await _bounded_step(
-            "reconcile_inactive_calls",
-            transcripts.reconcile_inactive_calls(inactive_after_seconds=INACTIVE_CALL_TIMEOUT_S))
+        if healthy_for >= INACTIVE_CALL_TIMEOUT_S:
+            await _bounded_step(
+                "reconcile_inactive_calls",
+                transcripts.reconcile_inactive_calls(inactive_after_seconds=INACTIVE_CALL_TIMEOUT_S))
         await sleep(HEARTBEAT_INTERVAL_S)
 
 
@@ -537,7 +540,20 @@ async def serve(port: int, args: argparse.Namespace) -> None:
     server = grpc.aio.server(options=[("grpc.so_reuseport", 0)])
 
     # Conversation service
-    conversation_servicer = ConversationServicer(handler_factory, transcripts)
+    ready = False  # set once the model is loaded; capacity changes must not flip health before that
+
+    def _on_capacity_change(at_capacity: bool) -> None:
+        # Full process reports NOT_SERVING so Envoy routes new calls elsewhere; live calls are untouched.
+        if ready:
+            health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING if at_capacity
+                                else health_pb2.HealthCheckResponse.SERVING)
+
+    try:
+        max_sessions = int(os.environ.get("CONVERSATION_MAX_SESSIONS", "250"))
+    except ValueError:
+        max_sessions = 250
+    conversation_servicer = ConversationServicer(
+        handler_factory, transcripts, max_sessions=max_sessions, on_capacity_change=_on_capacity_change)
     pb_grpc.add_ConversationServiceServicer_to_server(conversation_servicer, server)
 
     # Health check — stays NOT_SERVING until the Whisper model finishes loading.
@@ -553,11 +569,15 @@ async def serve(port: int, args: argparse.Namespace) -> None:
              listen_addr, args.mode)
 
     async def _load_and_promote() -> None:
+        nonlocal ready
         if stt is not None:
             await stt.load()
         if args.mode != "echo":
             await _prewarm_agents(http_config_repo, provider_registry, config)
-        health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING)
+        ready = True
+        at_cap = max_sessions > 0 and len(conversation_servicer._live_sessions) >= max_sessions
+        health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING if at_cap
+                            else health_pb2.HealthCheckResponse.SERVING)
         log.info("ConversationService SERVING")
 
     load_task = _spawn(_load_and_promote(), "startup load")
@@ -581,6 +601,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
             await _await_stopped(task)
         await provider_config_subscriber.stop()
         log.info("Shutting down…")
+        ready = False
         health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING)
         await server.stop(grace=5)
         # server.stop() cancels streams without waiting for their teardown, which queues the end_call write.

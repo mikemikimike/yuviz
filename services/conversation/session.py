@@ -19,7 +19,7 @@ import time
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import AsyncGenerator, Protocol
+from typing import AsyncGenerator, Callable, Protocol
 
 from .directives import TransferRequest
 from .event_bus import (
@@ -58,6 +58,7 @@ class HandlerResponse:
     end_call_grace_period_ms: 0 = gateway default. response_text accompanies, never replaces, tts_payloads.
     filler: the tts_payloads are a "one moment" filler, not the reply, so they never count as the caller
     having heard an answer or a goodbye.
+    end_call_without_audio: the max-duration cap only: EndCall goes out even when no audio played this turn.
     """
     stt_text:       str         = ""
     stt_confidence: float       = 0.0
@@ -67,6 +68,10 @@ class HandlerResponse:
     transfer_request: TransferRequest | None = None
     response_text:  str         = ""
     filler:         bool        = False
+    # The servicer calls this once it sends the tts_payloads, so a handler records what the caller was sent.
+    on_sent:        Callable[[], None] | None = None
+
+    end_call_without_audio: bool = False
 
 
 class IConversationHandler(Protocol):
@@ -98,7 +103,7 @@ class IConversationHandler(Protocol):
         energy_db:   float,
     ) -> AsyncGenerator[HandlerResponse, None]: ...
 
-    async def on_cancel(self, session_id: str) -> None: ...
+    async def on_cancel(self, session_id: str, *, hanging_up: bool = False) -> None: ...
     async def on_session_end(self, session_id: str, reason: str,
                              final_state: str | None = None) -> None: ...
 
@@ -234,7 +239,7 @@ class ConversationSession:
             return HandlerResponse()
 
         room = MAX_UTTERANCE_BYTES - len(self._audio_buffer)
-        if 0 < room < len(payload):  # logged once, by the chunk that crosses the cap
+        if 0 < room <= len(payload):  # logged once, by the chunk that reaches the cap
             log.warning(
                 "Utterance audio over cap, dropping excess: buffered=%d cap=%d session=%s",
                 len(self._audio_buffer), MAX_UTTERANCE_BYTES, self._ctx.session_id,
@@ -294,9 +299,18 @@ class ConversationSession:
         ):
             self._fsm.on_cancel()
 
-    def on_playback_finished(self, interrupted: bool) -> None:
-        """Called by the servicer when a PlaybackFinished message is received."""
+    def on_playback_finished(self, interrupted: bool, played_bytes: int | None = None) -> None:
+        """Called by the servicer when a PlaybackFinished message is received. played_bytes is the
+        gateway's count of the cut reply's audio it sent; None from a gateway that does not report it."""
         self._fsm.on_playback_finished(interrupted=interrupted)
+        if interrupted:
+            on_interrupted = getattr(self._handler, "on_playback_interrupted", None)
+            if played_bytes is not None and on_interrupted is not None:
+                on_interrupted(self._ctx.session_id, played_bytes)
+        else:
+            on_completed = getattr(self._handler, "on_playback_completed", None)
+            if on_completed is not None:
+                on_completed(self._ctx.session_id)
 
     # ── Transfer notifications from the gateway ────────────────────────────────
 
@@ -314,8 +328,16 @@ class ConversationSession:
         self._handler.start_finalization(self._ctx.session_id)
 
     async def on_transfer_completed(self, destination: str,
-                                    transfer_id: str = "") -> FinalizationResult:
-        """Destination bridged: finalize the session and return the result for ConversationFinalized."""
+                                    transfer_id: str = "") -> FinalizationResult | None:
+        """Destination bridged: finalize the session and return the result for ConversationFinalized.
+
+        Returns None (and does nothing) when no transfer is pending: a stray or
+        duplicate TransferCompleted must not finalize a live conversation.
+        """
+        if self._fsm.state != CallFsmState.TRANSFERRING:
+            log.warning("Ignoring transfer_completed with no pending transfer state=%s session=%s",
+                        self._fsm.state.name, self._ctx.session_id)
+            return None
         self._transfer_outcome = "TRANSFER_SUCCESS"
         self._metrics.increment("transfer_success_total")
         self._fsm.on_transfer_completed(True, destination)
@@ -340,6 +362,10 @@ class ConversationSession:
         self, destination: str, reason: str, transfer_id: str = "",
     ) -> AsyncGenerator[HandlerResponse, None]:
         """Transfer failed but the caller is usually still on the line: yield a spoken apology."""
+        if self._fsm.state != CallFsmState.TRANSFERRING:
+            log.warning("Ignoring transfer_failed with no pending transfer state=%s session=%s",
+                        self._fsm.state.name, self._ctx.session_id)
+            return
         start = time.monotonic()
         self._transfer_outcome = (
             "TRANSFER_TIMEOUT" if reason == "transfer_timeout" else "TRANSFER_FAILED"
@@ -349,15 +375,17 @@ class ConversationSession:
 
         any_audio = False
         first_audio = True
-        async for response in self._handler.on_transfer_failed(
+        # aclosing: a hangup closes this generator, and the handler's apology must see it to persist.
+        async with aclosing(self._handler.on_transfer_failed(
             self._ctx.session_id, destination, reason,
-        ):
-            if response.tts_payloads:
-                any_audio = True
-                if first_audio:
-                    self._fsm.on_recovery_response_ready()
-                    first_audio = False
-            yield response
+        )) as apology:
+            async for response in apology:
+                if response.tts_payloads:
+                    any_audio = True
+                    if first_audio:
+                        self._fsm.on_recovery_response_ready()
+                        first_audio = False
+                yield response
 
         if not any_audio:
             # No audio means no PlaybackFinished; advance the FSM synthetically.
@@ -382,9 +410,9 @@ class ConversationSession:
                  transfer_id, self._ctx.session_id)
         self._handler.on_transfer_cancelled(self._ctx.session_id)
 
-    async def cancel(self) -> None:
+    async def cancel(self, hanging_up: bool = False) -> None:
         self._audio_buffer.clear()
-        await self._handler.on_cancel(self._ctx.session_id)
+        await self._handler.on_cancel(self._ctx.session_id, hanging_up=hanging_up)
         self._fsm.on_cancel()  # handles SPEAKING/THINKING/SYNTHESIZING/RECOGNIZING → LISTENING
 
     async def push_dtmf(self, digit: str) -> None:

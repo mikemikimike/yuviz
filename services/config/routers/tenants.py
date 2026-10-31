@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import tenants as tenants_service
@@ -9,6 +11,14 @@ from ..deps import get_current_user, get_or_404, require_role
 from ..schemas import TenantConcurrencyUpdate, TenantCreate, TenantTransferPolicyUpdate, TenantUpdate
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
+
+
+def _require_tenant_uuid(tenant_id: str) -> None:
+    """The id routes take a tenant UUID; anything else names no tenant, so 404 rather than a uuid-cast 500."""
+    try:
+        uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"tenant {tenant_id!r} not found") from None
 
 
 @router.get("")
@@ -39,6 +49,7 @@ async def get_tenant(slug: str, current_user: CurrentUser = Depends(get_current_
 async def update_tenant(
     tenant_id: str, body: TenantUpdate, current_user: CurrentUser = Depends(require_role("superadmin")),
 ):
+    _require_tenant_uuid(tenant_id)
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
@@ -54,6 +65,7 @@ async def update_tenant_concurrency(
 ):
     """Admin-editable concurrency, separate so admins can't touch other tenant fields.
     Scope comes from the freshly read users row, not the token (a re-tenanted admin edits the new tenant)."""
+    _require_tenant_uuid(tenant_id)
     row = await users_service.get_user_by_id(current_user.id)
     if row is None:
         raise HTTPException(status_code=403, detail="account is no longer active")
@@ -79,6 +91,7 @@ async def update_tenant_transfer_policy(
     """Superadmin only: international transfers are billed to the platform, so a tenant
     admin must not be able to switch them on or move what counts as domestic. The role is
     re-read from the users row, as for /concurrency, so a stale token cannot carry it."""
+    _require_tenant_uuid(tenant_id)
     fields = body.model_dump(exclude_none=True)
     if not fields:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
@@ -96,6 +109,7 @@ async def update_tenant_transfer_policy(
 async def delete_tenant(
     tenant_id: str, force: bool = False, current_user: CurrentUser = Depends(require_role("superadmin")),
 ):
+    _require_tenant_uuid(tenant_id)
     await tenants_service.soft_delete_tenant(
         tenant_id, user_id=current_user.id, user_email=current_user.email, force=force,
     )

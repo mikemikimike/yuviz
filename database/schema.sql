@@ -555,6 +555,12 @@ ALTER TABLE calls ADD CONSTRAINT calls_sentiment_check
 -- Languages the caller spoke, in order of first appearance (multilingual agents only).
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS detected_languages TEXT[];
 
+-- Post-transfer handoff summary; never a transcript turn (session_finalizer.PersistSummaryStep).
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS session_summary TEXT;
+-- Agent that took the call after a call-flow handoff; agent_id keeps the flow/IVR agent. NULL = no handoff.
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS answering_agent_id UUID REFERENCES agents(id);
+CREATE INDEX IF NOT EXISTS idx_calls_answering_agent ON calls(answering_agent_id) WHERE answering_agent_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_calls_tenant   ON calls(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_calls_started  ON calls(started_at);
 CREATE INDEX IF NOT EXISTS idx_calls_agent    ON calls(agent_id);
@@ -690,6 +696,8 @@ CREATE INDEX IF NOT EXISTS idx_campaign_attempts_open
     ON campaign_attempts(campaign_id) WHERE state <> 'resolved' OR outcome = 'answered';
 CREATE INDEX IF NOT EXISTS idx_campaign_attempts_open_tenant
     ON campaign_attempts(tenant_id) WHERE state <> 'resolved' OR outcome = 'answered';
+CREATE INDEX IF NOT EXISTS idx_campaign_attempts_tenant_created
+    ON campaign_attempts(tenant_id, created_at DESC);
 
 -- CPS scope of each dial start: 'sip_trunk:pstn' or 'provider_account:<telephony_configs.id>'.
 ALTER TABLE campaign_attempts ADD COLUMN IF NOT EXISTS cps_scope    TEXT NOT NULL DEFAULT 'sip_trunk:pstn';
@@ -720,6 +728,15 @@ CREATE TABLE IF NOT EXISTS platform_outbound_limits (
 );
 INSERT INTO platform_outbound_limits (singleton, total_call_capacity, inbound_reserve, max_outbound_concurrent_calls)
     VALUES (true, 300, 75, 225) ON CONFLICT DO NOTHING;
+
+-- Platform singleton: local (self-hosted) models are hidden from workspaces until a superadmin turns them on.
+CREATE TABLE IF NOT EXISTS platform_ai_settings (
+    singleton            BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+    local_models_enabled BOOLEAN NOT NULL DEFAULT false,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by           UUID
+);
+INSERT INTO platform_ai_settings (singleton) VALUES (true) ON CONFLICT DO NOTHING;
 
 -- Platform-wide CPS per scope; no row = no CPS limit for that scope.
 CREATE TABLE IF NOT EXISTS outbound_cps_limits (
@@ -1318,6 +1335,9 @@ DO $$ BEGIN
     OR (auth_kind = 'api_key'
          AND (status = 'connected') = (access_token_ref IS NOT NULL)
          AND refresh_token_ref IS NULL AND access_expires_at IS NULL))$sql$;
+  EXECUTE 'ALTER TABLE custom_apis DROP CONSTRAINT IF EXISTS custom_apis_endpoint_base_source_check';
+  EXECUTE $sql$ALTER TABLE custom_apis ADD CONSTRAINT custom_apis_endpoint_base_source_check
+    CHECK (endpoint_base_source IN ('literal','oauth_connection','zoho_desk'))$sql$;
   EXECUTE 'ALTER TABLE custom_apis DROP CONSTRAINT IF EXISTS custom_apis_endpoint_base_shape';
   EXECUTE $sql$ALTER TABLE custom_apis ADD CONSTRAINT custom_apis_endpoint_base_shape CHECK (
        endpoint_base_source = 'literal'

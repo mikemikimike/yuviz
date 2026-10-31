@@ -204,6 +204,7 @@ class ToolPolicyResolver:
         the agent/API tenant join is the runtime tenant fence."""
         async with tenant_conn(
             self._pool, explicit_tenant=tenant_slug, reason="conversation-tool-policy",
+            acquire_timeout=POOL_RELEASE_TIMEOUT_S,
         ) as conn:
             rows = await conn.fetch(
                 """

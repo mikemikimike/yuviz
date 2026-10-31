@@ -153,7 +153,7 @@ async def test_agent_call_stats_count_per_agent_and_never_cross_tenants(test_ten
         [stats] = await calls.get_agent_call_stats(test_tenant["slug"])
         assert stats["agent_id"] == mine
         assert (stats["calls"], stats["tests"], stats["avg_duration_ms"]) == (3, 1, 20000)
-        assert (stats["finished"], stats["failed"]) == (3, 1)
+        assert (stats["finished"], stats["failed"], stats["handoffs"]) == (3, 1, 1)
     finally:
         await pool.execute("DELETE FROM calls WHERE session_id = ANY($1)", ids)
         await pool.execute("DELETE FROM agents WHERE id = ANY($1)", [mine, foreign])
@@ -296,6 +296,73 @@ async def test_get_dashboard_stats_counts_and_sums_minutes(test_tenant, scoped, 
 
     for sid in (ok_id, failed_id, live_id):
         await pool.execute("DELETE FROM calls WHERE session_id = $1", sid)
+
+
+async def test_get_dashboard_stats_flow_only_calls_are_not_failed(test_tenant, scoped, pool):
+    """Issue #204: flow-only calls have turn_count 0 but a clean outcome; only failed/dropped reasons are failures."""
+    cases = [  # (close_reason, turn_count, counts_as_failed)
+        ("caller_hangup", 0, False), ("TRANSFER_SUCCESS", 0, False), (None, 0, False),
+        ("session_destroyed", 0, False), ("stream_ended", 3, False),
+        ("TRANSFER_FAILED", 0, True), ("TRANSFER_FAILED", 4, True), ("TRANSFER_TIMEOUT", 0, True),
+        ("transport_error", 2, True), ("reconciled_stale", 0, True),
+    ]
+    ids = []
+    for reason, turns, _ in cases:
+        sid = f"test-call-{uuid.uuid4().hex[:8]}"
+        ids.append(sid)
+        await pool.execute(
+            "INSERT INTO calls (session_id, tenant_id, direction, turn_count, close_reason, ended_at) "
+            "VALUES ($1, $2, 'inbound', $3, $4, NOW())",
+            sid, test_tenant["slug"], turns, reason,
+        )
+    # An unended call is neither success nor failed.
+    live = f"test-call-{uuid.uuid4().hex[:8]}"
+    ids.append(live)
+    await pool.execute(
+        "INSERT INTO calls (session_id, tenant_id, direction, turn_count) VALUES ($1, $2, 'inbound', 0)",
+        live, test_tenant["slug"],
+    )
+
+    stats = await calls.get_dashboard_stats(test_tenant["slug"], hours=24)
+
+    failed = sum(1 for *_, f in cases if f)
+    assert stats["failed_count"] == failed
+    assert stats["success_count"] == len(cases) - failed
+    assert stats["total_calls"] == len(cases) + 1
+
+    for sid in ids:
+        await pool.execute("DELETE FROM calls WHERE session_id = $1", sid)
+
+
+async def test_handed_off_call_is_attributed_to_the_answering_agent(test_tenant, scoped, pool):
+    other = await pool.fetchrow(
+        "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+        "Answering Cross Tenant", f"test-call-an-{uuid.uuid4().hex[:8]}",
+    )
+    ivr, sales, foreign = [
+        await pool.fetchval(
+            "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, $2, $3) RETURNING id",
+            tenant_id, f"test-agent-{uuid.uuid4().hex[:8]}", name,
+        )
+        for tenant_id, name in ((test_tenant["id"], "IVR"), (test_tenant["id"], "Sales"), (other["id"], "Foreign"))
+    ]
+    handed, forged = f"test-call-{uuid.uuid4().hex[:8]}", f"test-call-{uuid.uuid4().hex[:8]}"
+    await pool.execute(
+        "INSERT INTO calls (session_id, tenant_id, direction, agent_id, answering_agent_id) VALUES "
+        "($1, $3, 'inbound', $4, $5), ($2, $3, 'inbound', $4, $6)",
+        handed, forged, test_tenant["slug"], ivr, sales, foreign,
+    )
+    try:
+        assert [c["session_id"] for c in (await calls.list_calls(test_tenant["slug"], agent_id=sales))["items"]] == [handed]
+        stats = {s["agent_id"]: s["calls"] for s in await calls.get_agent_call_stats(test_tenant["slug"])}
+        assert stats == {ivr: 2, sales: 1}  # the other tenant's agent is never counted
+        detail = await calls.get_call(handed, tenant_slug=test_tenant["slug"])
+        assert (detail["answering_agent_id"], detail["answering_agent_name"]) == (sales, "Sales")
+        assert "session_summary" in detail
+    finally:
+        await pool.execute("DELETE FROM calls WHERE session_id = ANY($1)", [handed, forged])
+        await pool.execute("DELETE FROM agents WHERE id = ANY($1)", [ivr, sales, foreign])
+        await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
 
 
 async def test_get_dashboard_stats_respects_hours_window(test_tenant, scoped, pool):

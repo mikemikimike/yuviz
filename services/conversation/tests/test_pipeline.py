@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import Counter
 import time
 from datetime import datetime, timezone
@@ -40,6 +41,9 @@ from ..pipeline import (
     _FALLBACK_GOODBYE,
     _TOOL_CALL_FILLER_MIN_GAP_S,
     _TRANSFER_FAILED_FALLBACK,
+    _TurnProgress,
+    _heard_reply,
+    _spoken_reply,
 )
 
 _TOOL_CALL_FILLERS = {t for t, _ in _TOOL_FILLERS}
@@ -131,6 +135,27 @@ def _make_tts(pcm: bytes = b"\x00" * 320) -> MagicMock:
             yield audio
 
     tts.synthesize_stream = _stream
+    return tts
+
+
+def _scripted_tts(default: str = "audio", **by_text: str) -> MagicMock:
+    """A TTS whose result depends on the text. Modes: "audio" (one chunk), "none" (no chunks),
+    "blank" (only b""), "raise". `default` applies to any text not named in `by_text`."""
+    tts = MagicMock()
+    log: list[str] = []
+
+    async def _stream(text, sample_rate):
+        log.append(text)
+        mode = by_text.get(text, default)
+        if mode == "raise":
+            raise RuntimeError("tts down")
+        if mode == "blank":
+            yield b""
+        elif mode == "audio":
+            yield b"\x01" * 320
+
+    tts.synthesize_stream = _stream
+    tts.log = log
     return tts
 
 
@@ -1056,6 +1081,48 @@ async def test_pipeline_max_call_duration_ends_call_without_calling_llm():
     assert end_call_responses[0].end_call_grace_period_ms == 1500
 
 
+async def _max_duration_turn(tts, caplog):
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("are you still there"), _make_spy_llm(["unused"])[0], tts,
+        max_call_duration_s=60, transcripts=transcripts,
+    )
+    handler._call_started_at -= 61
+    with caplog.at_level("WARNING", logger=pipeline_module.log.name):
+        responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    return responses, transcripts.record_turn.call_args.args[3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["none", "blank", "raise"])
+async def test_max_duration_with_no_goodbye_audio_records_empty_text_and_flags_the_end(mode, caplog):
+    responses, agent_text = await _max_duration_turn(_scripted_tts(default=mode), caplog)
+
+    assert agent_text == ""
+    assert responses[-1].end_call and responses[-1].end_call_without_audio
+    assert "Max-duration goodbye produced no audio" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_max_duration_records_the_fallback_goodbye_when_only_it_plays(caplog):
+    fallback = t("fallback_goodbye", "en")
+    tts = _scripted_tts(default="none", **{fallback: "audio"})
+    responses, agent_text = await _max_duration_turn(tts, caplog)
+
+    assert agent_text == fallback
+    assert responses[-1].end_call
+    assert "Max-duration goodbye produced no audio" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_max_duration_records_the_goodbye_when_it_plays(caplog):
+    responses, agent_text = await _max_duration_turn(_scripted_tts(default="audio"), caplog)
+
+    assert agent_text == t("max_duration_goodbye", "en")
+    assert responses[-1].end_call
+    assert "Max-duration goodbye produced no audio" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_pipeline_max_call_duration_unset_does_not_affect_normal_turns():
     """max_call_duration_s=None (the default) must behave exactly like
@@ -1744,23 +1811,16 @@ async def test_on_transfer_failed_marker_only_reply_speaks_the_transfer_apology_
 
 
 @pytest.mark.asyncio
-async def test_on_transfer_failed_defers_transcript_persistence_to_session_end():
-    """Requirement: do not persist memory immediately — only during normal
-    SessionEnd. record_turn() must not fire until on_session_end()."""
-    stt = _make_stt()
-    llm = _make_llm(["Apologies, let's continue."])
-    tts = _make_tts(b"\x00" * 640)
-
+async def test_on_transfer_failed_records_its_turn_before_a_later_turn_not_at_session_end():
+    """The recovery row is written when the apology ends, so it sorts ahead of the next caller turn."""
     transcripts = MagicMock()
-    handler = _make_handler(stt, llm, tts)
-    handler._transcripts = transcripts
+    handler = _make_handler(
+        _make_stt("anything else"), _make_llm(["Apologies, let's continue."]), _make_tts(b"\x00" * 640),
+        transcripts=transcripts,
+    )
 
     async for _ in handler.on_transfer_failed("s1", "+15551234567", "hangup_before_bridge"):
         pass
-
-    transcripts.record_turn.assert_not_called()
-
-    await handler.on_session_end("s1", "caller_hangup")
 
     transcripts.record_turn.assert_called_once()
     args = transcripts.record_turn.call_args.args
@@ -1768,6 +1828,14 @@ async def test_on_transfer_failed_defers_transcript_persistence_to_session_end()
     assert "hangup_before_bridge" in args[1]
     assert args[3] == "Apologies, let's continue."
     assert args[4] is False  # not cancelled
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+    await handler.on_session_end("s1", "caller_hangup")
+
+    caller_texts = [call.args[1] for call in transcripts.record_turn.call_args_list]
+    assert len(caller_texts) == 2
+    assert "hangup_before_bridge" in caller_texts[0] and caller_texts[1] == "anything else"
     transcripts.end_call.assert_called_once_with(
         "s1", "caller_hangup", final_state=None, score_sentiment=False,
     )
@@ -2037,9 +2105,7 @@ async def test_finalize_session_persists_summary_via_handlers_transcripts():
 
     await handler.finalize_session("s1", "transfer_completed")
 
-    transcripts.record_turn.assert_called_once_with(
-        "s1", "[session_summary]", 1.0, "Summary text.", False,
-    )
+    transcripts.record_summary.assert_called_once_with("s1", "Summary text.")
 
 
 @pytest.mark.asyncio
@@ -2125,6 +2191,72 @@ async def test_session_on_transfer_completed_finalizes_and_moves_to_closing():
     assert events[0].destination == "+15551234567"
     assert len(bus.published_of(SessionFinalizing)) == 1
     assert len(bus.published_of(ConversationFinalized)) == 1
+
+
+@pytest.mark.asyncio
+async def test_session_stray_transfer_completed_is_ignored():
+    """TransferCompleted with no transfer requested must not finalize a live conversation (#181)."""
+    handler = EchoConversationHandler()
+    bus = RecordingEventBus()
+    session = ConversationSession(ctx=SessionContext(session_id="s5x"), bus=bus, handler=handler)
+    session.session_ready()
+    before = session.fsm_state
+
+    assert await session.on_transfer_completed("+15551234567") is None
+
+    assert session.fsm_state == before
+    assert not bus.published_of(TransferCompleted)
+    assert not bus.published_of(ConversationFinalized)
+    assert session._transfer_outcome is None
+
+
+@pytest.mark.asyncio
+async def test_session_duplicate_transfer_completed_finalizes_once():
+    handler = EchoConversationHandler()
+    bus = RecordingEventBus()
+    session = ConversationSession(ctx=SessionContext(session_id="s5y"), bus=bus, handler=handler)
+    session.session_ready()
+    session.on_transfer_initiated("cold", "+15551234567", "x")
+
+    assert await session.on_transfer_completed("+15551234567") is not None
+    assert await session.on_transfer_completed("+15551234567") is None
+
+    assert len(bus.published_of(ConversationFinalized)) == 1
+    assert len(bus.published_of(TransferCompleted)) == 1
+
+
+@pytest.mark.asyncio
+async def test_session_stray_transfer_failed_is_ignored():
+    """TransferFailed with no pending transfer yields no apology and no state change (#181)."""
+    class ApologizingHandler(EchoConversationHandler):
+        async def on_transfer_failed(self, session_id, destination, reason):
+            yield HandlerResponse(tts_payloads=[b"\x00" * 320])
+
+    bus = RecordingEventBus()
+    session = ConversationSession(ctx=SessionContext(session_id="s6x"), bus=bus,
+                                  handler=ApologizingHandler())
+    session.session_ready()
+    before = session.fsm_state
+
+    out = [r async for r in session.on_transfer_failed("+15551234567", "x")]
+
+    assert out == []
+    assert session.fsm_state == before
+    assert not bus.published_of(TransferFailed)
+    assert session._transfer_outcome is None
+
+
+@pytest.mark.asyncio
+async def test_session_transfer_failed_after_completed_is_ignored():
+    handler = EchoConversationHandler()
+    bus = RecordingEventBus()
+    session = ConversationSession(ctx=SessionContext(session_id="s6y"), bus=bus, handler=handler)
+    session.session_ready()
+    session.on_transfer_initiated("cold", "+15551234567", "x")
+    await session.on_transfer_completed("+15551234567")
+
+    assert [r async for r in session.on_transfer_failed("+15551234567", "x")] == []
+    assert session._transfer_outcome == "TRANSFER_SUCCESS"
 
 
 @pytest.mark.asyncio
@@ -2242,7 +2374,7 @@ async def test_workflow_engine_subscribes_to_transfer_failed_for_metrics():
 
 @pytest.mark.asyncio
 async def test_session_transfer_completed_without_initiated_is_a_no_op():
-    """TransferCompleted without a prior TransferInitiated is ignored by the FSM."""
+    """TransferCompleted without a prior TransferInitiated is ignored entirely (#181)."""
     handler = EchoConversationHandler()
     ctx = SessionContext(session_id="s7")
     bus = RecordingEventBus()
@@ -2252,8 +2384,7 @@ async def test_session_transfer_completed_without_initiated_is_a_no_op():
     await session.on_transfer_completed("+15551234567")
 
     assert session.fsm_state == CallFsmState.LISTENING
-    # Still published for observability even though the FSM no-oped.
-    assert len(bus.published_of(TransferCompleted)) == 1
+    assert len(bus.published_of(TransferCompleted)) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -2320,6 +2451,7 @@ async def _outcome_session(sid: str):
 @pytest.mark.asyncio
 async def test_close_records_transfer_success_outcome():
     session, bus, handler = await _outcome_session("s-ok")
+    session.on_transfer_initiated("cold", "1001", "x")
     await session.on_transfer_completed("1001", transfer_id="tid-1")
     spy = AsyncMock()
     handler.on_session_end = spy
@@ -2331,6 +2463,7 @@ async def test_close_records_transfer_success_outcome():
 @pytest.mark.asyncio
 async def test_close_records_transfer_timeout_on_generic_close():
     session, bus, handler = await _outcome_session("s-to")
+    session.on_transfer_initiated("cold", "1001", "x")
     async for _ in session.on_transfer_failed("1001", "transfer_timeout", "tid-2"):
         pass
     spy = AsyncMock()
@@ -2344,6 +2477,7 @@ async def test_close_records_transfer_timeout_on_generic_close():
 async def test_close_keeps_deliberate_reason_after_failed_transfer():
     """After a failed transfer, a normal later end keeps its real close reason; the attempt shows only in final_state."""
     session, bus, handler = await _outcome_session("s-cont")
+    session.on_transfer_initiated("cold", "1001", "x")
     async for _ in session.on_transfer_failed("1001", "hangup_before_bridge", "tid-3"):
         pass
     spy = AsyncMock()
@@ -2989,7 +3123,7 @@ async def test_local_tool_completed_event_does_not_crash_the_pipeline():
     llm = _make_llm(["unused"])
     tts = _make_tts(b"\x00" * 640)
     orchestrator = _FakeToolOrchestrator([
-        LocalToolCompletedEvent(tool_name="caller_verified"),
+        LocalToolCompletedEvent(tool_name="caller_verified", status="success"),
         ToolTokenEvent(text="Thanks, moving on."),
     ])
     handler = _make_handler(stt, llm, tts, system_prompt="You are a scheduler.", tool_orchestrator=orchestrator)
@@ -3578,7 +3712,7 @@ async def test_no_fallback_after_a_transition_line_then_an_empty_round():
             async for e in super().run_turn(*args, **kwargs):
                 yield e
 
-    orchestrator = _Transitioning([LocalToolCompletedEvent(tool_name="go_next")])
+    orchestrator = _Transitioning([LocalToolCompletedEvent(tool_name="go_next", status="success")])
     handler = _make_handler(
         _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
         system_prompt="You are Alex.", tool_orchestrator=orchestrator,
@@ -3622,7 +3756,7 @@ async def test_no_error_fallback_when_the_turn_moves_to_an_end_or_transfer_node(
             async for e in super().run_turn(*args, **kwargs):
                 yield e
 
-    orchestrator = _Moving([LocalToolCompletedEvent(tool_name="go_next")])
+    orchestrator = _Moving([LocalToolCompletedEvent(tool_name="go_next", status="success")])
     handler = _make_handler(
         _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
         system_prompt="You are Alex.", tool_orchestrator=orchestrator,
@@ -4096,3 +4230,711 @@ async def test_slow_tool_turn_continues_after_first_filler_output(monkeypatch):
     assert responses[-1].response_text == "The lookup is complete."
     assert handler._get_history("s1")[-1].content == "The lookup is complete."
     assert "The lookup is complete." in _spoken(tts)
+
+
+
+# ---------------------------------------------------------------------------
+# Tool calls stored on the transcript row
+# ---------------------------------------------------------------------------
+
+_CARD_NUMBER = "4111111111111111"
+_CARD_PIN = "7391"
+
+
+class _PayOrderThenStall:
+    """Orchestrator that runs pay_order to success, then stalls so the turn can be cut short."""
+
+    async def run_turn(self, *args, **kwargs):
+        from ..tools.llm_adapter import ToolCallFinishedEvent, ToolCallStartedEvent
+        yield ToolCallStartedEvent(tool_name="pay_order")
+        yield ToolCallFinishedEvent(tool_name="pay_order", status="success")
+        await asyncio.sleep(30)
+
+
+@pytest.mark.asyncio
+async def test_token_stream_swallows_a_tool_call_finished_event_and_records_its_status():
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallFinishedEvent, ToolCallStartedEvent
+
+    orchestrator = _FakeToolOrchestrator([
+        ToolCallStartedEvent(tool_name="pay_order"),
+        ToolCallFinishedEvent(tool_name="pay_order", status="success"),
+        ToolTokenEvent(text="Paid."),
+    ])
+    handler = _make_handler(_make_stt("pay"), _make_llm(), _make_tts(), tool_orchestrator=orchestrator)
+    tool_calls_made: list[dict[str, str]] = []
+
+    items = [
+        item async for item in handler._token_stream([], "s1", asyncio.Event(), tool_calls_made)
+    ]
+
+    assert [type(i).__name__ for i in items] == ["ToolCallStartedEvent", "str"]
+    assert tool_calls_made == [{"name": "pay_order", "status": "success"}]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_cut_short_after_a_tool_call_stores_the_call_without_its_arguments():
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt(f"pay with card {_CARD_NUMBER} pin {_CARD_PIN}"), _make_llm(), _make_tts(),
+        tool_orchestrator=_PayOrderThenStall(), transcripts=transcripts,
+    )
+
+    stream = handler.on_speech_ended("s1", _silence(), 200, -20.0)
+    await stream.__anext__()                               # the transcript
+    pending = asyncio.ensure_future(stream.__anext__())
+    await asyncio.sleep(0.05)
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await stream.aclose()
+
+    transcripts.record_turn.assert_called_once()
+    tool_calls = transcripts.record_turn.call_args.kwargs["tool_calls"]
+    assert tool_calls == [{"name": "pay_order", "status": "success"}]
+    assert _CARD_NUMBER not in json.dumps(tool_calls) and _CARD_PIN not in json.dumps(tool_calls)
+    # A hang-up is not the caller interrupting.
+    assert transcripts.record_turn.call_args.kwargs["count_barge_in"] is False
+
+
+class _LocalThenRemote:
+    """Orchestrator that runs a local tool, then a remote one, then speaks a reply."""
+
+    def __init__(self, reply: str = "Done."):
+        self._reply = reply
+
+    async def run_turn(self, *args, **kwargs):
+        from ..tools.llm_adapter import (
+            LocalToolCompletedEvent, TokenEvent as ToolTokenEvent, ToolCallFinishedEvent, ToolCallStartedEvent,
+        )
+        yield ToolCallStartedEvent(tool_name="caller_verified", filler_only=True)
+        yield LocalToolCompletedEvent(tool_name="caller_verified", status="success")
+        yield ToolCallStartedEvent(tool_name="pay_order")
+        yield ToolCallFinishedEvent(tool_name="pay_order", status="failed")
+        yield LocalToolCompletedEvent(tool_name="go_next", status="failed")
+        yield ToolTokenEvent(text=self._reply)
+
+
+@pytest.mark.asyncio
+async def test_local_and_remote_tool_calls_are_stored_in_call_order_with_name_and_status_only():
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt(f"pay with card {_CARD_NUMBER} pin {_CARD_PIN}"), _make_llm(), _make_tts(),
+        tool_orchestrator=_LocalThenRemote(), transcripts=transcripts,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    tool_calls = transcripts.record_turn.call_args.kwargs["tool_calls"]
+    assert tool_calls == [
+        {"name": "caller_verified", "status": "success"},
+        {"name": "pay_order", "status": "failed"},
+        {"name": "go_next", "status": "failed"},
+    ]
+    assert all(set(call) == {"name", "status"} for call in tool_calls)
+
+
+@pytest.mark.asyncio
+async def test_a_local_tool_call_is_stored_when_the_turn_is_cut_short():
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+
+    class _LocalThenStall:
+        async def run_turn(self, *args, **kwargs):
+            yield LocalToolCompletedEvent(tool_name="caller_verified", status="success")
+            await asyncio.sleep(30)
+
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(), _make_tts(), tool_orchestrator=_LocalThenStall(), transcripts=transcripts,
+    )
+
+    stream = handler.on_speech_ended("s1", _silence(), 200, -20.0)
+    await stream.__anext__()                               # the transcript
+    pending = asyncio.ensure_future(stream.__anext__())
+    await asyncio.sleep(0.05)
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await stream.aclose()
+
+    assert transcripts.record_turn.call_args.kwargs["tool_calls"] == [{"name": "caller_verified", "status": "success"}]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_local_tool_call_is_stored_as_failed_but_not_counted_as_made():
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+
+    cancel_event = asyncio.Event()
+    cancel_event.set()
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(), _make_tts(),
+        tool_orchestrator=_FakeToolOrchestrator([LocalToolCompletedEvent(tool_name="caller_verified", status="failed")]),
+    )
+    tool_calls_made: list[dict[str, str]] = []
+    transcript_calls: list[dict[str, str]] = []
+
+    [_ async for _ in handler._token_stream([], "s1", cancel_event, tool_calls_made, None, False, None, transcript_calls)]
+
+    assert transcript_calls == [{"name": "caller_verified", "status": "failed"}]
+    assert tool_calls_made == []
+
+
+@pytest.mark.asyncio
+async def test_a_barge_in_during_a_local_tool_call_stores_the_call_as_failed():
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+
+    class _LocalToolInFlight:
+        """Waits on the turn's own cancel event as the orchestrator does, then reports the call cancelled."""
+
+        async def run_turn(self, *args, cancel_event, **kwargs):
+            await cancel_event.wait()
+            yield LocalToolCompletedEvent(tool_name="caller_verified", status="failed")
+
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(), _make_tts(),
+        tool_orchestrator=_LocalToolInFlight(), transcripts=transcripts,
+    )
+
+    async def _drain():
+        return [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    turn = asyncio.ensure_future(_drain())
+    await asyncio.sleep(0.05)
+    await handler.on_cancel("s1")
+    await asyncio.wait_for(turn, timeout=2.0)
+
+    transcripts.record_turn.assert_called_once()
+    kwargs = transcripts.record_turn.call_args
+    assert kwargs.args[4] is True  # interrupted
+    assert kwargs.kwargs["tool_calls"] == [{"name": "caller_verified", "status": "failed"}]
+
+
+@pytest.mark.asyncio
+async def test_a_local_only_turn_still_trips_the_fabricated_booking_guard():
+    """A local tool call is stored for the transcript but is not a tool call made, as before."""
+    from ..tools.llm_adapter import LocalToolCompletedEvent, TokenEvent as ToolTokenEvent
+
+    transcripts = MagicMock()
+    orchestrator = _FakeToolOrchestrator([
+        LocalToolCompletedEvent(tool_name="caller_verified", status="success"),
+        ToolTokenEvent(text="Booked! Your appointment is confirmed."),
+    ])
+    handler = _make_handler(
+        _make_stt("book me tomorrow at 3"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
+        system_prompt="You are a scheduler.", tool_orchestrator=orchestrator, has_booking_tool=True,
+        transcripts=transcripts,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    history = handler._get_history("s1")
+    assert history[-1].role == "system"
+    assert "did not call any tool" in history[-1].content
+    assert transcripts.record_turn.call_args.kwargs["tool_calls"] == [{"name": "caller_verified", "status": "success"}]
+
+
+@pytest.mark.asyncio
+async def test_a_completed_turn_stores_its_tool_calls():
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallFinishedEvent, ToolCallStartedEvent
+
+    transcripts = MagicMock()
+    orchestrator = _FakeToolOrchestrator([
+        ToolCallStartedEvent(tool_name="pay_order"),
+        ToolCallFinishedEvent(tool_name="pay_order", status="failed"),
+        ToolTokenEvent(text="That did not go through."),
+    ])
+    handler = _make_handler(
+        _make_stt("pay"), _make_llm(), _make_tts(b"\x00" * 640),
+        tool_orchestrator=orchestrator, transcripts=transcripts,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert transcripts.record_turn.call_args.kwargs["tool_calls"] == [{"name": "pay_order", "status": "failed"}]
+
+
+# ---------------------------------------------------------------------------
+# Spoken text, barge-in counting and history after a failed reply
+# ---------------------------------------------------------------------------
+
+def _two_chunk_tts() -> MagicMock:
+    """A TTS whose every piece comes back as two audio chunks."""
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        yield b"\x01" * 320
+        yield b"\x02" * 320
+
+    tts.synthesize_stream = _stream
+    return tts
+
+
+async def _audio_pieces(handler, **kwargs) -> list[tuple[str, str]]:
+    return [
+        (raw, piece)
+        async for raw, audio, _end_call, piece in handler._llm_to_tts([], asyncio.Event(), "s1", [], **kwargs)
+        if audio
+    ]
+
+
+@pytest.mark.asyncio
+async def test_spoken_piece_rides_only_the_first_audio_chunk_of_each_sentence():
+    handler = _make_handler(_make_stt(), _make_llm(["Hello there. ", "How are you?"]), _two_chunk_tts())
+
+    assert await _audio_pieces(handler) == [
+        ("", "Hello there."), ("", ""), ("", "How are you?"), ("", ""),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_spoken_piece_is_the_first_clause_when_a_long_sentence_starts_early():
+    handler = _make_handler(
+        _make_stt(), _make_llm(["Sure, I can certainly help with that, ", "and more."]), _two_chunk_tts(),
+    )
+
+    pieces = [piece for _, piece in await _audio_pieces(handler)]
+
+    assert pieces == ["Sure, I can certainly help with that,", "", "and more.", ""]
+
+
+@pytest.mark.asyncio
+async def test_spoken_piece_of_the_fallback_is_its_text_and_a_filler_has_none(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "50")
+    async def _slow_silence(messages):
+        await asyncio.sleep(0.2)
+        return
+        yield  # an async generator that produces no token
+
+    slow_empty = MagicMock()
+    slow_empty.generate = _slow_silence
+    handler = _make_handler(_make_stt(), slow_empty, _two_chunk_tts())
+
+    audio = await _audio_pieces(handler, first_turn_filler=True)
+
+    fallback = t("fallback_llm_error", "en")
+    assert [piece for _, piece in audio] == ["", "", fallback, ""]
+    assert isinstance(audio[0][0], str) and audio[2][0] == fallback
+
+
+async def _turn_responses(handler, cut_after_first_audio: bool) -> list[HandlerResponse]:
+    responses = []
+    async for response in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        responses.append(response)
+        if response.on_sent:
+            response.on_sent()   # the servicer's send
+        if cut_after_first_audio and response.tts_payloads:
+            handler._sessions["s1"].cancelled.set()
+    return responses
+
+
+@pytest.mark.asyncio
+async def test_a_barge_in_after_the_first_sentence_stores_only_that_sentence(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "500")
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["Sentence one. ", "Sentence two."]), _make_tts(b"\x00" * 640),
+        transcripts=transcripts,
+    )
+
+    await _turn_responses(handler, cut_after_first_audio=True)
+
+    transcripts.record_turn.assert_called_once()
+    args = transcripts.record_turn.call_args
+    assert args.args[3] == "Sentence one."
+    assert args.args[4] is True
+    # A real barge-in leaves the counter rule to the writer (same as `interrupted`).
+    assert args.kwargs["count_barge_in"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_stream_end_hang_up_cuts_the_turn_without_counting_a_barge_in(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "500")
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["Sentence one. ", "Sentence two."]), _make_tts(b"\x00" * 640),
+        transcripts=transcripts,
+    )
+
+    async for response in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        if response.tts_payloads:
+            await handler.on_cancel("s1", hanging_up=True)
+
+    transcripts.record_turn.assert_called_once()
+    args = transcripts.record_turn.call_args
+    assert args.args[4] is True
+    assert args.kwargs["count_barge_in"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_fully_played_reply_stores_the_full_text_uninterrupted(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "500")
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["Sentence one. ", "Sentence two."]), _make_tts(b"\x00" * 640),
+        transcripts=transcripts,
+    )
+
+    await _turn_responses(handler, cut_after_first_audio=False)
+
+    args = transcripts.record_turn.call_args.args
+    assert args[3] == "Sentence one. Sentence two."
+    assert args[4] is False
+
+
+@pytest.mark.asyncio
+async def test_hang_up_during_the_transfer_apology_stores_the_row_as_interrupted_without_a_barge_in():
+    """Closing the generator mid-apology (teardown) must still persist the row, uncounted."""
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt(), _make_llm(["First apology. Second apology."]), _make_tts(b"\x00" * 640),
+        transcripts=transcripts,
+    )
+
+    gen = handler.on_transfer_failed("s1", "+15551234567", "hangup_before_bridge")
+    await gen.__anext__()
+    await gen.aclose()
+
+    transcripts.record_turn.assert_called_once()
+    args = transcripts.record_turn.call_args
+    assert "hangup_before_bridge" in args.args[1]
+    assert args.args[4] is True
+    assert args.kwargs["count_barge_in"] is False
+
+
+@pytest.mark.asyncio
+async def test_hang_up_during_the_fallback_apology_stores_the_fallback_text_the_caller_heard():
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt(), _make_llm([]), _make_tts(b"\x00" * 640), transcripts=transcripts,
+    )
+
+    gen = handler.on_transfer_failed("s1", "+15551234567", "esl_unreachable")
+    response = await gen.__anext__()
+    response.on_sent()   # the servicer's send
+    await gen.aclose()
+
+    transcripts.record_turn.assert_called_once()
+    assert transcripts.record_turn.call_args.args[3].strip() == _TRANSFER_FAILED_FALLBACK
+
+
+# ── _heard_reply: the sent ledger turned back into what the caller heard ──────────────────────────
+
+_LEDGER = [(100, "Hello there.", []), (300, "How can I help you today?", [])]
+
+
+def test_heard_reply_keeps_whole_pieces_the_played_bytes_cover():
+    assert _heard_reply(_LEDGER, 100) == "Hello there."
+    assert _heard_reply(_LEDGER, 300) == "Hello there. How can I help you today?"
+
+
+def test_heard_reply_cuts_the_piece_in_progress_by_word_share():
+    # 100 of the second piece's 200 bytes: half of its six words.
+    assert _heard_reply(_LEDGER, 200) == "Hello there. How can I"
+    # A cut before the piece's first word is due drops it, so no empty piece or stray space is left.
+    assert _heard_reply(_LEDGER, 120) == "Hello there."
+
+
+def test_heard_reply_skips_filler_audio_when_counting_offsets():
+    ledger = [(100, "", []), (300, "How can I help you today?", [])]
+    assert _heard_reply(ledger, 100) == ""
+    assert _heard_reply(ledger, 200) == "How can I"
+
+
+def test_heard_reply_with_no_bytes_played_is_empty():
+    assert _heard_reply(_LEDGER, 0) == ""
+
+
+def test_heard_reply_with_bytes_past_the_end_is_the_whole_reply():
+    assert _heard_reply(_LEDGER, 10_000) == "Hello there. How can I help you today?"
+
+
+def test_turn_progress_counts_further_chunks_of_a_piece_into_that_piece():
+    progress = _TurnProgress()
+    progress.mark_sent("", b"\x00" * 100)               # filler
+    progress.mark_sent("One two three four.", b"\x00" * 100)
+    progress.mark_sent_more(b"\x00" * 100)
+    progress.mark_sent("Next.", b"\x00" * 50)
+    assert progress.sent == [(100, "", []), (300, "One two three four.", []), (350, "Next.", [])]
+    assert progress.spoken == ["One two three four.", "Next."]
+    assert _heard_reply(progress.sent, 200) == "One two"
+
+
+def test_turn_progress_records_a_piece_as_voiced_without_markdown():
+    progress = _TurnProgress()
+    progress.mark_sent("Your **order** is ready.", b"\x00" * 100)
+    progress.mark_sent("**", b"\x00" * 10)
+    assert progress.spoken == ["Your order is ready."]
+    assert _heard_reply(progress.sent, 100) == "Your order is ready."
+
+
+def test_heard_reply_cuts_a_timed_piece_at_the_last_word_that_ended_by_the_cut():
+    # Words end at 30, 90, 150 of 160 bytes: a skewed voice the word share would misjudge (2 of 3 words at 100).
+    ledger = [(100, "Hello there.", []), (260, "Words are uneven.", [30, 90, 150])]
+    assert _heard_reply(ledger, 100 + 89) == "Hello there. Words"
+    assert _heard_reply(ledger, 100 + 90) == "Hello there. Words are"
+    assert _heard_reply(ledger, 100 + 29) == "Hello there."
+
+
+def test_heard_reply_falls_back_to_the_word_share_when_the_timings_do_not_match_the_text():
+    ledger = [(100, "One two three four.", [10, 20])]
+    assert _heard_reply(ledger, 50) == "One two"
+
+
+@pytest.mark.asyncio
+async def test_the_ledger_counts_the_scripted_audio_that_plays_after_the_reply(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "500")
+    transcripts = MagicMock()
+    tts = _make_tts(b"\x22" * 640)
+    handler = _make_handler(
+        _make_stt("get me a human"), _make_llm(["Sure, one moment. ", '[[TRANSFER type="cold" destination="1001" reason="x"]]']),
+        tts, system_prompt="You are Alex.", transfer_type="cold", transfer_destination="1001",
+        transfer_announcement="Please hold while I transfer your call.", transcripts=transcripts,
+    )
+
+    await _turn_responses(handler, cut_after_first_audio=False)
+
+    [(_turn, sent, _cut)] = handler._sessions["s1"].pending_heard
+    # The announcement is not part of the stored reply, but its bytes sit in the ledger after the reply's.
+    assert sent == [(640, "Sure, one moment.", []), (1280, "", [])]
+
+
+async def _announced_transfer_turn(monkeypatch):
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "500")
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("get me a human"), _make_llm(["Sure, one moment. ", '[[TRANSFER type="cold" destination="1001" reason="x"]]']),
+        _make_tts(b"\x22" * 640), system_prompt="You are Alex.", transfer_type="cold", transfer_destination="1001",
+        transfer_announcement="Please hold while I transfer your call.", transcripts=transcripts,
+    )
+    await _turn_responses(handler, cut_after_first_audio=False)   # reply 640 bytes, announcement 640 more
+    return handler, transcripts
+
+
+@pytest.mark.asyncio
+async def test_a_barge_in_during_the_announcement_marks_the_turn_interrupted_once_and_keeps_the_reply_text(monkeypatch):
+    handler, transcripts = await _announced_transfer_turn(monkeypatch)
+
+    handler.on_playback_interrupted("s1", 960)   # the reply played in full, the announcement half
+
+    transcripts.correct_turn_reply.assert_called_once()
+    args = transcripts.correct_turn_reply.call_args
+    assert args.args[2] == "Sure, one moment."   # the announcement is marked "", so never stored
+    assert args.kwargs == {"newly_interrupted": True, "count_barge_in": True}
+
+
+@pytest.mark.asyncio
+async def test_a_report_covering_the_announcement_changes_nothing(monkeypatch):
+    handler, transcripts = await _announced_transfer_turn(monkeypatch)
+
+    handler.on_playback_interrupted("s1", 1280)
+
+    transcripts.correct_turn_reply.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_error_queued_as_the_call_is_cancelled_is_still_delivered(caplog):
+    handler = _make_handler(_make_stt("hello"), _make_llm(["unused"]), _make_tts(), transcripts=MagicMock())
+
+    async def failing_turn(*args, **kwargs):
+        await handler.on_cancel("s1", hanging_up=True)   # the half-close lands with the failure
+        raise RuntimeError("tts exploded")
+        yield
+
+    handler._llm_to_tts = failing_turn
+    with caplog.at_level("ERROR", logger=pipeline_module.log.name):
+        [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert "LLM/TTS pipeline failed" in caplog.text
+
+
+async def _max_duration_goodbye_cut(played_bytes, *, report_twice=False):
+    transcripts = MagicMock()
+    handler = _make_handler(
+        _make_stt("are you still there"), _make_spy_llm(["unused"])[0], _make_tts(b"\x00" * 640),
+        max_call_duration_s=60, transcripts=transcripts,
+    )
+    handler._call_started_at -= 61
+    async for response in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        if response.on_sent:
+            response.on_sent()
+    handler.on_playback_interrupted("s1", played_bytes)
+    return transcripts
+
+
+@pytest.mark.asyncio
+async def test_a_barge_in_part_way_through_the_max_duration_goodbye_corrects_the_row_once():
+    transcripts = await _max_duration_goodbye_cut(320)
+
+    transcripts.correct_turn_reply.assert_called_once()
+    args = transcripts.correct_turn_reply.call_args
+    assert args.kwargs == {"newly_interrupted": True, "count_barge_in": True}
+    # Half of the 14 words: 320 of the 640 bytes sent.
+    assert args.args[2] == "We're at the time limit for this"
+
+
+@pytest.mark.asyncio
+async def test_a_report_covering_the_whole_max_duration_goodbye_changes_nothing():
+    transcripts = await _max_duration_goodbye_cut(640)
+
+    transcripts.correct_turn_reply.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TTS that returns no audio counts as a failure, whether it raises or returns nothing
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["none", "blank", "raise"])
+async def test_a_reply_sentence_with_no_audio_is_left_out_of_the_transcript_and_history(mode):
+    """"raise" is the control: PR #200 already behaves this way, so it passes on base too."""
+    transcripts = MagicMock()
+    tts = _scripted_tts(**{"-5 degrees outside today.": mode})
+    handler = _make_handler(
+        _make_stt("weather"), _make_llm(["-5 degrees outside today. ", "Second."]), tts, transcripts=transcripts,
+    )
+    handler._session("s1").first_turn_filler_spoken = True
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    payloads = [p for r in responses for p in r.tts_payloads]
+    assert payloads == [b"\x01" * 320]            # only "Second." was heard, and no b"" went out
+    assert [m.content for m in handler._get_history("s1") if m.role == "assistant"] == ["Second."]
+    await handler.on_session_end("s1", "caller_hangup")
+    assert transcripts.record_turn.call_args.args[3] == "Second."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["none", "blank"])
+async def test_a_stream_with_no_audio_logs_a_warning(mode, caplog):
+    handler = _make_handler(_make_stt(), _make_llm(), _scripted_tts(default=mode))
+    with caplog.at_level("WARNING", logger=pipeline_module.log.name):
+        chunks = [c async for c in handler._synthesize_sentence_stream("Hello there.", "s1")]
+
+    assert chunks == []
+    assert "TTS produced no audio chars=12 session=s1" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Fixed-phrase cache never keeps or replays an empty result
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_request_that_overlaps_an_empty_synthesis_still_gets_audio():
+    """Regression guard: phrase_audio already refuses to replay an empty result, so this passes on base."""
+    first_started, release = asyncio.Event(), asyncio.Event()
+    calls = {"n": 0}
+    started_after_release = []
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            first_started.set()
+            await release.wait()
+            return
+        started_after_release.append(release.is_set())
+        yield b"\x01\x00"
+
+    tts.synthesize_stream = _stream
+    first = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome.")
+    second = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome.")
+
+    first_task = asyncio.create_task(first.greeting("s1"))
+    await first_started.wait()
+    second_task = asyncio.create_task(second.greeting("s2"))
+    await asyncio.sleep(0)          # the second request is now waiting on the first one's flight
+    release.set()
+
+    assert await first_task == []
+    assert await second_task == [b"\x01\x00"]
+    assert started_after_release and all(started_after_release)   # no synthesis other than the first began before it ended
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", [[], [b""]])
+async def test_an_empty_greeting_is_synthesized_again_on_the_next_request(empty):
+    """Only the b"" case failed on base; the no-chunk case is a regression guard (phrase_audio.store refuses an empty result)."""
+    calls = {"n": 0}
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        calls["n"] += 1
+        for chunk in (empty if calls["n"] == 1 else [b"\x01\x00"]):
+            yield chunk
+
+    tts.synthesize_stream = _stream
+    first = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome.")
+    second = _make_handler(_make_stt(), _make_llm(), tts, greeting="Welcome.")
+
+    assert await first.greeting("s1") == []
+    assert await second.greeting("s2") == [b"\x01\x00"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", [[], [b""]])
+async def test_an_empty_filler_is_synthesized_again_on_the_next_request(empty):
+    """Only the b"" case failed on base; the no-chunk case is a regression guard."""
+    calls = {"n": 0}
+    tts = MagicMock()
+
+    async def _stream(text, sample_rate):
+        calls["n"] += 1
+        for chunk in (empty if calls["n"] == 1 else [b"\x01\x00"]):
+            yield chunk
+
+    tts.synthesize_stream = _stream
+    handler = _make_handler(_make_stt(), _make_llm(), tts)
+
+    first = [c async for c in handler._synthesize_sentence_stream("One moment.", "s1", cache=True)]
+    second = [c async for c in handler._synthesize_sentence_stream("One moment.", "s1", cache=True)]
+
+    assert first == []
+    assert second == [b"\x01\x00"]
+
+
+@pytest.mark.parametrize(
+    "reply, failed, expected",
+    [
+        ("我很好。失败。谢谢。", ["失败。"], "我很好。谢谢。"),
+        ("元気です。失敗。ありがとう。", ["失敗。"], "元気です。ありがとう。"),
+        ("I am fine. It failed. Thanks.", ["It failed."], "I am fine. Thanks."),
+        ("मैं ठीक हूँ। यह विफल। धन्यवाद।", ["यह विफल।"], "मैं ठीक हूँ। धन्यवाद।"),
+        ("No. Account No. 4512 is active.", ["No."], "Account No. 4512 is active."),
+    ],
+)
+def test_a_dropped_sentence_is_rejoined_by_the_script_of_its_neighbours(reply, failed, expected):
+    assert _spoken_reply([reply], failed) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("move", ["end", "transfer"])
+async def test_cancel_while_the_model_is_stalled_ends_the_turn_and_runs_barge_in_cleanup(move):
+    """#170: a barge-in while the LLM stalls must release the turn at once, and the interrupted
+    goodbye / transfer announcement must be abandoned (not acted on after the next reply) and the
+    cancelled user message must not stay in history."""
+    from libs.config_sdk.workflow import Node
+
+    async def _stalled(messages):
+        await asyncio.sleep(30)
+        yield "never"
+
+    llm = MagicMock()
+    llm.generate = _stalled
+    handler = _make_handler(_make_stt("bye now"), llm, _timed_tts(), system_prompt="You are Alex.")
+    if move == "end":
+        handler._workflow.pending_end = True
+    else:
+        handler._workflow.pending_transfer = Node(
+            id="t", type="transfer", name="Transfer", transfer_destination="+15550100")
+
+    async def _run():
+        return [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    task = asyncio.ensure_future(_run())
+    await asyncio.sleep(0.2)
+    assert not task.done()
+    await handler.on_cancel("s1")
+    await asyncio.wait_for(task, 2)   # not the 30 s model timeout
+
+    assert handler._workflow.pending_end is False
+    assert handler._workflow.pending_transfer is None
+    assert not any(m.role == "user" and m.content == "bye now" for m in handler._get_history("s1"))

@@ -219,8 +219,40 @@ async def test_cancel_generation_sends_ack():
             ack = await stream.read()
             assert ack.HasField("cancel_ack")
             assert ack.cancel_ack.session_id == "test-cancel"
+            assert not ack.cancel_ack.HasField("cancel_id")  # none sent, none echoed
 
             await stream.done_writing()
+    finally:
+        await server.stop(grace=0)
+
+
+@pytest.mark.asyncio
+async def test_each_cancel_generation_gets_exactly_one_ack():
+    """The gateway's late-audio gate counts one ack per cancel; back-to-back cancels must not collapse."""
+    addr, server = await _open_echo_server()
+    try:
+        async with grpc.aio.insecure_channel(addr) as channel:
+            stub   = pb_grpc.ConversationServiceStub(channel)
+            stream = await _open_and_handshake(stub, "test-cancel-twice")
+
+            for cancel_id in (1, 2):
+                await stream.write(pb.GatewayMessage(
+                    cancel_generation=pb.CancelGeneration(
+                        session_id="test-cancel-twice", cancel_id=cancel_id,
+                    )
+                ))
+            for cancel_id in (1, 2):
+                ack = await stream.read()
+                assert ack.HasField("cancel_ack")
+                assert ack.cancel_ack.HasField("cancel_id")
+                assert ack.cancel_ack.cancel_id == cancel_id
+
+            # A third ack would arrive before this: the playback_finished sends none.
+            await stream.write(pb.GatewayMessage(
+                playback_finished=pb.PlaybackFinished(session_id="test-cancel-twice")
+            ))
+            await stream.done_writing()
+            assert await stream.read() == grpc.aio.EOF
     finally:
         await server.stop(grace=0)
 
@@ -616,5 +648,26 @@ async def test_assistant_response_sent_after_turn_audio():
             assert msg.assistant_response.session_id == "test-assistant-response"
 
             await stream.done_writing()
+    finally:
+        await server.stop(grace=0)
+
+
+@pytest.mark.asyncio
+async def test_stray_transfer_events_send_no_conversation_finalized():
+    """Without transfer_initiated, transfer_completed/failed are ignored over the wire (#181)."""
+    addr, server = await _open_echo_server()
+    try:
+        async with grpc.aio.insecure_channel(addr) as channel:
+            stub = pb_grpc.ConversationServiceStub(channel)
+            stream = await _open_and_handshake(stub, "test-stray-transfer")
+            await stream.write(pb.GatewayMessage(
+                transfer_completed=pb.TransferCompleted(
+                    session_id="test-stray-transfer", destination="+15551234567")))
+            await stream.write(pb.GatewayMessage(
+                transfer_failed=pb.TransferFailed(
+                    session_id="test-stray-transfer", destination="+15551234567", reason="x")))
+            await stream.done_writing()
+            while (m := await stream.read()) is not grpc.aio.EOF:
+                assert not m.HasField("conversation_finalized")
     finally:
         await server.stop(grace=0)

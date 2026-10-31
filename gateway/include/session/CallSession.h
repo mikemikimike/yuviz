@@ -12,6 +12,7 @@
 #include "metrics/IMetrics.h"
 #include "metrics/SessionMetrics.h"
 #include "session/CallFSM.h"
+#include "session/CancelledReplyGate.h"
 #include "session/SessionContext.h"
 #include "telephony/ColdTransferCoordinator.h"
 #include "telephony/EslClient.h"
@@ -66,6 +67,8 @@ public:
 
     [[nodiscard]] const std::string& session_id() const noexcept;
     [[nodiscard]] CallFsmState       fsm_state()  const noexcept;
+    // Control-thread state; read only once the session's queue has drained (tests).
+    [[nodiscard]] bool               end_call_pending() const noexcept;
     [[nodiscard]] bool               is_terminal() const noexcept;
     [[nodiscard]] MediaSession&      media_session() noexcept { return *media_; }
 
@@ -82,6 +85,9 @@ private:
 
     // Thread-safe.
     void post(std::function<void()> fn);
+
+    // Barge-in cancel. Drops the cancelled reply's late audio until its CancelAck.
+    void cancel_generation();
 
     void control_loop() noexcept;
 
@@ -138,6 +144,13 @@ private:
 
     // Ensures on_first_audio_chunk() is posted once per TTS response.
     std::atomic<bool> tts_first_chunk_pending_{false};
+    // Drops chunks of a barged-in reply that arrive before its CancelAck.
+    CancelledReplyGate cancelled_reply_gate_;
+    uint64_t           next_cancel_id_{1};  // control-thread only
+    // Barge-in accounting: drain byte count when the reply's audio began, and
+    // the bytes of it played before the cut (sent in PlaybackFinished).
+    std::atomic<uint64_t>        reply_start_bytes_{0};
+    std::optional<uint64_t>      barge_played_bytes_;
 
     // Set once a transfer hands the customer's SIP leg outside the Gateway, so
     // session close must not hang it up. Written/read on different threads.

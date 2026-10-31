@@ -258,6 +258,8 @@ _BYPASS_REASONS = {
     # Redis as tenant:{slug} because the Gateway cannot fall back to Postgres for its VAD and timer settings.
     # Nothing read here is returned to a caller.
     "tenants-prewarm",
+    # Website-demo seed: finds its workspace, and reads a config only from the operator-named source workspace.
+    "seed-website-demo", "seed-website-demo-read-source",
     "agents-by-id", "call-flow-by-id", "carriers-by-id", "phone-numbers-by-id", "phone-numbers-did-lookup",
     "provider-configs-by-id", "telephony-configs-by-id", "tool-provider-configs-by-id",
     "calls-platform-read", "audit-log-platform-read",
@@ -267,6 +269,8 @@ _BYPASS_REASONS = {
     "campaign-by-id", "dnc-by-id", "campaign-worker-scan", "campaign-dial-state", "campaign-attempts-list",
     # Operator-only platform capacity limits; each write audits its own entity.
     "capacity-admin",
+    # Superadmin-only platform AI settings: one platform-wide row, no tenant column.
+    "platform-ai-settings-read", "platform-ai-settings-write",
     "kb-by-id", "kb-admin-by-id", "agent-kb-by-id", "kb-ingestion-job-claim",
     # Retention purge of retrieval_logs: deletes rows older than N days across every tenant, in small batches,
     # by age only (no tenant-supplied input). Mutation without a single tenant to stamp.
@@ -310,6 +314,7 @@ _UNSTAMPED_MUTATION_EXEMPT_REASONS = {
     "campaign-worker-scan", "conversation-reconcile-sweep",
     "kb-ingestion-job-claim", "kb-ingestion-lease-reaper", "agent-apis-chain-runs", "retrieval-logs-purge",
     "calls-platform-read", "audit-log-platform-read",
+    "platform-ai-settings-write",
 }
 
 _MUTATION_SQL_RE = re.compile(r"\b(INSERT\s+INTO|UPDATE\s+\w|DELETE\s+FROM)\b", re.I)

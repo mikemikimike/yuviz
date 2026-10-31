@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from libs.tenancy import TenantUnresolved
+from services.conversation.bounded import POOL_RELEASE_TIMEOUT_S
 from services.conversation.tools import policy_resolver
 from services.conversation.tools.policy_resolver import (
     _FALLBACK_BACKOFF_S,
@@ -52,12 +53,14 @@ class FakeDb:
 
     def __init__(self) -> None:
         self.entries = 0
+        self.acquire_timeouts: list[float | None] = []
         self.fail: str | int | None = None
         self.rows: list[list[dict]] = [[_POLICY_ROW], []]
 
     @asynccontextmanager
     async def __call__(self, pool, *, explicit_tenant, reason, acquire_timeout=None):
         self.entries += 1
+        self.acquire_timeouts.append(acquire_timeout)
         if self.fail == "down":
             raise OSError(DRIVER_ERROR)
         if self.fail == "hang_acquire":
@@ -113,6 +116,15 @@ async def test_every_stall_point_is_bounded_and_returns_the_stale_list(db, clock
 
     assert time.perf_counter() - started < _LOOKUP_TIMEOUT_S + 0.5
     assert result == stale
+
+
+async def test_both_lookup_connections_bound_their_release(db, clock):
+    # Fails if either connection (policy fetch or execute_api specialize) opens without the bound:
+    # a cancel on a blackholed DB would then hang in ROLLBACK and hold the pool slot.
+    db.rows = [[_POLICY_ROW, {**_POLICY_ROW, "tool_name": "execute_api"}], []]
+    await _resolver().enabled_tools("a1", "t1")
+
+    assert db.acquire_timeouts == [POOL_RELEASE_TIMEOUT_S, POOL_RELEASE_TIMEOUT_S]
 
 
 async def test_a_stall_that_resists_cancellation_still_returns_within_the_bound(monkeypatch, clock):

@@ -4,6 +4,7 @@
 // and PCM playback against the webcall bridge.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { mintTestCredential, openTestCallSocket } from "@/lib/webcallSocket";
 
 const WEBCALL_URL = process.env.NEXT_PUBLIC_WEBCALL_URL || "ws://localhost:8300";
 const SAMPLE_RATE = 16000;
@@ -177,6 +178,7 @@ export function useWebCall(tenantSlug: string, agentSlug: string): WebCall {
     setState("connecting");
     setErrorMsg(null);
     try {
+      const credential = await mintTestCredential(tenantSlug, agentSlug);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
       streamRef.current = stream;
 
@@ -194,9 +196,7 @@ export function useWebCall(tenantSlug: string, agentSlug: string): WebCall {
       source.connect(worklet);
       // Not connected to ctx.destination, to avoid echoing the mic back.
 
-      const ws = new WebSocket(
-        `${WEBCALL_URL}/webcall?tenant=${encodeURIComponent(tenantSlug)}&agent=${encodeURIComponent(agentSlug)}`,
-      );
+      const ws = openTestCallSocket(WEBCALL_URL, tenantSlug, agentSlug, credential);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
@@ -332,6 +332,7 @@ export function useWebCall(tenantSlug: string, agentSlug: string): WebCall {
         }
       };
     } catch (e) {
+      teardown();
       setState("error");
       setErrorMsg(e instanceof Error ? e.message : "Could not access the microphone.");
     }

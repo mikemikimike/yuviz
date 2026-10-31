@@ -21,6 +21,7 @@ protected:
     void SetUp() override {
         tmp_yaml_ = std::filesystem::temp_directory_path() / "test_gateway.yaml";
         ::unsetenv("GATEWAY_LISTEN_PORT");  // a dev shell exports it from .env
+        ::unsetenv("GATEWAY_VAD_HOLD_MS");
     }
 
     void TearDown() override {
@@ -42,6 +43,66 @@ TEST_F(ConfigTest, DefaultsAreAppliedWhenKeysMissing) {
     EXPECT_EQ(cfg.websocket().host, "127.0.0.1");
     EXPECT_EQ(cfg.media().sample_rate, 16000u);
     EXPECT_EQ(cfg.media().channels, 1u);
+}
+
+// ── end-of-speech hold: 600 ms default, configurable gateway-wide ───────────
+
+TEST_F(ConfigTest, VadHoldDefaultsTo600msForEveryEngine) {
+    ::unsetenv("GATEWAY_VAD_HOLD_MS");
+    write_yaml("gateway:\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+
+    EXPECT_EQ(cfg.media().vad_hold_ms, 600u);
+    const auto tc = voiceai::TenantConfig::from_default(cfg.gateway());
+    EXPECT_EQ(tc.silero.hold_ms, 600u);
+    EXPECT_EQ(tc.vad.hold_ms, 600u);
+    EXPECT_EQ(voiceai::SileroVADConfig{}.hold_ms, 600u);
+}
+
+TEST_F(ConfigTest, VadHoldIsSetByYamlAndReachesTheTenantDefault) {
+    ::unsetenv("GATEWAY_VAD_HOLD_MS");
+    write_yaml("gateway:\n  media:\n    vad_hold_ms: 450\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+
+    EXPECT_EQ(cfg.media().vad_hold_ms, 450u);
+    EXPECT_EQ(voiceai::TenantConfig::from_default(cfg.gateway()).silero.hold_ms, 450u);
+}
+
+TEST_F(ConfigTest, VadHoldEnvOverridesYamlAndBlankKeepsIt) {
+    write_yaml("gateway:\n  media:\n    vad_hold_ms: 450\n");
+    ::setenv("GATEWAY_VAD_HOLD_MS", "800", 1);
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.media().vad_hold_ms, 800u);
+
+    ::setenv("GATEWAY_VAD_HOLD_MS", "", 1);                  // .env documents it as blank
+    voiceai::Config blank;
+    blank.load(tmp_yaml_.string());
+    EXPECT_EQ(blank.media().vad_hold_ms, 450u);
+    ::unsetenv("GATEWAY_VAD_HOLD_MS");
+}
+
+TEST_F(ConfigTest, VadHoldOutsideTheBoundsOrNotANumberIsRefusedAtStartup) {
+    ::unsetenv("GATEWAY_VAD_HOLD_MS");
+    for (const char* bad : {"abc", "-5", "100", "199", "3001", "99999", "6.5"}) {
+        write_yaml(std::string("gateway:\n  media:\n    vad_hold_ms: ") + bad + "\n");
+        voiceai::Config cfg;
+        EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error) << bad;
+    }
+    write_yaml("gateway:\n");
+    for (const char* bad : {"abc", "100", "3001"}) {
+        ::setenv("GATEWAY_VAD_HOLD_MS", bad, 1);
+        voiceai::Config cfg;
+        EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error) << bad;
+    }
+    ::unsetenv("GATEWAY_VAD_HOLD_MS");
+    for (const char* edge : {"200", "3000"}) {
+        write_yaml(std::string("gateway:\n  media:\n    vad_hold_ms: ") + edge + "\n");
+        voiceai::Config cfg;
+        EXPECT_NO_THROW(cfg.load(tmp_yaml_.string())) << edge;
+    }
 }
 
 TEST_F(ConfigTest, ValuesOverrideDefaults) {

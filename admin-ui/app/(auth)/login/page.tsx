@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ArrowUpRight } from "lucide-react";
 import {
   ApiError, forgotPassword, getCurrentUser, googleSignInUrl, isConsoleRole, login, register,
   resendVerificationCode, resetPassword, SIGNUP_SOURCES, verifyEmail, type UserRole,
@@ -14,31 +13,21 @@ import { clearToken, setToken } from "@/lib/auth";
 import { COUNTRY_DIAL_CODES } from "@/lib/countries";
 import { SelectMenu } from "@/components/SelectMenu";
 
-// Only claims the product can back up — no invented usage numbers.
+const WEBSITE_URL = process.env.NEXT_PUBLIC_WEBSITE_URL || "/";
+
 const HERO = {
   signin: {
-    eyebrow: "Voice AI platform",
-    title: "Voice agents that listen, think and talk back",
-    body: "Your AI assistant answers calls on the phone or your website, understands what callers say, replies in a natural voice, finds answers in your documents, and passes the call to a real person when needed.",
-    facts: [
-      { value: "Phone & web", label: "Answers calls from any phone or browser" },
-      { value: "Natural voice", label: "Listens and replies instantly" },
-      { value: "Private", label: "Each organization's data kept separate" },
-    ],
+    eyebrow: "AI voice agents for business",
+    title: "Turn conversations into",
+    accent: "outcomes.",
   },
   create: {
-    eyebrow: "Get started",
-    title: "Set up your voice AI workspace",
-    body: "Create your organization and admin account, invite your team and launch your first AI voice assistant.",
-    facts: [
-      { value: "01", label: "Create your organization" },
-      { value: "02", label: "Connect your AI and voice services" },
-      { value: "03", label: "Invite your team and go live" },
-    ],
+    eyebrow: "Start with one workflow",
+    title: "Your first voice agent,",
+    accent: "in minutes.",
+    body: "Create a workspace, pick a voice, and test a call from your browser.",
   },
 };
-
-const PROVIDERS = ["OpenAI", "Anthropic", "Gemini", "Ollama", "Deepgram", "ElevenLabs", "Whisper", "Kokoro"];
 
 const DIAL_CODE = Object.fromEntries(COUNTRY_DIAL_CODES);
 // Mirrors verification.RESEND_COOLDOWN_SECONDS.
@@ -52,7 +41,7 @@ const EMPTY_SIGNUP = {
 function Logo() {
   return (
     <div className="auth-logo">
-      <BrandMark size={38} className="login-logo-icon" />
+      <BrandMark size={40} className="login-logo-icon" />
       <div className="login-logo-text">
         Yuviz<span>.ai</span>
       </div>
@@ -130,7 +119,7 @@ export default function LoginPage() {
     // Deferred so the state updates don't run synchronously inside the effect.
     queueMicrotask(() => {
       if (oauthError) setError(oauthError);
-      setMode("signin");
+      setMode(new URLSearchParams(window.location.search).get("mode") === "create" ? "create" : "signin");
     });
   }, [router]);
 
@@ -292,26 +281,14 @@ export default function LoginPage() {
       <aside className="auth-hero">
         <Logo />
         <div className="auth-hero-main">
-          <div className="auth-eyebrow">{hero.eyebrow}</div>
-          <h1 className="auth-hero-title">{hero.title}</h1>
-          <p className="auth-hero-body">{hero.body}</p>
-          <div className="auth-providers">
-            <span className="auth-providers-label">Works with</span>
-            {PROVIDERS.map((p) => <span key={p} className="auth-chip">{p}</span>)}
-          </div>
-        </div>
-        <div className="auth-facts">
-          {hero.facts.map((f) => (
-            <div key={f.label}>
-              <div className="auth-fact-value">{f.value}</div>
-              <div className="auth-fact-label">{f.label}</div>
-            </div>
-          ))}
+          <div className="auth-eyebrow"><span className="auth-eyebrow-dot" aria-hidden="true" />{hero.eyebrow}</div>
+          <h1 className="auth-hero-title">{hero.title} <span>{hero.accent}</span></h1>
+          {"body" in hero && <p className="auth-hero-body">{hero.body}</p>}
         </div>
       </aside>
 
       <main className="auth-panel">
-        <Link href="/" className="auth-back"><ArrowLeft size={13} /> Back to homepage</Link>
+        {WEBSITE_URL !== "/" && <a href={WEBSITE_URL} className="auth-back"><span className="auth-back-icon"><ArrowUpRight size={13} /></span>Explore Yuviz</a>}
         <div className="auth-form">
           <div className="auth-mobile-logo"><Logo /></div>
           {verifyingEmail ? (

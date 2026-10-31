@@ -27,7 +27,8 @@ import grpc.aio
 from .event_bus import EventBus, TransferRequested
 from .rejection import RejectedCallHangup
 from .session import (
-    AgentUnavailable, ConversationSession, IConversationHandler, RoutingStatus, SessionContext,
+    AgentUnavailable, ConversationSession, IConversationHandler, MAX_UTTERANCE_BYTES,
+    RoutingStatus, SessionContext,
 )
 from .transcript_builder import TranscriptBuilder
 
@@ -40,9 +41,18 @@ PROTOCOL_VERSION = "1.0"
 
 # One refusal text for a live session_id, whichever tenant holds it.
 _SESSION_IN_USE = "session_id already in use"
+_INVALID_SESSION_ID = "invalid session_id"
+_MAX_SESSION_ID_LEN = 128
+_AT_CAPACITY = "conversation service at capacity"
 # Fixed peer-facing texts: exception strings can carry hosts, ports and DSNs, so they stay in the server log.
 _INTERNAL_MESSAGE = "internal error"
 _REJECTED_MESSAGE = "call rejected"
+
+
+def _valid_session_id(sid: str) -> bool:
+    """1..128 printable characters, not all whitespace (str.isprintable() rejects NUL and other controls)."""
+    return 0 < len(sid) <= _MAX_SESSION_ID_LEN and sid.isprintable() and bool(sid.strip())
+
 
 # UNSPECIFIED is a non-gateway client: webcall, vobiz, tests.
 _ROUTING_STATUS = {
@@ -52,6 +62,17 @@ _ROUTING_STATUS = {
     pb.ROUTING_STATUS_UNKNOWN:     RoutingStatus.UNKNOWN,
     pb.ROUTING_STATUS_UNAVAILABLE: RoutingStatus.UNAVAILABLE,
 }
+
+
+def _cancel_id(cancel: "pb.CancelGeneration") -> int | None:
+    """The gateway's cancel id to echo in CancelAck, or None when it sent none."""
+    return cancel.cancel_id if cancel.HasField("cancel_id") else None
+
+
+def _is_reply_audio(response) -> bool:
+    """True when the response carries non-empty reply audio; a filler replays from cache even while
+    TTS is down, and a zero-byte payload is silence, so neither is the goodbye."""
+    return not response.filler and any(response.tts_payloads)
 
 
 def _consume_pending_transfer(tr, interrupted: bool, sid: str):
@@ -97,7 +118,13 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         self,
         handler_factory: Callable[[SessionContext], Awaitable[IConversationHandler]],
         transcripts: TranscriptBuilder | None = None,
+        max_sessions: int = 0,
+        on_capacity_change: Callable[[bool], None] | None = None,
     ) -> None:
+        # max_sessions <= 0 means no cap. A new call over the cap is refused with RESOURCE_EXHAUSTED
+        # so the gateway can retry another replica instead of degrading every live call here.
+        self._max_sessions = max_sessions
+        self._on_capacity_change = on_capacity_change
         self._handler_factory = handler_factory
         self._transcripts = transcripts
         self._stream_tasks: set[asyncio.Task] = set()
@@ -143,6 +170,15 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             )
             return
 
+        # Refuse an unusable id before anything is keyed by it: an empty id would be one platform-wide
+        # id, NUL/control characters break the call-row write and forge log lines, a huge id is
+        # stored and repeated in every log line. The id is never echoed back or logged.
+        if not _valid_session_id(open_req.session_id):
+            log.warning("Converse: invalid session_id refused (len=%d) tenant=%s",
+                        len(open_req.session_id), open_req.tenant_id)
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, _INVALID_SESSION_ID)
+            return
+
         # Per-session state downstream (transcript bookkeeping, STT stream, call row) is keyed by the
         # client-supplied session_id, so one live stream per id, across tenants. The refusal text is
         # the same whichever tenant holds the id.
@@ -152,7 +188,13 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         sid, open_req.tenant_id)
             await context.abort(grpc.StatusCode.ALREADY_EXISTS, _SESSION_IN_USE)
             return
+        if self._max_sessions > 0 and len(self._live_sessions) >= self._max_sessions:
+            log.warning("Converse: at capacity (%d live sessions), refused session=%s",
+                        len(self._live_sessions), sid)
+            await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, _AT_CAPACITY)
+            return
         self._live_sessions.add(sid)
+        self._notify_capacity()
         try:
             async with contextlib.aclosing(self._serve(open_req, request_iterator)) as stream:
                 async for message in stream:
@@ -162,6 +204,11 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             if self._transcripts is not None:
                 self._transcripts.discard_session(sid)
             self._live_sessions.discard(sid)
+            self._notify_capacity()
+
+    def _notify_capacity(self) -> None:
+        if self._on_capacity_change is not None and self._max_sessions > 0:
+            self._on_capacity_change(len(self._live_sessions) >= self._max_sessions)
 
     async def _serve(
         self,
@@ -337,6 +384,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         msg_fut: asyncio.Future | None = None
         out_fut: asyncio.Future | None = None
         turn = None
+        apology = None
 
         # Messages taken off msg_q while a turn runs, ahead of anything still queued.
         backlog: collections.deque[pb.GatewayMessage | None] = collections.deque()
@@ -346,6 +394,10 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         # not again by each later turn (which would discard the next utterance's audio as
         # "trailing frames").
         held: collections.deque[pb.GatewayMessage] = collections.deque()
+        # Audio bytes held for the utterance being collected behind the last deferred
+        # speech_ended; capped like session.push_audio so a flood can't pile up in memory
+        # while a slow turn runs.
+        held_audio_bytes = 0
         turn_stream: AsyncGenerator | None = None
 
         async def _turn_responses(turn: AsyncIterator) -> AsyncGenerator:
@@ -458,8 +510,13 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     cancelled             = False
                     stt_sent              = False
                     end_call_requested    = False
+                    end_call_without_audio = False
                     end_call_grace_period = 0
                     turn_transfer         = None
+                    # Audio seen while no utterance is deferred yet: the next utterance's own
+                    # frames if a speech_ended follows, trailing frames of this one if not.
+                    pre_audio: collections.deque[pb.GatewayMessage] = collections.deque()
+                    pre_audio_bytes = 0
 
                     # Keep the inner turn: teardown must aclose() it (not only the wrapper) so the
                     # pipeline's GeneratorExit handler records the interrupted turn.
@@ -473,16 +530,29 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             pending = backlog.popleft() if backlog else msg_q.get_nowait()
                             if pending is None:
                                 # Stream ended during pipeline — stop generating.
-                                await session.cancel()
+                                await session.cancel(hanging_up=True)
                                 cancelled = True
+                                pre_audio.clear()
+                                pre_audio_bytes = 0
                                 backlog.appendleft(None)  # so outer loop exits
                                 break
                             pcase = pending.WhichOneof("payload")
+                            if not held:
+                                held_audio_bytes = 0
                             if held and pcase != "cancel_generation":
+                                if pcase == "audio_chunk":
+                                    if held_audio_bytes >= MAX_UTTERANCE_BYTES:
+                                        continue  # over the utterance cap: dropped, as push_audio would
+                                    held_audio_bytes += len(pending.audio_chunk.payload)
+                                elif pcase == "speech_ended":
+                                    held_audio_bytes = 0  # the next utterance starts
                                 held.append(pending)
                             elif pcase == "cancel_generation":
                                 await session.cancel()
                                 cancelled = True
+                                # Frames from before the cancel are not part of the barge-in.
+                                pre_audio.clear()
+                                pre_audio_bytes = 0
                                 # Ack now so C++ leaves BargeIn without waiting for
                                 # the 500 ms barge_in_window; don't break — let the
                                 # generator exhaust to release pipeline resources.
@@ -490,6 +560,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     cancel_ack=pb.CancelAck(
                                         session_id=sid,
                                         trace_id=pending.cancel_generation.trace_id,
+                                        cancel_id=_cancel_id(pending.cancel_generation),
                                     )
                                 )
                             elif pcase == "playback_finished":
@@ -498,7 +569,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     "Converse: playback_finished interrupted=%s (in-pipeline) session=%s",
                                     pf.interrupted, sid,
                                 )
-                                session.on_playback_finished(pf.interrupted)
+                                session.on_playback_finished(
+                                    pf.interrupted, pf.played_bytes if pf.HasField("played_bytes") else None,
+                                )
                                 if pending_transfer is not None:
                                     tr, pending_transfer = pending_transfer, None
                                     out = _consume_pending_transfer(tr, pf.interrupted, sid)
@@ -515,14 +588,20 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                         trace_id=pending.audio_chunk.trace_id,
                                     )
                                 else:
-                                    # Trailing frames of the utterance already being
-                                    # processed — safe to discard.
-                                    log.debug(
-                                        "Discarding trailing audio_chunk in pipeline session=%s", sid,
-                                    )
+                                    # Either trailing frames of this utterance or the start of the
+                                    # next one; only a following speech_ended tells which.
+                                    # Bounded to one utterance so a long turn cannot grow it.
+                                    pre_audio.append(pending)
+                                    pre_audio_bytes += len(pending.audio_chunk.payload)
+                                    while pre_audio_bytes > MAX_UTTERANCE_BYTES and pre_audio:
+                                        pre_audio_bytes -= len(
+                                            pre_audio.popleft().audio_chunk.payload)
                             elif pcase == "speech_ended":
                                 # New utterance while this turn's pipeline still runs —
-                                # leave it for the outer loop.
+                                # leave it for the outer loop, with the audio sent before it.
+                                held.extend(pre_audio)
+                                pre_audio.clear()
+                                pre_audio_bytes = 0
                                 held.append(pending)
                             elif pcase in (
                                 "transfer_initiated", "transfer_completed", "transfer_failed",
@@ -542,6 +621,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         if not cancelled:
                             if response.end_call:
                                 end_call_requested    = True
+                                end_call_without_audio = response.end_call_without_audio
                                 end_call_grace_period = response.end_call_grace_period_ms
                             if response.transfer_request:
                                 tr = response.transfer_request
@@ -575,14 +655,16 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             # Stream TTS chunks as each sentence is synthesized —
                             # advances C++ FSM Thinking→Synthesizing→Speaking so
                             # barge-in detection works during playback.
-                            if response.tts_payloads:
-                                # A filler replays from cache even while TTS is down, so it is not the goodbye.
-                                audio_sent = audio_sent or not response.filler
+                            if any(response.tts_payloads):
+                                audio_sent = audio_sent or _is_reply_audio(response)
                                 if not tts_started_sent:
                                     yield pb.ServiceMessage(
                                         tts_started=pb.TtsStarted(session_id=sid)
                                     )
                                     tts_started_sent = True
+                                # Past the cancel drain: the chunk below is what the caller is sent.
+                                if response.on_sent is not None:
+                                    response.on_sent()
                                 for payload_bytes in response.tts_payloads:
                                     tts_seq += 1
                                     yield pb.ServiceMessage(
@@ -648,6 +730,19 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 grace_period_ms=end_call_grace_period,
                             )
                         )
+                    elif end_call_requested and end_call_without_audio and not cancelled:
+                        # The max-duration cap fires even when nothing played; the gateway enters the end-call
+                        # grace period, where the caller can still cancel by speaking.
+                        log.warning(
+                            "Converse: max-duration EndCall with no audio session=%s", sid,
+                        )
+                        yield pb.ServiceMessage(
+                            end_call=pb.EndCall(
+                                session_id=sid,
+                                reason="max_duration_no_audio",
+                                grace_period_ms=end_call_grace_period,
+                            )
+                        )
                     elif end_call_requested and not cancelled:
                         log.warning(
                             "Converse: end-call marker detected but turn produced no "
@@ -684,6 +779,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         cancel_ack=pb.CancelAck(
                             session_id=sid,
                             trace_id=msg.cancel_generation.trace_id,
+                            cancel_id=_cancel_id(msg.cancel_generation),
                         )
                     )
 
@@ -691,7 +787,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     pf = msg.playback_finished
                     log.info("Converse: playback_finished interrupted=%s session=%s",
                              pf.interrupted, sid)
-                    session.on_playback_finished(pf.interrupted)
+                    session.on_playback_finished(
+                        pf.interrupted, pf.played_bytes if pf.HasField("played_bytes") else None,
+                    )
                     if pending_transfer is not None:
                         tr, pending_transfer = pending_transfer, None
                         out = _consume_pending_transfer(tr, pf.interrupted, sid)
@@ -720,6 +818,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                              "duration_ms=%d session=%s",
                              tc.destination, tc.transfer_id, duration_ms, sid)
                     result = await session.on_transfer_completed(tc.destination, tc.transfer_id)
+                    if result is None:
+                        continue  # no transfer was pending; ignored
                     log.info(
                         "Converse: conversation_finalized session=%s summary_generated=%s "
                         "transcript_written=%s status=%s",
@@ -747,12 +847,15 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                              tf.destination, tf.reason, tf.transfer_id, duration_ms, sid)
 
                     tf_tts_started_sent = False
-                    async for response in session.on_transfer_failed(tf.destination, tf.reason,
-                                                                     tf.transfer_id):
+                    # Kept for teardown, like the turn: its aclose() persists an apology cut short by a hangup.
+                    apology = session.on_transfer_failed(tf.destination, tf.reason, tf.transfer_id)
+                    async for response in apology:
                         if response.tts_payloads:
                             if not tf_tts_started_sent:
                                 yield pb.ServiceMessage(tts_started=pb.TtsStarted(session_id=sid))
                                 tf_tts_started_sent = True
+                            if response.on_sent is not None:
+                                response.on_sent()
                             for payload_bytes in response.tts_payloads:
                                 tts_seq += 1
                                 yield pb.ServiceMessage(
@@ -815,6 +918,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             # A hangup abandons the turn at a yield; close it so the pipeline persists the turn before close().
             if turn is not None:
                 await turn.aclose()
+            if apology is not None:
+                await apology.aclose()
             await session.close("stream_ended")
             # Drain the bus before stopping so SessionEnded and other close-path
             # events are delivered to subscribers.
