@@ -333,7 +333,11 @@ async def get_agent_call_stats(tenant_slug: str) -> list[dict[str, Any]]:
                 ) AS finished,
                 COUNT(*) FILTER (
                     WHERE c.direction IS DISTINCT FROM 'test' AND c.ended_at IS NOT NULL AND c.close_reason = ANY($3)
-                ) AS failed
+                ) AS failed,
+                -- Same rule as the dashboard: a handoff is a transfer a person actually took.
+                COUNT(*) FILTER (
+                    WHERE c.direction IS DISTINCT FROM 'test' AND c.ended_at IS NOT NULL AND c.close_reason = 'TRANSFER_SUCCESS'
+                ) AS handoffs
             FROM calls c
             -- A call counts once for the agent that took it and once for the agent that answered after a
             -- handoff; the answering agent only counts when it belongs to the call's own tenant.

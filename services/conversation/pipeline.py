@@ -1193,7 +1193,8 @@ class PipelineConversationHandler:
         try:
             while True:
                 if items.empty():
-                    # Race the queue against the cancel so a model stalled before its first token ends with it.
+                    # A stalled model/tool must not outlive a barge-in: leave the loop so the
+                    # cleanup below (abandon_end/abandon_transfer, history pop) runs.
                     getter = asyncio.ensure_future(items.get())
                     try:
                         await asyncio.wait({getter, cancel_wait}, return_when=asyncio.FIRST_COMPLETED)
@@ -1234,11 +1235,11 @@ class PipelineConversationHandler:
                 if cancel_event.is_set():
                     break
         finally:
+            cancel_wait.cancel()
             # Stop the model/voice task without awaiting it: awaiting here could swallow a cancellation aimed
             # at this turn itself. The callback reads its outcome so nothing is logged as never retrieved.
             producer.cancel()
             producer.add_done_callback(lambda task: task.cancelled() or task.exception())
-            cancel_wait.cancel()
         # Read after the stream: the guard may have removed a marker yielded mid-stream.
         end_call = any(isinstance(d, EndCallDirective) for d in directives)
 
@@ -1296,10 +1297,8 @@ class PipelineConversationHandler:
             self._trim_history(session_id)
         else:
             # Barge-in, cancel, or LLM failure: remove the unpaired user message
-            # so history stays consistent for the next turn's LLM context. A reply that failed TTS in full keeps it:
-            # the caller did speak, and the transcript holds that turn.
-            reply_failed_tts = not cancelled and full_response and unspoken and not assistant_text
-            if history and history[-1].role == "user" and not reply_failed_tts:
+            # so history stays consistent for the next turn's LLM context.
+            if history and history[-1].role == "user":
                 history.pop()
 
         if self._transcripts is not None:

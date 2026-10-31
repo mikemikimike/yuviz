@@ -807,8 +807,11 @@ async def _run_steps(
 
         try:
             effective_url = api_row["endpoint_url"]
-            if api_row["endpoint_base_source"] == "oauth_connection":
-                api_base = await oauth.connection_api_base(tenant_id, api_row["oauth_connection_id"])
+            if api_row["endpoint_base_source"] in ("oauth_connection", "zoho_desk"):
+                api_base = oauth.row_api_base(
+                    api_row["endpoint_base_source"],
+                    await oauth.connection_api_base(tenant_id, api_row["oauth_connection_id"]),
+                )
                 if api_base is None:
                     raise _StepFailure("unavailable", "reconnect_required")
                 effective_url = api_base + api_row["endpoint_url"]
