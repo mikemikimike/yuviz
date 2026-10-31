@@ -46,12 +46,13 @@ _MAX_SESSION_ID_LEN = 128
 _INTERNAL_MESSAGE = "internal error"
 _REJECTED_MESSAGE = "call rejected"
 
-# UNSPECIFIED is a non-gateway client: webcall, vobiz, tests.
+
 def _valid_session_id(sid: str) -> bool:
     """1..128 printable characters, not all whitespace (str.isprintable() rejects NUL and other controls)."""
     return 0 < len(sid) <= _MAX_SESSION_ID_LEN and sid.isprintable() and bool(sid.strip())
 
 
+# UNSPECIFIED is a non-gateway client: webcall, vobiz, tests.
 _ROUTING_STATUS = {
     pb.ROUTING_STATUS_UNSPECIFIED: RoutingStatus.UNSPECIFIED,
     pb.ROUTING_STATUS_ROUTED:      RoutingStatus.ROUTED,
