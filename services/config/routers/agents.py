@@ -294,7 +294,14 @@ async def transcribe_voice_input(
     if declared and declared.isdigit() and int(declared) > voice_input.MAX_CLIP_BYTES:
         raise HTTPException(status_code=413, detail="the recording is too long; keep it under a minute")
     request.app.state.agent_assist_throttle.check_voice(str(tenant["id"]))
-    audio = await request.body()
+    chunks = []
+    total_size = 0
+    async for chunk in request.stream():
+        total_size += len(chunk)
+        if total_size > voice_input.MAX_CLIP_BYTES:
+            raise HTTPException(status_code=413, detail="the recording is too long; keep it under a minute")
+        chunks.append(chunk)
+    audio = b"".join(chunks)
     try:
         return await voice_input.transcribe_clip(
             tenant, agent, audio, request.headers.get("content-type", ""), secret_resolver=_secret_resolver,

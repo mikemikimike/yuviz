@@ -215,6 +215,8 @@ def _validate_temperature(option: AiOption, temperature: float | None) -> float 
         raise ValueError("temperature applies to language models only")
     if not 0.0 <= temperature <= 1.2:
         raise ValueError("temperature must be between 0 and 1.2")
+    if option.engine == "anthropic" and any(option.model.startswith(m) for m in ("claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-mythos-5", "claude-opus-4-8", "claude-opus-4-7")):
+        raise ValueError(f"{option.model} does not accept temperature; it thinks adaptively")
     return round(float(temperature), 2)
 
 

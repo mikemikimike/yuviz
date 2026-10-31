@@ -119,7 +119,10 @@ async def transcribe_clip(
             raise VoiceInputUnavailable(
                 "voice typing needs a cloud hearing model, and none is set up on this platform for these languages"
             )
-    key = await secret_resolver.resolve(cfg["api_key_ref"])
+    try:
+        key = await secret_resolver.resolve(cfg["api_key_ref"])
+    except (KeyError, ValueError) as exc:
+        raise VoiceInputUnavailable("hearing model credentials not available") from exc
     try:
         text = await _ENGINES[cfg["engine"]](cfg, key, audio, content_type, langs)
     except httpx.RequestError as exc:

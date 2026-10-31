@@ -38,6 +38,8 @@ _FLUSH_TIMEOUT_S = 1.5
 # Sarvam has no keepalive message; silence is sent so an idle connection survives long agent replies.
 _KEEPALIVE_INTERVAL_S = 8.0
 _KEEPALIVE_MS = 100
+# Reconnect cooldown after a failed connection attempt, to prevent storms.
+_RECONNECT_COOLDOWN_S = 0.5
 
 
 def _language_code(language: str | None) -> str:
@@ -111,6 +113,7 @@ class SarvamSTT:
         self._ws_connect = websockets.connect
         self._streams: dict[str, _LiveStream] = {}
         self._open_locks: dict[str, asyncio.Lock] = {}
+        self._failed_connects: dict[str, float] = {}
         log.info("SarvamSTT model=%s language=%s mode=%s", model, language, self._mode)
 
     def _effective_language(self, language: Any) -> str:
@@ -188,6 +191,10 @@ class SarvamSTT:
                 await self._close_socket(stream)
                 stream = None
             if stream is None:
+                failed_at = self._failed_connects.get(session_id)
+                if failed_at is not None and time.monotonic() - failed_at < _RECONNECT_COOLDOWN_S:
+                    return None
+                self._failed_connects.pop(session_id, None)
                 started = time.monotonic()
                 try:
                     ws = await self._ws_connect(
@@ -196,6 +203,7 @@ class SarvamSTT:
                     )
                 except Exception:
                     log.exception("SarvamSTT: failed to open live stream session=%s", session_id)
+                    self._failed_connects[session_id] = time.monotonic()
                     return None
                 stream = _LiveStream(ws, language, sample_rate)
                 if self._open_locks.get(session_id) is not lock:
@@ -264,6 +272,8 @@ class SarvamSTT:
                 await asyncio.wait_for(stream.got_data.wait(), timeout=_FLUSH_TIMEOUT_S)
             except asyncio.TimeoutError:
                 log.warning("SarvamSTT: no transcript within %.1fs of flush session=%s", _FLUSH_TIMEOUT_S, session_id)
+                self._evict_stream(session_id, stream)
+                return await self._transcribe_buffered(audio, sample_rate, language)
             except Exception:
                 log.exception("SarvamSTT: flush failed session=%s", session_id)
                 self._evict_stream(session_id, stream)
@@ -302,6 +312,7 @@ class SarvamSTT:
 
     async def cancel_stream(self, session_id: str) -> None:
         self._open_locks.pop(session_id, None)
+        self._failed_connects.pop(session_id, None)
         stream = self._streams.pop(session_id, None)
         if stream is None:
             return
