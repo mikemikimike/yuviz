@@ -1742,11 +1742,11 @@ class PipelineConversationHandler:
                             yield _FILLER, chunk, end_call
                     continue
                 token = item
-                result = DirectiveParser.parse(stream_buf.feed(token))
+                result = DirectiveParser.parse(stream_buf.feed(token), strip_markdown=False)
                 directives.extend(result.directives)
                 text_buffer += result.clean_text
                 reply_text += result.clean_text
-                spoke = spoke or bool(result.clean_text.strip())
+                spoke = spoke or bool(strip_markdown_chars(result.clean_text).strip())
                 end_call = any(isinstance(d, EndCallDirective) for d in directives)
                 if result.directives:
                     for d in result.directives:
@@ -1787,6 +1787,7 @@ class PipelineConversationHandler:
         tail = stream_buf.flush()
         text_buffer += tail
         reply_text += tail
+        reply_text = strip_markdown_chars(reply_text)   # whole reply, so the checks below see what is spoken
 
         end_call_rejected = False
         if not cancel_event.is_set() and any(isinstance(d, EndCallDirective) for d in directives):
@@ -1807,7 +1808,7 @@ class PipelineConversationHandler:
                 log.info("end_call_rejected reason=%s session=%s", rejection, session_id)
 
         end_call = any(isinstance(d, EndCallDirective) for d in directives)
-        if text_buffer.strip() and not cancel_event.is_set():
+        if strip_markdown_chars(text_buffer).strip() and not cancel_event.is_set():
             async for chunk in self._synthesize_sentence_stream(text_buffer.strip(), session_id, in_reply=True):
                 yield "", chunk, end_call
         elif not spoke and not directives and not cancel_event.is_set() and not self._ending_or_transferring(session_id):
@@ -1972,7 +1973,6 @@ class PipelineConversationHandler:
         the process (pin_phrases) to do so. `language` forces one, for prewarming a language the session has not
         switched to yet. in_reply=True marks text that is part of the turn's stored reply: if its TTS
         produces no audio it is left out of the transcript and history."""
-        sentence = text
         # Every text source reaches TTS here, so strip markdown once for all of them.
         text = strip_markdown_chars(text)
         language = language or self._session_language(session_id) or self._tts_fixed_language
@@ -2017,11 +2017,11 @@ class PipelineConversationHandler:
             if not got_audio:
                 log.warning("TTS produced no audio chars=%d session=%s", len(text), session_id)
                 if in_reply:
-                    self._session(session_id).unspoken_sentences.append(sentence)
+                    self._session(session_id).unspoken_sentences.append(text)
         except Exception:
             log.exception("TTS streaming failed chars=%d session=%s", len(text), session_id)
             if in_reply and not got_audio:
-                self._session(session_id).unspoken_sentences.append(sentence)
+                self._session(session_id).unspoken_sentences.append(text)
         finally:
             if cache:
                 phrase_audio.finish(tts, key, flight, collected if complete else None)
