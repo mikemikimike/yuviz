@@ -1119,8 +1119,22 @@ class PipelineConversationHandler:
 
         producer = asyncio.create_task(_produce())
         try:
+            cancel_wait = asyncio.ensure_future(cancel_event.wait())
             while True:
-                item = await items.get()
+                if items.empty():
+                    # A stalled model/tool must not outlive a barge-in: leave the loop so the
+                    # cleanup below (abandon_end/abandon_transfer, history pop) runs.
+                    getter = asyncio.ensure_future(items.get())
+                    try:
+                        await asyncio.wait({getter, cancel_wait}, return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        if not getter.done():
+                            getter.cancel()
+                    if not getter.done() or getter.cancelled():
+                        break
+                    item = getter.result()
+                else:
+                    item = items.get_nowait()
                 if item is _STREAM_END:
                     break
                 if isinstance(item, Exception):
@@ -1141,6 +1155,7 @@ class PipelineConversationHandler:
                 if cancel_event.is_set():
                     break
         finally:
+            cancel_wait.cancel()
             # Stop the model/voice task without awaiting it: awaiting here could swallow a cancellation aimed
             # at this turn itself. The callback reads its outcome so nothing is logged as never retrieved.
             producer.cancel()
