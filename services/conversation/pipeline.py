@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -408,13 +409,6 @@ class _FillerText(str):
 
 
 _FILLER = _FillerText("")
-
-
-class _TimeoutMarker(str):
-    """Clear queued partial tokens before the timeout apology is recorded."""
-
-
-_LLM_TIMEOUT_MARKER = _TimeoutMarker("")
 
 
 class _FillerDue:
@@ -1225,9 +1219,6 @@ class PipelineConversationHandler:
                         log.error("LLM/TTS pipeline failed session=%s", session_id, exc_info=item)
                     break
                 chunk, tts_audio, _marker_seen = item
-                if chunk is _LLM_TIMEOUT_MARKER:
-                    full_response.clear()
-                    continue
                 now = time.monotonic()
                 if first_token_at is None:
                     first_token_at = now
@@ -1797,109 +1788,100 @@ class PipelineConversationHandler:
         spoke = False  # any reply speech this turn; a filler does not count
         first_piece_sent = False  # the reply's first sentence or clause has gone to TTS
         try:
-            async for item in _with_filler_timer(
+            timed = _with_filler_timer(
                 self._token_stream(
                     history, session_id, cancel_event, tool_calls_made, store, carry_taint, turn_context,
                 ),
                 _filler_delay_s(), arm_first=first_turn_filler,
-            ):
-                if cancel_event.is_set():
-                    self._workflow.pending_speech = None
-                    break
-                if isinstance(item, LocalToolCompletedEvent):
-                    speech = self._workflow.pending_speech
-                    if speech:
+            )
+            async with aclosing(timed):
+                async for item in timed:
+                    if cancel_event.is_set():
                         self._workflow.pending_speech = None
-                        spoke = True
-                        transition_text += f"{speech} "
-                        # Yield text once so full_response/history/transcript record it.
-                        first = True
-                        async for chunk in self._synthesize_sentence_stream(speech, session_id):
-                            yield speech if first else "", chunk, end_call
-                            first = False
-                    continue
-                if isinstance(item, ToolCallStartedEvent):
-                    continue  # the filler, if any, comes as a _FillerDue when the wait runs long
-                if isinstance(item, _FillerDue):
-                    if item.tool_name == _FIRST_TURN:
-                        # Counts toward the gap, so a tool call right after doesn't add a second filler.
-                        self._session(session_id).tool_call_filler_last_spoken = time.monotonic()
-                        phrase = self._first_turn_filler(session_id)
-                        async for chunk in self._synthesize_sentence_stream(phrase, session_id, cache=True):
-                            yield _FILLER, chunk, end_call
-                        log.info("First-turn filler spoken phrase=%r session=%s", phrase, session_id)
-                        continue
-                    now = time.monotonic()
-                    state = self._session(session_id)
-                    last_spoken = state.tool_call_filler_last_spoken
-                    if last_spoken is None or (now - last_spoken) >= _TOOL_CALL_FILLER_MIN_GAP_S:
-                        state.tool_call_filler_last_spoken = now
-                        average_ms = (
-                            self._latency_store.average_ms(self._tenant_id, self._agent_id or "", item.tool_name)
-                            if self._latency_store is not None else None
-                        )
-                        phrase = self._filler_selector.select_tool_filler(
-                            item.tool_name, state.tool_call_filler_last_phrase, average_ms,
-                            **({"language": self._spoken_language(session_id)}
-                               if self._spoken_language(session_id) != "en" else {}),
-                        )
-                        state.tool_call_filler_last_phrase = phrase
-                        any_filler_chunk = False
-                        async for chunk in self._synthesize_sentence_stream(phrase, session_id, cache=True):
-                            if not any_filler_chunk:
-                                any_filler_chunk = True
-                                log.info(
-                                    "Tool-call filler spoken tool=%s phrase=%r session=%s",
-                                    item.tool_name, phrase, session_id,
-                                )
-                            yield _FILLER, chunk, end_call
-                    continue
-                token = item
-                result = DirectiveParser.parse(stream_buf.feed(token))
-                directives.extend(result.directives)
-                text_buffer += result.clean_text
-                reply_text += result.clean_text
-                spoke = spoke or bool(result.clean_text.strip())
-                end_call = any(isinstance(d, EndCallDirective) for d in directives)
-                if result.directives:
-                    for d in result.directives:
-                        if isinstance(d, EndCallDirective):
-                            log.info("End-call marker detected session=%s", session_id)
-                yield token, b"", end_call
-
-                # Split on sentence boundaries and synthesise each complete sentence.
-                while True:
-                    parts = _SENTENCE_RE.split(text_buffer, maxsplit=1)
-                    if len(parts) < 2:
                         break
-                    sentence, text_buffer = parts[0].strip(), parts[1]
-                    if sentence:
-                        first_piece_sent = True
-                        async for chunk in self._synthesize_sentence_stream(sentence, session_id, in_reply=True):
-                            yield "", chunk, end_call
-                # Nothing spoken yet and the first sentence is still open: start on its first clause.
-                if not first_piece_sent:
-                    for match in _CLAUSE_RE.finditer(text_buffer):
-                        clause = text_buffer[:match.start()].strip()
-                        if len(clause) >= _FIRST_CLAUSE_MIN_CHARS:
-                            text_buffer = text_buffer[match.end():]
-                            first_piece_sent = True
-                            async for chunk in self._synthesize_sentence_stream(clause, session_id, in_reply=True):
-                                yield "", chunk, end_call
+                    if isinstance(item, LocalToolCompletedEvent):
+                        speech = self._workflow.pending_speech
+                        if speech:
+                            self._workflow.pending_speech = None
+                            spoke = True
+                            transition_text += f"{speech} "
+                            # Yield text once so full_response/history/transcript record it.
+                            first = True
+                            async for chunk in self._synthesize_sentence_stream(speech, session_id):
+                                yield speech if first else "", chunk, end_call
+                                first = False
+                        continue
+                    if isinstance(item, ToolCallStartedEvent):
+                        continue  # the filler, if any, comes as a _FillerDue when the wait runs long
+                    if isinstance(item, _FillerDue):
+                        if item.tool_name == _FIRST_TURN:
+                            # Counts toward the gap, so a tool call right after doesn't add a second filler.
+                            self._session(session_id).tool_call_filler_last_spoken = time.monotonic()
+                            phrase = self._first_turn_filler(session_id)
+                            async for chunk in self._synthesize_sentence_stream(phrase, session_id, cache=True):
+                                yield _FILLER, chunk, end_call
+                            log.info("First-turn filler spoken phrase=%r session=%s", phrase, session_id)
+                            continue
+                        now = time.monotonic()
+                        state = self._session(session_id)
+                        last_spoken = state.tool_call_filler_last_spoken
+                        if last_spoken is None or (now - last_spoken) >= _TOOL_CALL_FILLER_MIN_GAP_S:
+                            state.tool_call_filler_last_spoken = now
+                            average_ms = (
+                                self._latency_store.average_ms(self._tenant_id, self._agent_id or "", item.tool_name)
+                                if self._latency_store is not None else None
+                            )
+                            phrase = self._filler_selector.select_tool_filler(
+                                item.tool_name, state.tool_call_filler_last_phrase, average_ms,
+                                **({"language": self._spoken_language(session_id)}
+                                   if self._spoken_language(session_id) != "en" else {}),
+                            )
+                            state.tool_call_filler_last_phrase = phrase
+                            any_filler_chunk = False
+                            async for chunk in self._synthesize_sentence_stream(phrase, session_id, cache=True):
+                                if not any_filler_chunk:
+                                    any_filler_chunk = True
+                                    log.info(
+                                        "Tool-call filler spoken tool=%s phrase=%r session=%s",
+                                        item.tool_name, phrase, session_id,
+                                    )
+                                yield _FILLER, chunk, end_call
+                        continue
+                    token = item
+                    result = DirectiveParser.parse(stream_buf.feed(token))
+                    directives.extend(result.directives)
+                    text_buffer += result.clean_text
+                    reply_text += result.clean_text
+                    spoke = spoke or bool(result.clean_text.strip())
+                    end_call = any(isinstance(d, EndCallDirective) for d in directives)
+                    if result.directives:
+                        for d in result.directives:
+                            if isinstance(d, EndCallDirective):
+                                log.info("End-call marker detected session=%s", session_id)
+                    yield token, b"", end_call
+
+                    # Split on sentence boundaries and synthesise each complete sentence.
+                    while True:
+                        parts = _SENTENCE_RE.split(text_buffer, maxsplit=1)
+                        if len(parts) < 2:
                             break
-        except Exception as exc:
-            if isinstance(exc, LlmResponseTimeout):
-                log.warning("LLM response deadline expired before first output session=%s", session_id)
-                text_buffer = ""
-                reply_text = ""
-                transition_text = ""
-                stream_buf = StreamBuffer()
-                directives.clear()
-                spoke = False
-                first_piece_sent = False
-                yield _LLM_TIMEOUT_MARKER, b"", False
-            else:
-                log.exception("LLM streaming failed session=%s", session_id)
+                        sentence, text_buffer = parts[0].strip(), parts[1]
+                        if sentence:
+                            first_piece_sent = True
+                            async for chunk in self._synthesize_sentence_stream(sentence, session_id, in_reply=True):
+                                yield "", chunk, end_call
+                    # Nothing spoken yet and the first sentence is still open: start on its first clause.
+                    if not first_piece_sent:
+                        for match in _CLAUSE_RE.finditer(text_buffer):
+                            clause = text_buffer[:match.start()].strip()
+                            if len(clause) >= _FIRST_CLAUSE_MIN_CHARS:
+                                text_buffer = text_buffer[match.end():]
+                                first_piece_sent = True
+                                async for chunk in self._synthesize_sentence_stream(clause, session_id, in_reply=True):
+                                    yield "", chunk, end_call
+                                break
+        except Exception:
+            log.exception("LLM streaming failed session=%s", session_id)
             if not cancel_event.is_set():
                 spoke = True
                 fallback_text = t("fallback_llm_error", self._spoken_language(session_id))

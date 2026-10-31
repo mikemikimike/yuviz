@@ -3985,6 +3985,73 @@ async def test_timeout_persists_tool_outcome_folded_during_stream_cancellation()
 
 
 @pytest.mark.asyncio
+async def test_timeout_during_tool_filler_persists_unknown_outcome(monkeypatch):
+    """A cancelled filler closes the tool stream before the turn merges its history."""
+    import json
+    from ..tools.executor_registry import ExecutorRegistry
+    from ..tools.llm_adapter import LLMAdapter, ToolCallEvent
+    from ..tools.orchestrator import ToolCallOrchestrator
+    from ..tools.types import ToolResult, ToolStatus
+    from .test_tool_call_orchestrator import (
+        _FakePolicyResolver, _FakeProviderManager, _ScriptedLLM, _policy,
+    )
+
+    monkeypatch.setenv("VOICEAI_FILLER_DELAY_MS", "20")
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    filler_started = asyncio.Event()
+    calls = []
+
+    class _BlockingExecutor:
+        async def execute(self, _request):
+            calls.append(_request)
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+            return ToolResult(status=ToolStatus.SUCCESS, payload={"booked": True})
+
+    llm = _ScriptedLLM([[ToolCallEvent(
+        tool_call_id="c1", tool_name="execute_api", arguments={"api_name": "x"},
+    )]])
+    registry = ExecutorRegistry()
+    registry.register("execute_api", lambda _provider: _BlockingExecutor())
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm), policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(), executor_registry=registry,
+    )
+    tts = _make_tts(b"\x00" * 640)
+    fallback = t("fallback_llm_error", "en")
+
+    async def synthesize(text, _rate):
+        if text != fallback:
+            filler_started.set()
+            await asyncio.sleep(0.5)
+        return b"\x00" * 640
+
+    tts.synthesize.side_effect = synthesize
+    handler = _make_handler(
+        _make_stt("book it"), _make_llm(["unused"]), tts,
+        tool_orchestrator=orchestrator, llm_timeout_ms=200,
+    )
+    handler._session("s1").first_turn_filler_spoken = True
+    try:
+        responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+        assert started.is_set() and filler_started.is_set() and cancelled.is_set()
+        assert len(calls) == 1
+        assert [r.response_text for r in responses if r.response_text] == [fallback]
+        tool_messages = [m for m in handler._get_history("s1") if m.role == "tool"]
+        assert len(tool_messages) == 1
+        assert json.loads(tool_messages[0].content)["error"]["code"] == "outcome_unknown"
+    finally:
+        release.set()
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
 async def test_filler_timer_bounds_nested_stream_close():
     """A stalled nested orchestrator cannot consume the timeout fallback budget."""
     class _CancellationResistantSource:
