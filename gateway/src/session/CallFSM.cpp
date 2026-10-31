@@ -7,7 +7,7 @@ namespace voiceai {
 
 // The only place that defines legal state changes; any (from, to) pair not
 // listed here is rejected at runtime and logged.
-static constexpr std::array<std::pair<CallFsmState, CallFsmState>, 35> kValidTransitions{{
+static constexpr std::array<std::pair<CallFsmState, CallFsmState>, 37> kValidTransitions{{
     // ── Happy path ─────────────────────────────────────────────────────────
     {CallFsmState::Idle,          CallFsmState::Connecting  },
     {CallFsmState::Connecting,    CallFsmState::Listening   },
@@ -18,6 +18,8 @@ static constexpr std::array<std::pair<CallFsmState, CallFsmState>, 35> kValidTra
     {CallFsmState::Speaking,      CallFsmState::Listening   },  // PlaybackFinished
     {CallFsmState::Speaking,      CallFsmState::WaitingForHangup}, // PlaybackFinished, EndCall pending
     {CallFsmState::Listening,     CallFsmState::WaitingForHangup}, // greeting played, EndCall pending
+    {CallFsmState::Thinking,      CallFsmState::WaitingForHangup}, // EndCall with no playback
+    {CallFsmState::Synthesizing,  CallFsmState::WaitingForHangup}, // EndCall with no playback
     {CallFsmState::WaitingForHangup, CallFsmState::Recognizing},  // SpeechStarted — caller cancelled hangup
     {CallFsmState::Speaking,      CallFsmState::BargeIn     },  // SpeechStarted during playback
     {CallFsmState::Thinking,      CallFsmState::BargeIn     },  // SpeechStarted before audio arrives
@@ -169,6 +171,26 @@ void CallFSM::on_playback_finished(bool interrupted, bool end_call_pending,
         transition(CallFsmState::Listening, "playback_finished");
     }
     if (handlers_.on_playback_finished) handlers_.on_playback_finished(false);
+}
+
+void CallFSM::on_end_call_without_playback(std::chrono::milliseconds goodbye_timeout_override) {
+    switch (state()) {
+    case CallFsmState::Listening:
+    case CallFsmState::Thinking:
+    case CallFsmState::Synthesizing:
+    case CallFsmState::Speaking:
+        break;
+    default:
+        logger_.warn("session={} EndCall with no playback ignored in state {}", session_id_,
+                     to_string(state()));
+        return;
+    }
+    logger_.info("session={} EndCall with no playback — entering grace period", session_id_);
+    const bool was_speaking = state() == CallFsmState::Speaking;
+    pending_goodbye_timeout_override_ = goodbye_timeout_override;
+    transition(CallFsmState::WaitingForHangup, "end_call_no_playback");
+    // Python has no WaitingForHangup; tell it the playback it was tracking is over.
+    if (was_speaking && handlers_.on_playback_finished) handlers_.on_playback_finished(false);
 }
 
 void CallFSM::on_cancel_complete() {

@@ -151,7 +151,8 @@ async def get_transcript(
 async def get_dashboard_stats(tenant_slug: str, *, hours: int = 24 * 30) -> dict[str, Any]:
     """Headline Dashboard numbers for one tenant over `hours`.
 
-    "success" = ended with turns and no TRANSFER_FAILED; live_calls ignores the window."""
+    "failed" = a failed-transfer or dropped close_reason (same as the calls page/export); turn_count is
+    not used, since flow-only calls legitimately have 0 turns. live_calls ignores the window."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(
@@ -164,11 +165,11 @@ async def get_dashboard_stats(tenant_slug: str, *, hours: int = 24 * 30) -> dict
             COUNT(*) FILTER (WHERE ended_at IS NULL) AS live_calls,
             COUNT(*) FILTER (
                 WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND ended_at IS NOT NULL
-                  AND turn_count > 0 AND close_reason IS DISTINCT FROM 'TRANSFER_FAILED'
+                  AND (close_reason IS NULL OR close_reason <> ALL($3))
             ) AS success_count,
             COUNT(*) FILTER (
                 WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND ended_at IS NOT NULL
-                  AND (turn_count = 0 OR close_reason = 'TRANSFER_FAILED')
+                  AND close_reason = ANY($3)
             ) AS failed_count,
             COUNT(*) FILTER (
                 WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND direction = 'inbound'
@@ -241,6 +242,7 @@ async def get_dashboard_stats(tenant_slug: str, *, hours: int = 24 * 30) -> dict
         FROM calls WHERE tenant_id = $1
         """,
             tenant_slug, hours,
+            [*_OUTCOME_REASONS["transfer_failed"], *_OUTCOME_REASONS["dropped"]],
         )
     d = dict(row)
     d["total_minutes"] = round(d.pop("total_duration_ms") / 60000, 2)
