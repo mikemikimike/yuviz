@@ -95,6 +95,10 @@ async def acquire_wait(tenant_id: str, agent_id: str, max_wait_s: float) -> bool
     """Like acquire(), but a run refused only by the concurrency cap queues (FIFO) for up to max_wait_s
     for a slot instead of failing at once. The per-minute cap is never waited on. Same release() contract."""
     key = (tenant_id, agent_id)
+    # Per-minute is hard: refuse at once, even behind queued runs.
+    _sweep(key, time.time())
+    if len(_run_timestamps[key]) >= _max_per_minute():
+        return False
     # Don't barge past runs already queued.
     outcome = "concurrent" if _waiters.get(key) else _try_admit(key)
     if outcome == "ok":

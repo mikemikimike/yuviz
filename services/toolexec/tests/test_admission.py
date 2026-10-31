@@ -228,3 +228,22 @@ async def test_handoff_respects_the_per_minute_cap(monkeypatch):
     admission.release(tenant_id, agent_id)
     assert await asyncio.wait_for(w, 1.0) is False
     assert admission._concurrent[(tenant_id, agent_id)] == admission._max_concurrent() - 1
+
+
+@pytest.mark.asyncio
+async def test_newcomer_behind_a_queued_waiter_is_refused_at_once_when_per_minute_is_full(monkeypatch):
+    import time as _t
+    tenant_id, agent_id = _fresh_ids()
+    monkeypatch.setenv("TOOLEXEC_MAX_RUNS_PER_MINUTE_PER_AGENT", str(admission._max_concurrent() + 1))
+    _fill(tenant_id, agent_id)
+    queued = asyncio.create_task(admission.acquire_wait(tenant_id, agent_id, 5.0))
+    await asyncio.sleep(0.01)
+    assert admission._waiters.get((tenant_id, agent_id))  # genuinely queued
+    admission._run_timestamps[(tenant_id, agent_id)].append(_t.time())  # window now full
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    assert await admission.acquire_wait(tenant_id, agent_id, 5.0) is False
+    assert loop.time() - t0 < 0.2
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
