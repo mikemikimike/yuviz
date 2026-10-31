@@ -63,6 +63,11 @@ _ROUTING_STATUS = {
 }
 
 
+def _cancel_id(cancel: "pb.CancelGeneration") -> int | None:
+    """The gateway's cancel id to echo in CancelAck, or None when it sent none."""
+    return cancel.cancel_id if cancel.HasField("cancel_id") else None
+
+
 def _is_reply_audio(response) -> bool:
     """True when the response carries non-empty reply audio; a filler replays from cache even while
     TTS is down, and a zero-byte payload is silence, so neither is the goodbye."""
@@ -361,6 +366,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         msg_fut: asyncio.Future | None = None
         out_fut: asyncio.Future | None = None
         turn = None
+        apology = None
 
         # Messages taken off msg_q while a turn runs, ahead of anything still queued.
         backlog: collections.deque[pb.GatewayMessage | None] = collections.deque()
@@ -506,7 +512,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             pending = backlog.popleft() if backlog else msg_q.get_nowait()
                             if pending is None:
                                 # Stream ended during pipeline — stop generating.
-                                await session.cancel()
+                                await session.cancel(hanging_up=True)
                                 cancelled = True
                                 pre_audio.clear()
                                 pre_audio_bytes = 0
@@ -536,6 +542,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     cancel_ack=pb.CancelAck(
                                         session_id=sid,
                                         trace_id=pending.cancel_generation.trace_id,
+                                        cancel_id=_cancel_id(pending.cancel_generation),
                                     )
                                 )
                             elif pcase == "playback_finished":
@@ -544,7 +551,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     "Converse: playback_finished interrupted=%s (in-pipeline) session=%s",
                                     pf.interrupted, sid,
                                 )
-                                session.on_playback_finished(pf.interrupted)
+                                session.on_playback_finished(
+                                    pf.interrupted, pf.played_bytes if pf.HasField("played_bytes") else None,
+                                )
                                 if pending_transfer is not None:
                                     tr, pending_transfer = pending_transfer, None
                                     out = _consume_pending_transfer(tr, pf.interrupted, sid)
@@ -635,6 +644,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                         tts_started=pb.TtsStarted(session_id=sid)
                                     )
                                     tts_started_sent = True
+                                # Past the cancel drain: the chunk below is what the caller is sent.
+                                if response.on_sent is not None:
+                                    response.on_sent()
                                 for payload_bytes in response.tts_payloads:
                                     tts_seq += 1
                                     yield pb.ServiceMessage(
@@ -749,6 +761,7 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                         cancel_ack=pb.CancelAck(
                             session_id=sid,
                             trace_id=msg.cancel_generation.trace_id,
+                            cancel_id=_cancel_id(msg.cancel_generation),
                         )
                     )
 
@@ -756,7 +769,9 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                     pf = msg.playback_finished
                     log.info("Converse: playback_finished interrupted=%s session=%s",
                              pf.interrupted, sid)
-                    session.on_playback_finished(pf.interrupted)
+                    session.on_playback_finished(
+                        pf.interrupted, pf.played_bytes if pf.HasField("played_bytes") else None,
+                    )
                     if pending_transfer is not None:
                         tr, pending_transfer = pending_transfer, None
                         out = _consume_pending_transfer(tr, pf.interrupted, sid)
@@ -814,12 +829,15 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                              tf.destination, tf.reason, tf.transfer_id, duration_ms, sid)
 
                     tf_tts_started_sent = False
-                    async for response in session.on_transfer_failed(tf.destination, tf.reason,
-                                                                     tf.transfer_id):
+                    # Kept for teardown, like the turn: its aclose() persists an apology cut short by a hangup.
+                    apology = session.on_transfer_failed(tf.destination, tf.reason, tf.transfer_id)
+                    async for response in apology:
                         if response.tts_payloads:
                             if not tf_tts_started_sent:
                                 yield pb.ServiceMessage(tts_started=pb.TtsStarted(session_id=sid))
                                 tf_tts_started_sent = True
+                            if response.on_sent is not None:
+                                response.on_sent()
                             for payload_bytes in response.tts_payloads:
                                 tts_seq += 1
                                 yield pb.ServiceMessage(
@@ -882,6 +900,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             # A hangup abandons the turn at a yield; close it so the pipeline persists the turn before close().
             if turn is not None:
                 await turn.aclose()
+            if apology is not None:
+                await apology.aclose()
             await session.close("stream_ended")
             # Drain the bus before stopping so SessionEnded and other close-path
             # events are delivered to subscribers.
