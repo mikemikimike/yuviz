@@ -46,6 +46,7 @@ _DYNAMIC_READS = {
     ("services/config/email.py", "name"): set(),
     ("services/conversation/pipeline_config.py", "key"): set(),
     ("services/conversation/language.py", "name"): set(),
+    ("services/conversation/providers/http_pool.py", "name"): set(),
     # env:NAME secret refs: the name comes from a provider config, not code.
     ("libs/config_sdk/secret_resolver.py", "key"): set(),
     # Platform-managed AI: each catalogue option names the root .env key it runs on.
